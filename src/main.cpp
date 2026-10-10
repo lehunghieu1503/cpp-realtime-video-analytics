@@ -169,6 +169,10 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
   sseConfig.staticDir = "web/";
   SseServer sseServer(sseConfig);
   sseServer.start();
+  if (!sseServer.isRunning()) {
+    pipeline.stop();
+    return -1;
+  }
 
   std::cout << "Pipeline running. Press "
             << (headless ? "Ctrl+C" : "'q' or Ctrl+C") << " to stop.\n";
