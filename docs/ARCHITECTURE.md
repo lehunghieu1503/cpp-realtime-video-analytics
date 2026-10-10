@@ -105,7 +105,7 @@ auto item = queue.tryPopFor(timeout_ms); // Timed wait
 |-------|:---:|-----------|
 | 📥 **Frame Queue** | `8` | A deliberately tiny buffer between capture and inference ensures only the latest frames enter processing. |
 | 📤 **Result Queue** | `16` | A slightly larger buffer to absorb timing jitter between fast inference completions and slower SSE network flushes. |
-| 📊 **Benchmark Mode** | `maxFrames + 10` | Disables dropping. Forces the pipeline to process and evaluate *every* frame for accurate benchmarking. |
+| 📊 **Benchmark Mode** | `2 × workers` | Disables dropping: the capture thread waits for room in the frame queue, so *every* frame is processed. Reported latency is the time spent in `detect()` only, without queue wait. |
 
 ---
 

@@ -3,6 +3,8 @@
 #include "pipeline/frame-data.hpp"
 
 #include <nlohmann/json.hpp>
+
+#include <cmath>
 #include <string>
 
 // Serialize AnalyticsResult to compact JSON for SSE streaming
@@ -15,7 +17,9 @@ inline nlohmann::json serializeResult(const AnalyticsResult& result,
   for (const auto& det : result.detections) {
     detections.push_back({
         {"class", getClassName(det.classId)},
-        {"confidence", std::round(det.confidence * 100) / 100},  // 2 decimals
+        // 2 decimals; divided as double so the JSON reads 0.94, not
+        // 0.9399999976158142
+        {"confidence", std::round(det.confidence * 100) / 100.0},
         {"bbox",
          {{"x", static_cast<int>(det.bbox.x)},
           {"y", static_cast<int>(det.bbox.y)},

@@ -20,5 +20,6 @@ struct AnalyticsResult {
   std::chrono::steady_clock::time_point inferenceDoneTime;
   cv::Mat frame;  // original frame for overlay drawing
   std::vector<Detection> detections;
-  double inferenceLatencyMs;
+  double inferenceLatencyMs;  // capture → inference done, includes queue wait
+  double detectMs = 0.0;      // time inside detect() only
 };

@@ -8,9 +8,7 @@ Pipeline::Pipeline(const PipelineConfig& config)
       frameQueue_(config.frameQueueSize),
       resultQueue_(config.resultQueueSize) {}
 
-Pipeline::~Pipeline() {
-  if (running_) stop();
-}
+Pipeline::~Pipeline() { stop(); }
 
 void Pipeline::start() {
   if (running_) return;
@@ -56,7 +54,9 @@ void Pipeline::start() {
 }
 
 void Pipeline::stop() {
-  if (!running_) return;
+  // Not gated on running_: the capture thread clears it when the camera is
+  // lost, and the threads still have to be joined.
+  if (!captureThread_.joinable() && workerThreads_.empty()) return;
 
   running_ = false;
 
@@ -85,6 +85,14 @@ void Pipeline::captureLoop() {
   const int kMaxFails = 30;
 
   while (running_) {
+    // Only this thread pushes, so once there is room the push cannot drop.
+    // shortcut: polls every 1 ms, use a blocking push if capture rate matters
+    if (!config_.dropWhenFull &&
+        frameQueue_.size() >= config_.frameQueueSize) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+
     cv::Mat frame;
     if (!capture_->read(frame)) {
       if (isVideoFile) {
@@ -128,7 +136,18 @@ void Pipeline::inferenceWorker(int workerId) {
     if (!frameOpt) break;  // queue stopped
 
     auto& fd = *frameOpt;
-    auto detections = engine->detect(fd.frame);
+    auto detectStart = std::chrono::steady_clock::now();
+    std::vector<Detection> detections;
+    try {
+      detections = engine->detect(fd.frame);
+    } catch (const std::exception& e) {
+      // An exception leaving a std::thread would terminate the process
+      std::cerr << "Pipeline: inference failed, stopping: " << e.what()
+                << "\n";
+      running_ = false;
+      frameQueue_.stop();
+      break;
+    }
     auto now = std::chrono::steady_clock::now();
 
     AnalyticsResult result;
@@ -139,6 +158,8 @@ void Pipeline::inferenceWorker(int workerId) {
     result.detections = std::move(detections);
     result.inferenceLatencyMs =
         std::chrono::duration<double, std::milli>(now - fd.captureTime).count();
+    result.detectMs =
+        std::chrono::duration<double, std::milli>(now - detectStart).count();
 
     resultQueue_.push(std::move(result));
   }

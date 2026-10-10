@@ -2,11 +2,16 @@
 
 #include <opencv2/dnn.hpp>
 
+#include <algorithm>
+
 std::vector<Detection> postprocess(const float* outputData,
                                    const std::vector<int64_t>& outputShape,
                                    float confThreshold, float nmsThreshold,
                                    int origWidth, int origHeight,
                                    int inputWidth, int inputHeight) {
+  // Validate output shape before indexing it
+  if (outputShape.size() < 3) return {};
+
   // YOLOv8 output shape: [1, 84, 8400]
   //   84 = 4 bbox coords (cx, cy, w, h) + 80 class scores
   //   8400 = number of candidate detections
@@ -17,9 +22,6 @@ std::vector<Detection> postprocess(const float* outputData,
   // Scale factors to map model coordinates back to original image
   float scaleX = static_cast<float>(origWidth) / inputWidth;
   float scaleY = static_cast<float>(origHeight) / inputHeight;
-
-  // Validate output shape has expected dimensions
-  if (outputShape.size() < 3) return {};
 
   // Collect candidates that pass confidence threshold
   std::vector<int> classIds;
@@ -49,12 +51,17 @@ std::vector<Detection> postprocess(const float* outputData,
 
     if (bestScore < confThreshold) continue;
 
-    // Convert center-format to top-left corner and scale to original image
-    // Clamp to image boundaries to avoid out-of-bounds coords
+    // Convert center-format to corners, scale to original image, and clamp
+    // each edge to the image so a clipped box shrinks instead of shifting
     float x = std::max(0.0f, (cx - w / 2.0f) * scaleX);
     float y = std::max(0.0f, (cy - h / 2.0f) * scaleY);
-    float bw = std::min(w * scaleX, static_cast<float>(origWidth) - x);
-    float bh = std::min(h * scaleY, static_cast<float>(origHeight) - y);
+    float x2 =
+        std::min(static_cast<float>(origWidth), (cx + w / 2.0f) * scaleX);
+    float y2 =
+        std::min(static_cast<float>(origHeight), (cy + h / 2.0f) * scaleY);
+    if (x2 <= x || y2 <= y) continue;  // entirely outside the image
+    float bw = x2 - x;
+    float bh = y2 - y;
 
     bboxes.emplace_back(x, y, bw, bh);
     // NMSBoxes requires cv::Rect (int) — round for NMS, keep float for result

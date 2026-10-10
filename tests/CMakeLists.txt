@@ -77,3 +77,24 @@ target_include_directories(test_latency_tracker
         ${CMAKE_CURRENT_SOURCE_DIR}/../src
         ${OpenCV_INCLUDE_DIRS}
 )
+
+# Test executable for SSE/MJPEG server (event delivery, worker thread release)
+add_executable(test_sse_server
+    test-sse-server.cpp
+    ../src/server/sse-server.cpp
+)
+
+# Link dependencies
+target_link_libraries(test_sse_server
+    PRIVATE
+        ${OpenCV_LIBS}
+        httplib::httplib
+        pthread
+)
+
+# Include directories
+target_include_directories(test_sse_server
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${OpenCV_INCLUDE_DIRS}
+)

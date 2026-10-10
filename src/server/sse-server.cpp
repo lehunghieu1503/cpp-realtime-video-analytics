@@ -7,34 +7,6 @@
 #include <iostream>
 #include <sstream>
 
-// ── SSE client tracking ─────────────────────────────────────────────────────
-struct SseClients {
-  std::mutex mutex;
-  std::vector<httplib::DataSink*> sinks;
-
-  void add(httplib::DataSink* sink) {
-    std::lock_guard<std::mutex> lock(mutex);
-    sinks.push_back(sink);
-  }
-
-  void remove(httplib::DataSink* sink) {
-    std::lock_guard<std::mutex> lock(mutex);
-    sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
-  }
-
-  void broadcast(const std::string& data) {
-    std::lock_guard<std::mutex> lock(mutex);
-    std::string message = "data: " + data + "\n\n";
-    for (auto it = sinks.begin(); it != sinks.end();) {
-      if (!(*it)->write(message.data(), message.size())) {
-        it = sinks.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-};
-
 // ── Helpers ─────────────────────────────────────────────────────────────────
 static bool endsWith(const std::string& str, const std::string& suffix) {
   return str.size() >= suffix.size() &&
@@ -66,7 +38,12 @@ SseServer::~SseServer() {
 }
 
 void SseServer::broadcast(const std::string& json) {
-  if (sseClients_) sseClients_->broadcast(json);
+  {
+    std::lock_guard<std::mutex> lock(eventMutex_);
+    latestEvent_ = json;
+    eventSeq_++;
+  }
+  eventReady_.notify_all();
 }
 
 void SseServer::updateFrame(const cv::Mat& frame) {
@@ -83,48 +60,60 @@ void SseServer::updateFrame(const cv::Mat& frame) {
 
 void SseServer::start() {
   if (running_) return;
+
+  server_ = std::make_unique<httplib::Server>();
+  // httplib defaults to SO_REUSEPORT, which lets a second instance bind the
+  // same port silently. SO_REUSEADDR still allows a quick restart.
+  server_->set_socket_options([](socket_t sock) {
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  });
+  if (!server_->bind_to_port(config_.bindAddress, config_.port)) {
+    std::cerr << "SSE server: cannot bind " << config_.bindAddress << ":"
+              << config_.port << "\n";
+    server_.reset();
+    return;
+  }
+  std::cout << "SSE server listening on http://" << config_.bindAddress << ":"
+            << config_.port << "\n";
+
   running_ = true;
-
-  auto clients = std::make_shared<SseClients>();
-
-  // Replace the stub broadcast() with one that uses the shared clients
-  // We use a pointer-to-shared trick since broadcast() is a member function
-  // Store clients pointer as member-accessible via lambda capture in httpThread_
-
-  httpThread_ = std::thread([this, clients]() {
-    httplib::Server svr;
+  httpThread_ = std::thread([this]() {
+    httplib::Server& svr = *server_;
 
     // Health check
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
       res.set_content("{\"status\":\"ok\"}", "application/json");
     });
 
-    // SSE endpoint
-    svr.Get("/events",
-            [clients](const httplib::Request&, httplib::Response& res) {
-              res.set_header("Cache-Control", "no-cache");
-              res.set_header("Access-Control-Allow-Origin", "*");
-              auto sinkPtr = std::make_shared<httplib::DataSink*>(nullptr);
-              res.set_chunked_content_provider(
-                  "text/event-stream",
-                  [clients, sinkPtr](size_t, httplib::DataSink& sink) {
-                    *sinkPtr = &sink;
-                    clients->add(&sink);
-                    while (true) {
-                      std::this_thread::sleep_for(
-                          std::chrono::milliseconds(100));
-                    }
-                    return true;
-                  },
-                  [clients, sinkPtr](bool) {
-                    if (*sinkPtr) clients->remove(*sinkPtr);
-                  });
-            });
+    // SSE endpoint. The provider waits briefly for a new event, writes it and
+    // returns, so httplib re-checks the socket and frees the worker thread
+    // once the client is gone.
+    svr.Get("/events", [this](const httplib::Request&, httplib::Response& res) {
+      res.set_header("Cache-Control", "no-cache");
+      res.set_chunked_content_provider(
+          "text/event-stream",
+          [this, lastSeq = uint64_t{0}](size_t,
+                                         httplib::DataSink& sink) mutable {
+            std::string message;
+            {
+              std::unique_lock<std::mutex> lock(eventMutex_);
+              eventReady_.wait_for(lock, std::chrono::milliseconds(100),
+                                   [this, lastSeq] {
+                                     return eventSeq_ > lastSeq || !running_;
+                                   });
+              if (!running_) return false;
+              if (eventSeq_ == lastSeq) return true;
+              lastSeq = eventSeq_;
+              message = "data: " + latestEvent_ + "\n\n";
+            }
+            return sink.write(message.data(), message.size());
+          });
+    });
 
     // MJPEG video stream endpoint
     svr.Get("/video", [this](const httplib::Request&, httplib::Response& res) {
       res.set_header("Cache-Control", "no-cache");
-      res.set_header("Access-Control-Allow-Origin", "*");
       res.set_chunked_content_provider(
           "multipart/x-mixed-replace; boundary=frame",
           [this](size_t, httplib::DataSink& sink) {
@@ -190,21 +179,22 @@ void SseServer::start() {
               }
             });
 
-    std::cout << "SSE server listening on http://" << config_.bindAddress << ":"
-              << config_.port << "\n";
-    svr.listen(config_.bindAddress, config_.port);
+    svr.listen_after_bind();
   });
-
-  // Store clients pointer for broadcast() calls from main thread
-  // We use a small indirection: replace broadcast() behavior via stored ptr
-  sseClients_ = clients;
+  // stop() only works once the listen loop is up
+  server_->wait_until_ready();
 }
 
 void SseServer::stop() {
   if (!running_) return;
   running_ = false;
   frameReady_.notify_all();
+  eventReady_.notify_all();
 
-  if (httpThread_.joinable()) httpThread_.detach();
+  // Closes the listening socket; handlers see !running_ and return, so the
+  // join also guarantees nothing still uses this object.
+  server_->stop();
+  if (httpThread_.joinable()) httpThread_.join();
+  server_.reset();
   std::cout << "SSE server stopped\n";
 }

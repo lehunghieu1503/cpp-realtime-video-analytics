@@ -77,11 +77,11 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
   config.inferenceConfig.confidenceThreshold = 0.5f;
   config.inferenceConfig.nmsThreshold = 0.45f;
   config.numWorkers = numWorkers;
-  // Use larger queues for benchmark — no frame dropping, capped at 2000
-  size_t benchQueueSize = std::min(static_cast<size_t>(maxFrames + 10),
-                                   static_cast<size_t>(2000));
-  config.frameQueueSize = benchQueueSize;
-  config.resultQueueSize = benchQueueSize;
+  // Process every frame: capture waits for room instead of dropping, so a
+  // short queue is enough and memory stays bounded
+  config.dropWhenFull = false;
+  config.frameQueueSize = static_cast<size_t>(numWorkers) * 2;
+  config.resultQueueSize = 64;
 
   Pipeline pipeline(config);
   pipeline.start();
@@ -94,6 +94,8 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
   LatencyTracker latency;
   FpsTracker fpsTracker;
   int frameCount = 0;
+  auto startTime = std::chrono::steady_clock::now();
+  auto lastResultTime = startTime;
 
   while (frameCount < maxFrames && !gShutdown) {
     auto resultOpt =
@@ -107,7 +109,9 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
     }
 
     frameCount++;
-    latency.record(resultOpt->inferenceLatencyMs);
+    lastResultTime = std::chrono::steady_clock::now();
+    // detect() time only; capture → done would mostly measure queue wait
+    latency.record(resultOpt->detectMs);
     fpsTracker.update();
 
     // Progress every 100 frames
@@ -118,11 +122,16 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
     }
   }
 
+  // False only if a worker or the capture gave up; a finished video keeps it
+  bool pipelineFailed = !pipeline.isRunning();
   pipeline.stop();
 
   // Print results
   BenchmarkResults results;
-  results.fpsMean = fpsTracker.fps;
+  // Mean over the whole run; FpsTracker only knows its last 1 s window
+  double elapsedSec =
+      std::chrono::duration<double>(lastResultTime - startTime).count();
+  results.fpsMean = elapsedSec > 0.0 ? frameCount / elapsedSec : 0.0;
   results.totalFrames = frameCount;
   results.latency = latency;
 
@@ -132,12 +141,12 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
     writeReport(results, outputReport);
   }
 
-  return 0;
+  return pipelineFailed ? -1 : 0;
 }
 
 // ── Live mode (camera + dashboard) ──────────────────────────────────────────
 int runLive(int deviceIndex, const std::string& modelPath, int port,
-            int numWorkers, const std::string& bindAddress) {
+            int numWorkers, const std::string& bindAddress, bool headless) {
   PipelineConfig config;
   config.captureConfig.deviceIndex = deviceIndex;
   config.captureConfig.width = 640;
@@ -162,38 +171,56 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
   sseConfig.staticDir = "web/";
   SseServer sseServer(sseConfig);
   sseServer.start();
+  if (!sseServer.isRunning()) {
+    pipeline.stop();
+    return -1;
+  }
 
-  std::cout << "Pipeline running. Press 'q' or Ctrl+C to stop.\n";
+  std::cout << "Pipeline running. Press "
+            << (headless ? "Ctrl+C" : "'q' or Ctrl+C") << " to stop.\n";
   std::cout << "Dashboard: http://localhost:" << port << "\n";
 
   FpsTracker fpsTracker;
+  uint64_t nextFrameId = 0;
 
-  while (!gShutdown) {
+  // Create the window up front so waitKey() can pump events before the first
+  // frame arrives
+  if (!headless) cv::namedWindow("Video Analytics");
+
+  // isRunning() turns false when the camera is lost or inference fails
+  while (!gShutdown && pipeline.isRunning()) {
+    // Every pass, not only when a frame arrived, so the window stays
+    // responsive and 'q' works while the camera stalls
+    if (!headless && cv::waitKey(1) == 'q') break;
+
     auto resultOpt =
         pipeline.resultQueue().tryPopFor(std::chrono::milliseconds(10));
     if (!resultOpt) continue;
 
     auto& result = *resultOpt;
+    // Workers finish out of order; never step back to an older frame
+    if (result.frameId < nextFrameId) continue;
+    nextFrameId = result.frameId + 1;
     fpsTracker.update();
 
     drawDetections(result.frame, result.detections);
     drawOverlay(result.frame, fpsTracker.fps, result.inferenceLatencyMs,
                 static_cast<int>(result.detections.size()), result.frameId);
 
-    cv::imshow("Video Analytics", result.frame);
+    if (!headless) cv::imshow("Video Analytics", result.frame);
 
     auto json = serializeResult(result, fpsTracker.fps);
     sseServer.broadcast(json.dump());
     sseServer.updateFrame(result.frame);
-
-    if (cv::waitKey(1) == 'q') break;
   }
+
+  bool pipelineFailed = !pipeline.isRunning();
 
   sseServer.stop();
   pipeline.stop();
-  cv::destroyAllWindows();
+  if (!headless) cv::destroyAllWindows();
 
-  return 0;
+  return pipelineFailed ? -1 : 0;
 }
 
 // ── CLI parsing ─────────────────────────────────────────────────────────────
@@ -207,7 +234,8 @@ void printUsage(const char* prog) {
       << "  --model PATH     ONNX model path (default: models/yolov8n.onnx)\n"
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
-      << "  --workers N      Inference worker threads (default: 2)\n\n"
+      << "  --workers N      Inference worker threads (default: 2)\n"
+      << "  --headless       No local window; dashboard only\n\n"
       << "Benchmark options:\n"
       << "  --input FILE     Input video file (required)\n"
       << "  --frames N       Number of frames (default: 300)\n"
@@ -228,6 +256,7 @@ int main(int argc, char* argv[]) {
   int port = 9001;
   std::string bindAddress = "127.0.0.1";
   int numWorkers = 2;
+  bool headless = false;
 
   auto parseIntArg = [&](const char* val, const char* name) -> int {
     try {
@@ -257,6 +286,8 @@ int main(int argc, char* argv[]) {
       bindAddress = argv[++i];
     } else if (std::strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
       numWorkers = parseIntArg(argv[++i], "--workers");
+    } else if (std::strcmp(argv[i], "--headless") == 0) {
+      headless = true;
     } else if (std::strcmp(argv[i], "--help") == 0) {
       printUsage(argv[0]);
       return 0;
@@ -289,5 +320,6 @@ int main(int argc, char* argv[]) {
                         numWorkers);
   }
 
-  return runLive(deviceIndex, modelPath, port, numWorkers, bindAddress);
+  return runLive(deviceIndex, modelPath, port, numWorkers, bindAddress,
+                 headless);
 }

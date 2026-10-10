@@ -9,8 +9,9 @@
 #include <thread>
 #include <vector>
 
-// Forward declare — defined in sse-server.cpp
-struct SseClients;
+namespace httplib {
+class Server;
+}
 
 // SSE + MJPEG server for streaming detection results and video to browsers.
 // Main thread calls broadcast() and updateFrame() — no queue dependency.
@@ -25,8 +26,10 @@ public:
   explicit SseServer(const SseServerConfig& config);
   ~SseServer();
 
-  // Start HTTP server (SSE + MJPEG + static files) in background thread
+  // Start HTTP server (SSE + MJPEG + static files) in background thread.
+  // isRunning() stays false if the address cannot be bound.
   void start();
+  // Close the port and wait for the HTTP thread and its handlers to finish
   void stop();
 
   // Called by main thread to push data to connected clients
@@ -37,11 +40,15 @@ public:
 
 private:
   SseServerConfig config_;
+  std::unique_ptr<httplib::Server> server_;
   std::thread httpThread_;
   std::atomic<bool> running_{false};
 
-  // SSE client tracking (shared with http thread)
-  std::shared_ptr<SseClients> sseClients_;
+  // Latest SSE event; each /events handler sends it when the sequence advances
+  std::mutex eventMutex_;
+  std::condition_variable eventReady_;
+  std::string latestEvent_;
+  uint64_t eventSeq_ = 0;
 
   // Latest JPEG frame for MJPEG streaming
   std::mutex frameMutex_;
