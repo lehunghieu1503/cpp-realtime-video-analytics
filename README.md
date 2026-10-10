@@ -145,7 +145,7 @@ video_analytics --benchmark OPTIONS        Benchmark mode
 | `--model PATH`| Path to `.onnx` model file | `models/yolov8n.onnx` |
 | `--port N` | HTTP Dashboard port | `9001` |
 | `--bind ADDR` | Server bind IPv4 address | `127.0.0.1` |
-| `--workers N` | Number of ONNX inference threads | `2` |
+| `--workers N` | Number of ONNX inference threads | `2` (`1` with a GPU provider) |
 | `--provider NAME` | Execution provider: `cpu`, `cuda`, `tensorrt` | `cpu` |
 | `--headless` | No local window, dashboard only | off |
 

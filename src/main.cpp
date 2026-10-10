@@ -238,7 +238,8 @@ void printUsage(const char* prog) {
       << "  --model PATH     ONNX model path (default: models/yolov8n.onnx)\n"
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
-      << "  --workers N      Inference worker threads (default: 2)\n"
+      << "  --workers N      Inference worker threads (default: 2, or 1 with\n"
+      << "                   a GPU provider)\n"
       << "  --provider NAME  Execution provider: cpu, cuda, tensorrt\n"
       << "                   (default: cpu)\n"
       << "  --headless       No local window; dashboard only\n\n"
@@ -262,6 +263,7 @@ int main(int argc, char* argv[]) {
   int port = 9001;
   std::string bindAddress = "127.0.0.1";
   int numWorkers = 2;
+  bool workersGiven = false;
   bool headless = false;
   std::string provider = "cpu";
 
@@ -293,6 +295,7 @@ int main(int argc, char* argv[]) {
       bindAddress = argv[++i];
     } else if (std::strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
       numWorkers = parseIntArg(argv[++i], "--workers");
+      workersGiven = true;
     } else if (std::strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
       provider = argv[++i];
     } else if (std::strcmp(argv[i], "--headless") == 0) {
@@ -319,6 +322,9 @@ int main(int argc, char* argv[]) {
     std::cerr << "Error: --provider must be cpu, cuda or tensorrt\n";
     return -1;
   }
+  // Each worker owns a session: on a GPU a second one duplicates the engine
+  // in memory while the GPU still runs them one after the other
+  if (!workersGiven && provider != "cpu") numWorkers = 1;
 
   if (benchmarkMode) {
     if (inputVideo.empty()) {
