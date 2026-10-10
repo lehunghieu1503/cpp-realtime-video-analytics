@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopencv-core4.5d \
     libopencv-imgcodecs4.5d \
     libopencv-imgproc4.5d \
+    libopencv-dnn4.5d \
     libopencv-videoio4.5d \
     libopencv-highgui4.5d \
     && rm -rf /var/lib/apt/lists/*
@@ -39,17 +40,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/lib/libonnxruntime* /usr/local/lib/
 RUN ldconfig
 
-# Copy application binary, models, and web assets
+# Copy application binary and web assets.
+# Models are not in the repo; mount them at /app/models when running.
 WORKDIR /app
 COPY --from=builder /app/build/src/video_analytics .
-COPY models/ models/
 COPY web/ web/
 
-# Run as non-root
-RUN useradd -m appuser
+# Run as non-root; the video group is needed to open /dev/video*
+RUN useradd -m -G video appuser
 USER appuser
 
 EXPOSE 9001
 
-ENTRYPOINT ["./video_analytics"]
-CMD ["--device", "0", "--port", "9001", "--bind", "0.0.0.0"]
+# No display in the container, and the published port needs 0.0.0.0
+ENTRYPOINT ["./video_analytics", "--headless", "--bind", "0.0.0.0"]
+CMD ["--device", "0", "--port", "9001"]
