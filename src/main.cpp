@@ -176,7 +176,16 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
 
   FpsTracker fpsTracker;
 
-  while (!gShutdown) {
+  // Create the window up front so waitKey() can pump events before the first
+  // frame arrives
+  if (!headless) cv::namedWindow("Video Analytics");
+
+  // isRunning() turns false when the camera is lost
+  while (!gShutdown && pipeline.isRunning()) {
+    // Every pass, not only when a frame arrived, so the window stays
+    // responsive and 'q' works while the camera stalls
+    if (!headless && cv::waitKey(1) == 'q') break;
+
     auto resultOpt =
         pipeline.resultQueue().tryPopFor(std::chrono::milliseconds(10));
     if (!resultOpt) continue;
@@ -193,15 +202,15 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
     auto json = serializeResult(result, fpsTracker.fps);
     sseServer.broadcast(json.dump());
     sseServer.updateFrame(result.frame);
-
-    if (!headless && cv::waitKey(1) == 'q') break;
   }
+
+  bool pipelineFailed = !pipeline.isRunning();
 
   sseServer.stop();
   pipeline.stop();
   if (!headless) cv::destroyAllWindows();
 
-  return 0;
+  return pipelineFailed ? -1 : 0;
 }
 
 // ── CLI parsing ─────────────────────────────────────────────────────────────
