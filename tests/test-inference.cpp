@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -99,11 +100,16 @@ cv::Mat createSyntheticTestImage(int width, int height) {
 void testModelLoading() {
   std::cout << "\n=== Test 1: Model Loading ===\n";
 
+  // The model is gitignored, so it is absent on a clean checkout and in CI
   InferenceConfig config;
   config.modelPath = "models/yolov8n.onnx";
-
-  InferenceEngine engine(config);
-  test::assert_true(engine.isLoaded(), "Model loads successfully");
+  if (std::ifstream(config.modelPath).good()) {
+    InferenceEngine engine(config);
+    test::assert_true(engine.isLoaded(), "Model loads successfully");
+  } else {
+    std::cout << "  [SKIP] No model at " << config.modelPath
+              << ", skipping load test\n";
+  }
 
   // Test invalid path handling
   InferenceConfig badConfig;
