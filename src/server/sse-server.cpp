@@ -47,6 +47,8 @@ void SseServer::broadcast(const std::string& json) {
 }
 
 void SseServer::updateFrame(const cv::Mat& frame) {
+  if (videoClients_ == 0) return;
+
   std::vector<unsigned char> buf;
   cv::imencode(".jpg", frame, buf, {cv::IMWRITE_JPEG_QUALITY, 70});
 
@@ -114,10 +116,17 @@ void SseServer::start() {
     // MJPEG video stream endpoint
     svr.Get("/video", [this](const httplib::Request&, httplib::Response& res) {
       res.set_header("Cache-Control", "no-cache");
+      videoClients_++;
       res.set_chunked_content_provider(
           "multipart/x-mixed-replace; boundary=frame",
           [this](size_t, httplib::DataSink& sink) {
-            uint64_t lastSeq = 0;
+            // Start after the buffered frame: with no viewer it is not
+            // refreshed, so it can be arbitrarily old
+            uint64_t lastSeq;
+            {
+              std::lock_guard<std::mutex> lock(frameMutex_);
+              lastSeq = frameSeq_;
+            }
             while (running_) {
               // Wait for new frame
               std::unique_lock<std::mutex> lock(frameMutex_);
@@ -147,7 +156,8 @@ void SseServer::start() {
             }
             return false;
           },
-          [](bool) {});
+          // Runs when the response is destroyed, however the stream ended
+          [this](bool) { videoClients_--; });
     });
 
     // Serve index.html at root

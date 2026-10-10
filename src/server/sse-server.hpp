@@ -55,4 +55,6 @@ private:
   std::condition_variable frameReady_;
   std::vector<unsigned char> jpegBuffer_;
   uint64_t frameSeq_ = 0;
+  // Connected /video viewers; updateFrame() skips the JPEG encode at zero
+  std::atomic<int> videoClients_{0};
 };

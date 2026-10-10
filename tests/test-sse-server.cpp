@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <string>
@@ -131,6 +132,42 @@ void testBindFailureAndStop() {
   test::assert_true(!client.Get("/health"), "port is closed after stop()");
 }
 
+// Test 4: a /video viewer receives JPEG frames pushed after it connected
+void testVideoStreamDeliversFrames() {
+  std::cout << "\n=== Test 4: Video Stream Delivers Frames ===\n";
+
+  SseServerConfig config;
+  config.port = kPort + 3;
+  SseServer server(config);
+  server.start();
+
+  std::atomic<bool> feeding{true};
+  std::thread feeder([&] {
+    cv::Mat frame(48, 64, CV_8UC3, cv::Scalar(0, 128, 255));
+    while (feeding) {
+      server.updateFrame(frame);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  });
+
+  std::string body;
+  httplib::Client client("127.0.0.1", config.port);
+  client.set_read_timeout(2);
+  client.Get("/video", [&](const char* data, size_t len) {
+    body.append(data, len);
+    // JPEG start-of-image marker: stop once a frame has arrived
+    return body.find("\xFF\xD8") == std::string::npos;
+  });
+
+  feeding = false;
+  feeder.join();
+  test::assert_true(body.find("Content-Type: image/jpeg") != std::string::npos &&
+                        body.find("\xFF\xD8") != std::string::npos,
+                    "viewer receives a JPEG frame");
+
+  server.stop();
+}
+
 int main() {
   std::cout << "==================================================\n";
   std::cout << "SSE Server Test Suite\n";
@@ -139,6 +176,7 @@ int main() {
   testBroadcastDeliveredOnce();
   testAbandonedClientsReleaseThreads();
   testBindFailureAndStop();
+  testVideoStreamDeliversFrames();
 
   std::cout << "\n==================================================\n";
   std::cout << "Test Summary\n";
