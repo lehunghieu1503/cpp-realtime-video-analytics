@@ -124,7 +124,7 @@ std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame) {
   std::vector<int64_t> inputDims = {1, 3, config_.inputHeight,
                                      config_.inputWidth};
   Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
-      memoryInfo, inputData.data(), inputData.size(), inputDims.data(),
+      memoryInfo, inputData.ptr<float>(), inputData.total(), inputDims.data(),
       inputDims.size());
 
   // Build name arrays for Run() — needs const char* pointers
