@@ -137,7 +137,7 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
 
 // ── Live mode (camera + dashboard) ──────────────────────────────────────────
 int runLive(int deviceIndex, const std::string& modelPath, int port,
-            int numWorkers, const std::string& bindAddress) {
+            int numWorkers, const std::string& bindAddress, bool headless) {
   PipelineConfig config;
   config.captureConfig.deviceIndex = deviceIndex;
   config.captureConfig.width = 640;
@@ -163,7 +163,8 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
   SseServer sseServer(sseConfig);
   sseServer.start();
 
-  std::cout << "Pipeline running. Press 'q' or Ctrl+C to stop.\n";
+  std::cout << "Pipeline running. Press "
+            << (headless ? "Ctrl+C" : "'q' or Ctrl+C") << " to stop.\n";
   std::cout << "Dashboard: http://localhost:" << port << "\n";
 
   FpsTracker fpsTracker;
@@ -180,18 +181,18 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
     drawOverlay(result.frame, fpsTracker.fps, result.inferenceLatencyMs,
                 static_cast<int>(result.detections.size()), result.frameId);
 
-    cv::imshow("Video Analytics", result.frame);
+    if (!headless) cv::imshow("Video Analytics", result.frame);
 
     auto json = serializeResult(result, fpsTracker.fps);
     sseServer.broadcast(json.dump());
     sseServer.updateFrame(result.frame);
 
-    if (cv::waitKey(1) == 'q') break;
+    if (!headless && cv::waitKey(1) == 'q') break;
   }
 
   sseServer.stop();
   pipeline.stop();
-  cv::destroyAllWindows();
+  if (!headless) cv::destroyAllWindows();
 
   return 0;
 }
@@ -207,7 +208,8 @@ void printUsage(const char* prog) {
       << "  --model PATH     ONNX model path (default: models/yolov8n.onnx)\n"
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
-      << "  --workers N      Inference worker threads (default: 2)\n\n"
+      << "  --workers N      Inference worker threads (default: 2)\n"
+      << "  --headless       No local window; dashboard only\n\n"
       << "Benchmark options:\n"
       << "  --input FILE     Input video file (required)\n"
       << "  --frames N       Number of frames (default: 300)\n"
@@ -228,6 +230,7 @@ int main(int argc, char* argv[]) {
   int port = 9001;
   std::string bindAddress = "127.0.0.1";
   int numWorkers = 2;
+  bool headless = false;
 
   auto parseIntArg = [&](const char* val, const char* name) -> int {
     try {
@@ -257,6 +260,8 @@ int main(int argc, char* argv[]) {
       bindAddress = argv[++i];
     } else if (std::strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
       numWorkers = parseIntArg(argv[++i], "--workers");
+    } else if (std::strcmp(argv[i], "--headless") == 0) {
+      headless = true;
     } else if (std::strcmp(argv[i], "--help") == 0) {
       printUsage(argv[0]);
       return 0;
@@ -289,5 +294,6 @@ int main(int argc, char* argv[]) {
                         numWorkers);
   }
 
-  return runLive(deviceIndex, modelPath, port, numWorkers, bindAddress);
+  return runLive(deviceIndex, modelPath, port, numWorkers, bindAddress,
+                 headless);
 }

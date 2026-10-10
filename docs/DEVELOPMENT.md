@@ -59,6 +59,9 @@ build/src/video_analytics --device 0 --bind 0.0.0.0 --port 9001
 # Custom port and worker threads
 build/src/video_analytics --device 0 --port 8080 --workers 4
 
+# No local window (SSH session, server): dashboard only
+build/src/video_analytics --device 0 --headless
+
 # Custom model
 build/src/video_analytics --device 0 --model models/yolov8m.onnx
 
@@ -93,15 +96,23 @@ Test structure:
 # Build image (multi-stage: builder + runtime, ~400 MB)
 docker build -t video-analytics .
 
-# Run with camera access, dashboard reachable from this machine only
-docker run --rm --device /dev/video0 -p 127.0.0.1:9001:9001 video-analytics
+# Run with camera access, dashboard reachable from this machine only.
+# The model is mounted, it is not part of the image.
+docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
+  -p 127.0.0.1:9001:9001 video-analytics
 
 # Custom device and port
-docker run --rm --device /dev/video1 -p 127.0.0.1:8080:8080 video-analytics --device 1 --port 8080
+docker run --rm --device /dev/video1 -v "$(pwd)/models:/app/models:ro" \
+  -p 127.0.0.1:8080:8080 video-analytics --device 1 --port 8080
 
 # Expose to the network (no authentication: anyone on the network can watch)
-docker run --rm --device /dev/video0 -p 9001:9001 video-analytics
+docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
+  -p 9001:9001 video-analytics
 ```
+
+The container always runs with `--headless --bind 0.0.0.0`. It runs as `appuser`
+in the `video` group; if the host's `video` group has a different GID, add
+`--group-add "$(getent group video | cut -d: -f3)"`.
 
 **Production Dockerfile**
 - Multi-stage build reduces image size

@@ -76,11 +76,12 @@ sequenceDiagram
 
 ### 🐳 Using Docker (Recommended)
 
-Get the pipeline running in seconds without installing local dependencies:
+Get the pipeline running without installing the C++ dependencies. The model is not part of the image: export `models/yolov8n.onnx` first (see step 3 below) and mount it.
 
 ```bash
 docker build -t video-analytics .
-docker run --rm --device /dev/video0 -p 127.0.0.1:9001:9001 video-analytics
+docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
+  -p 127.0.0.1:9001:9001 video-analytics
 ```
 
 ### 🛠️ Manual Build Strategy
@@ -145,6 +146,7 @@ video_analytics --benchmark OPTIONS        Benchmark mode
 | `--port N` | HTTP Dashboard port | `9001` |
 | `--bind ADDR` | Server bind IPv4 address | `127.0.0.1` |
 | `--workers N` | Number of ONNX inference threads | `2` |
+| `--headless` | No local window, dashboard only | off |
 
 ### Benchmark Options
 | Flag | Description | Default |
