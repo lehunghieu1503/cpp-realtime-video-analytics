@@ -76,6 +76,7 @@ build/src/video_analytics --benchmark --input video.avi --frames 500 --model mod
 build/tests/test_pipeline
 build/tests/test_serializer
 build/tests/test_latency_tracker
+build/tests/test_sse_server
 build/tests/test_inference
 ```
 
@@ -84,6 +85,7 @@ Test structure:
 - `test_inference` — ONNX model load, tensor shapes, detection output, latency
 - `test_serializer` — JSON serialization, rounding, class name mapping
 - `test_latency_tracker` — Percentile math, report generation
+- `test_sse_server` — SSE event delivery, worker thread release on disconnect
 
 ## Docker
 

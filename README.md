@@ -211,6 +211,7 @@ build/tests/test_pipeline         # Tests BoundedQueue, FrameData, Threading
 build/tests/test_inference        # ONNX model loading & execution tests
 build/tests/test_serializer       # SSE/JSON payload validation
 build/tests/test_latency_tracker  # P50/P95/P99 math checks
+build/tests/test_sse_server       # SSE delivery & worker thread release
 ```
 
 <details>

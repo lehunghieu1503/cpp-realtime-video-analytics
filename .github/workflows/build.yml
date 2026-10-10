@@ -40,6 +40,7 @@ jobs:
           build/tests/test_pipeline
           build/tests/test_serializer
           build/tests/test_latency_tracker
+          build/tests/test_sse_server
           build/tests/test_inference
 
   build-tsan:
