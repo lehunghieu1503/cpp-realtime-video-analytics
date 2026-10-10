@@ -291,6 +291,15 @@ void testConfidenceRounding() {
         std::string("confidence ") + std::to_string(inputConf) + " rounds to " +
             std::to_string(expectedConf));
   }
+
+  // The serialized text must be short too, not a float widened to double
+  Detection det;
+  det.classId = 0;
+  det.confidence = 0.94f;
+  det.bbox = cv::Rect2f(0.0f, 0.0f, 100.0f, 100.0f);
+  nlohmann::json json = serializeResult(createResult(1, 10.0, {det}), 20.0);
+  test::assert_equal_string(json["detections"][0]["confidence"].dump(), "0.94",
+                            "confidence 0.94f serializes as 0.94");
 }
 
 // Test 7: Latency rounding to 1 decimal
