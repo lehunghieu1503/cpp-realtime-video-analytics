@@ -1,82 +1,180 @@
 <div align="center">
-  <h1>🚀 Real-time AI Video Analytics Pipeline</h1>
-  <p><i>A production-grade C++ pipeline for YOLOv8 object detection with ONNX Runtime</i></p>
 
-  <p>
-    <a href="https://github.com/microsoft/onnxruntime"><img src="https://img.shields.io/badge/ONNX_Runtime-005CED?style=for-the-badge&logo=onnx&logoColor=white" alt="ONNX Runtime"/></a>
-    <a href="https://opencv.org/"><img src="https://img.shields.io/badge/OpenCV-27338e?style=for-the-badge&logo=OpenCV&logoColor=white" alt="OpenCV"/></a>
-    <a href="https://isocpp.org/"><img src="https://img.shields.io/badge/C++-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white" alt="C++17"/></a>
-    <a href="https://cmake.org/"><img src="https://img.shields.io/badge/CMake-%23008FBA.svg?style=for-the-badge&logo=cmake&logoColor=white" alt="CMake"/></a>
-    <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-2CA5E0?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"/></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge" alt="License"/></a>
-  </p>
+<img src="docs/assets/banner.svg" alt="Real-time Video Analytics: a C++17 pipeline for YOLOv8 with ONNX Runtime and TensorRT" width="100%"/>
+
+<br/>
+
+[![Build & Test](https://github.com/lehunghieu1503/cpp-realtime-video-analytics/actions/workflows/build.yml/badge.svg)](https://github.com/lehunghieu1503/cpp-realtime-video-analytics/actions/workflows/build.yml)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
+![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-1.17+-005CED?logo=onnx&logoColor=white)
+![TensorRT](https://img.shields.io/badge/TensorRT-FP16-76B900?logo=nvidia&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-4.5+-5C3EE8?logo=opencv&logoColor=white)
+![Jetson](https://img.shields.io/badge/Jetson-Orin-76B900?logo=nvidia&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-x86__64_|_arm64-2496ED?logo=docker&logoColor=white)
+
+**[Quick start](#-quick-start)** ·
+**[Performance](#-performance)** ·
+**[Architecture](#-architecture)** ·
+**[CLI](#-cli-reference)** ·
+**[Jetson](#-jetson-orin)** ·
+**[Docs](#-documentation)**
+
 </div>
 
 ---
 
+A camera goes in, a live browser dashboard comes out. The pipeline captures
+frames, runs **YOLOv8** through **ONNX Runtime** on worker threads, and streams
+annotated video and per-frame JSON over plain HTTP. The same binary runs on a
+laptop CPU and on a Jetson GPU: one flag picks the execution provider.
+
+```bash
+build/src/video_analytics --device 0 --provider tensorrt
+# then open http://localhost:9001
+```
+
+## ✨ Highlights
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 🧵 Built for throughput
+Capture, inference and HTTP serving each run on their own threads. Bounded
+queues drop the oldest frame, so memory and delay stay flat when inference
+falls behind the camera.
+
+</td>
+<td width="33%" valign="top">
+
+### ⚡ CPU, CUDA or TensorRT
+`--provider cpu | cuda | tensorrt`. TensorRT builds an FP16 engine once and
+caches it. A provider that is missing fails loudly at startup; it never
+silently falls back to CPU.
+
+</td>
+<td width="33%" valign="top">
+
+### 🌐 Zero-install dashboard
+Server-Sent Events for detections, MJPEG for video, served by the binary
+itself. Any browser on the network is a client. No JavaScript build step.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 📷 Any video source
+USB cameras by index, CSI cameras and anything else through a GStreamer
+pipeline (`--gst`), video files for benchmarking.
+
+</td>
+<td valign="top">
+
+### 📊 Honest benchmarks
+A benchmark mode that processes every frame and reports FPS with p50, p95
+and p99 latency as Markdown. Every number in this README came out of it.
+
+</td>
+<td valign="top">
+
+### 🐳 Two Docker images
+`Dockerfile` for x86-64 CPU, `Dockerfile.jetson` for JetPack 6 with CUDA and
+TensorRT. Both run as a non-root user.
+
+</td>
+</tr>
+</table>
+
+## 📊 Performance
+
+Measured with `--benchmark` on a **Jetson Orin Nano Super 8GB**, inside the
+`Dockerfile.jetson` container, 25 W power mode, 640x480 video, YOLOv8n at
+640x640. Latency is the time inside `detect()`: preprocess, inference and
+postprocess.
+
+| Provider | Throughput | | Latency p50 | Latency p95 |
+|:---------|-----------:|:--|------------:|------------:|
+| `tensorrt` (FP16) | **46.0 FPS** | `███████████████████████` | **21.6 ms** | 22.4 ms |
+| `cuda` | 29.4 FPS | `███████████████` | 28.0 ms | 41.5 ms |
+| `cpu` (2 workers) | 6.4 FPS | `███` | 314.3 ms | 317.0 ms |
+
+TensorRT is **7x faster than CPU** on this board. The first `tensorrt` start
+spends about 8 minutes building the engine; later starts take seconds.
+
+<details>
+<summary><b>What the pipeline optimizations bought, measured one at a time</b></summary>
+
 <br/>
 
-## 🌟 Overview
+| Change | Before | After | Measured on |
+|:-------|-------:|------:|:------------|
+| Cap ONNX Runtime threads to the available cores | 22.6 FPS | 30.8 FPS | x86 pinned to 6 cores, 2 workers |
+| Size the live frame queue to the worker count | 343 ms | 147 ms | capture-to-result delay, inference at 20 FPS |
+| Build the input blob with `cv::dnn::blobFromImage` | 5.8 ms | 3.8 ms | preprocess per frame, one x86 core |
+| Scan class scores in memory order | 0.55 ms | 0.45 ms | postprocess per frame, one x86 core |
+| Skip the JPEG encode with no `/video` viewer | every frame | none | headless deployments |
 
-This project is a high-performance, production-ready C++ pipeline designed for real-time video analytics. It captures video frames from a USB camera, processes them using **YOLOv8** object detection powered by **ONNX Runtime**, and streams the live results directly to a browser-based dashboard via HTTP Server-Sent Events (SSE) and MJPEG streams.
+</details>
 
-### ✨ Key Features
-- **Concurrent Threading Model**: Independent threads for capture, inference, and HTTP serving ensure unblocking execution.
-- **Thread-Safe inference**: Each inference thread securely owns its ONNX Runtime session.
-- **Efficient Memory Management**: Utilizes lock-free, bounded queues with a drop-oldest strategy to prevent memory growth under heavy workloads.
-- **Interactive Dashboard Integration**: Transmits JSON telemetry via Server-Sent Events (SSE) alongside a low-latency MJPEG video stream.
+> [!TIP]
+> Run it on your own hardware:
+> `build/src/video_analytics --benchmark --input video.avi --provider tensorrt --output report.md`
 
----
-
-## 🏗️ Architecture
-
-The pipeline follows a highly decoupled and multi-threaded architecture to maximize throughput and minimize latency. 
-
-```mermaid
-graph TD
-    A[🎥 USB Camera] -->|Frames| B(Capture Thread)
-    B --> C[(Frame Queue)]
-    C -->|Dequeue| D{Inference Workers<br>Thread Pool}
-    D -->|Detections| E[(Result Queue)]
-    
-    E --> F[📡 SSE Server<br>JSON]
-    E --> G[📽️ MJPEG Stream<br>/video]
-    E --> H[💻 OpenCV Display<br>Local Window]
-    
-    F -->|Telemetry| I[🌐 Browser Dashboard<br>localhost:9001]
-    G -->|Video| I
-```
-
-### 🔄 Concurrent Threading Sequence
+## 🏗 Architecture
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant Cam as 🎥 USB Camera
-    participant CT as Capture Thread
-    participant Q1 as Bounded Frame Queue
-    participant IT as Inference Thread
-    participant Q2 as Result Queue
-    participant Svr as HTTP Server Thread
+flowchart LR
+    src(["📷 Camera · GStreamer · video file"]) --> cap["Capture thread"]
+    cap --> fq[("Frame queue<br/>bounded · drop-oldest")]
+    fq --> w1["Inference worker 1<br/>own ORT session"]
+    fq --> wn["Inference worker N<br/>own ORT session"]
+    w1 --> rq[("Result queue")]
+    wn --> rq
+    rq --> main["Main loop<br/>draw boxes + stats"]
+    main --> win["OpenCV window<br/>(optional)"]
+    main --> http["HTTP server thread"]
+    http --> ev["/events<br/>SSE · JSON per frame"]
+    http --> vid["/video<br/>MJPEG"]
+    ev --> dash(["🌐 Browser dashboard"])
+    vid --> dash
 
-    Cam->>CT: Continuously Capture Frame
-    CT->>Q1: Push Frame (Drops oldest if queue is full)
-    IT->>Q1: Pop Frame (Wait loop)
-    IT->>IT: Pre-process & YOLOv8 Inference (ONNX)
-    IT->>IT: Post-process (NMS)
-    IT->>Q2: Push Detections + Telemetry
-    Svr->>Q2: Retrieve results async
-    Svr-->>Svr: Serialize to JSON (SSE) & MJPEG
-    Svr->>Cam: Stream to Browser Dashboard
+    classDef q fill:#3b2a63,stroke:#9b7bff,color:#fff
+    classDef t fill:#12304a,stroke:#4cc3ff,color:#fff
+    classDef io fill:#123b2c,stroke:#76e3a0,color:#fff
+    class fq,rq q
+    class cap,w1,wn,main,http t
+    class src,dash,win,ev,vid io
 ```
 
----
+| Design choice | Why |
+|:--------------|:----|
+| One ONNX Runtime session per worker | Sessions are never shared, so workers need no locking around inference. |
+| Bounded queues that drop the oldest frame | A slow consumer can never grow memory, and what you see stays recent. |
+| Workers default to 1 on a GPU | A second session duplicates the engine in memory while the GPU still runs them one after the other. |
+| Thread count follows the CPU affinity mask | Workers x intra-op threads never exceed the cores, including under `taskset` or `docker --cpuset-cpus`. |
+| Latest-value broadcast instead of per-client queues | A stalled browser cannot back-pressure the pipeline. |
 
-## 🚀 Quick Start
+The threading model, data lifecycle and queue mechanics are covered in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-### 🐳 Using Docker (Recommended)
+## 🚀 Quick start
 
-Get the pipeline running without installing the C++ dependencies. The model is not part of the image: export `models/yolov8n.onnx` first (see step 3 below) and mount it.
+**1. Get the model** (not stored in the repo):
+
+```bash
+git clone https://github.com/lehunghieu1503/cpp-realtime-video-analytics.git
+cd cpp-realtime-video-analytics
+pip install ultralytics
+scripts/download-model.sh        # writes models/yolov8n.onnx
+```
+
+**2. Pick how to run it:**
+
+<details open>
+<summary><b>🐳 Docker on x86-64 (CPU)</b></summary>
+
+<br/>
 
 ```bash
 docker build -t video-analytics .
@@ -84,170 +182,260 @@ docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
   -p 127.0.0.1:9001:9001 video-analytics
 ```
 
-### 🛠️ Manual Build Strategy
-
-If you prefer building from source natively:
+</details>
 
 <details>
-<summary><b>📋 View Prerequisites & Dependencies Setup</b></summary>
+<summary><b>🛠 Build from source on x86-64</b></summary>
 
-**Requirements:** Ubuntu 22.04+, CMake 3.20+, GCC 11+
+<br/>
 
-**1. Install OpenCV:**
+Needs Ubuntu 22.04+, GCC 11+, CMake 3.20+.
+
 ```bash
-sudo apt install libopencv-dev
-```
+sudo apt install -y build-essential cmake git wget libopencv-dev
 
-**2. Install ONNX Runtime 1.17.0:**
-```bash
+# ONNX Runtime 1.17.0 (CPU)
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
 tar xzf onnxruntime-linux-x64-1.17.0.tgz
 sudo cp onnxruntime-linux-x64-1.17.0/lib/* /usr/local/lib/
 sudo cp -r onnxruntime-linux-x64-1.17.0/include/* /usr/local/include/
 sudo ldconfig
-```
 
-**3. Prepare YOLOv8n ONNX Model:**
-```bash
-pip install ultralytics
-yolo export model=yolov8n.pt format=onnx
-mkdir -p models && mv yolov8n.onnx models/
-```
-</details>
-
-**Build and Run:**
-```bash
-# Configure and Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel $(nproc)
 
-# Execute
 build/src/video_analytics --device 0
 ```
 
-> **Note:** Open your browser and navigate to [http://localhost:9001](http://localhost:9001) to view the live dashboard!
+Always pass `-DCMAKE_BUILD_TYPE=Release`; without it the build is unoptimized.
+To keep ONNX Runtime out of `/usr/local`, unpack it anywhere and add
+`-DONNXRUNTIME_ROOT=/path/to/onnxruntime`.
 
----
+</details>
 
-## 💻 CLI Usage
+<details>
+<summary><b>🟢 Docker on Jetson Orin (GPU)</b></summary>
 
-The executable provides multiple arguments for fine-tuning performance and operation modes.
+<br/>
+
+```bash
+docker build -f Dockerfile.jetson -t video-analytics:jetson .
+
+docker run -d --name video-analytics --restart unless-stopped --runtime nvidia \
+  --device /dev/video0 -p 9001:9001 \
+  -v "$(pwd)/models:/app/models" \
+  video-analytics:jetson --provider tensorrt
+```
+
+See [Jetson Orin](#-jetson-orin) for boards without internet access and for
+CSI cameras.
+
+</details>
+
+**3. Open the dashboard** at [http://localhost:9001](http://localhost:9001).
+
+> [!WARNING]
+> The dashboard has no authentication. From source it listens on `127.0.0.1`
+> only. The Docker images listen on `0.0.0.0`, so publish the port with
+> `-p 127.0.0.1:9001:9001` unless you trust the network.
+
+## 🖥 What the server exposes
+
+| Endpoint | Content |
+|:---------|:--------|
+| `/` | The dashboard |
+| `/video` | MJPEG stream with boxes and stats drawn in |
+| `/events` | Server-Sent Events, one JSON object per frame |
+| `/health` | `{"status":"ok"}` |
+
+```json
+{
+  "frame_id": 42,
+  "fps": 21.5,
+  "latency_ms": 35.2,
+  "detections": [
+    { "class": "person", "confidence": 0.94,
+      "bbox": { "x": 100, "y": 50, "w": 200, "h": 300 } }
+  ]
+}
+```
+
+`latency_ms` is capture to inference done. Classes are the 80 COCO names.
+The bundled dashboard consumes the stream in three lines:
+
+```js
+new EventSource('/events').onmessage = (e) => {
+  console.log(JSON.parse(e.data).detections);
+};
+```
+
+## ⌨ CLI reference
 
 ```text
 video_analytics [OPTIONS]                  Live camera mode
 video_analytics --benchmark OPTIONS        Benchmark mode
 ```
 
-### General Options
 | Flag | Description | Default |
-|------|-------------|---------|
-| `--device N` | Camera USB device index | `0` |
-| `--gst PIPELINE` | GStreamer pipeline ending in `appsink`, used instead of `--device` | *(none)* |
-| `--model PATH`| Path to `.onnx` model file | `models/yolov8n.onnx` |
-| `--port N` | HTTP Dashboard port | `9001` |
-| `--bind ADDR` | Server bind IPv4 address | `127.0.0.1` |
-| `--workers N` | Number of ONNX inference threads | `2` (`1` with a GPU provider) |
+|:-----|:------------|:--------|
+| `--device N` | V4L2 (USB) camera index | `0` |
+| `--gst PIPELINE` | GStreamer pipeline ending in `appsink`, used instead of `--device` | none |
+| `--model PATH` | ONNX model file | `models/yolov8n.onnx` |
 | `--provider NAME` | Execution provider: `cpu`, `cuda`, `tensorrt` | `cpu` |
+| `--workers N` | Inference worker threads, 1 to 16 | `2`, or `1` with a GPU provider |
+| `--port N` | Dashboard port | `9001` |
+| `--bind ADDR` | Listen address | `127.0.0.1` |
 | `--headless` | No local window, dashboard only | off |
+| `--benchmark` | Benchmark a video file instead of running live | off |
+| `--input FILE` | Benchmark input video | required |
+| `--frames N` | Benchmark frame count | `300` |
+| `--output FILE` | Write the benchmark report as Markdown | none |
 
-### Benchmark Options
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--input FILE` | Input video file to evaluate | *(required)* |
-| `--frames N` | Limit inference to exactly N frames | `300` |
-| `--output FILE`| Log evaluation path report | *(none)* |
-
-### 💡 Examples
 ```bash
-# Run with customized camera and worker count
-build/src/video_analytics --device 2 --bind 0.0.0.0 --port 8080 --workers 4
+# Headless on a server, reachable from the network
+build/src/video_analytics --device 0 --headless --bind 0.0.0.0
 
-# Run profiling benchmark
+# A bigger model on the GPU
+build/src/video_analytics --model models/yolov8s.onnx --provider cuda
+
+# Benchmark 500 frames and keep the report
 build/src/video_analytics --benchmark --input test.avi --frames 500 --output report.md
 ```
 
----
+> [!NOTE]
+> Run the binary from the repository root: the dashboard is read from `web/`
+> relative to the working directory.
 
-## 📊 Performance Benchmarks
+## 🟢 Jetson Orin
 
-*Tested on: Intel CPU, 2 Inference Workers, YOLOv8n (640x640).*
-
-| Metric | Target Value |
-|--------|-------|
-| **Throughput** | ~25-33 FPS |
-| **Inference latency** | ~35 ms / frame |
-| **Model Size** | 12.3 MB (FP32) |
-
-> 🔥 **Optimization Trick:** FP16 quantization is available via `scripts/quantize-fp16.py`, reducing the model size to **6.2 MB** (-50%). Requires `onnxruntime-gpu` with the CUDA execution provider for runtime support.
-
----
-
-## 📂 Project Structure
-
-```mermaid
-mindmap
-  root((📂 src/))
-    📁 capture
-      [Video capture & OpenCV backend abstraction]
-    📁 inference
-      [YOLOv8 ONNX Runtime inference & tensor manipulation]
-    📁 pipeline
-      [Thread-safe capture-to-inference orchestration]
-    📁 server
-      [HTTP server SSE + MJPEG via cpp-httplib]
-    📁 benchmark
-      [Latency tracking & markdown report generation]
-    📁 utils
-      [Shared utilities & FPS math]
-    📄 main.cpp
-      [CLI application entry point]
-```
-
----
-
-## 🧪 Testing
-
-The codebase includes a comprehensive test suite to ensure stability across core components like queueing, thread locking, serialization, and latency maths.
-
-```bash
-# Execute Test Binaries
-build/tests/test_pipeline         # Tests BoundedQueue, FrameData, Threading
-build/tests/test_inference        # ONNX model loading & execution tests
-build/tests/test_serializer       # SSE/JSON payload validation
-build/tests/test_latency_tracker  # P50/P95/P99 math checks
-build/tests/test_sse_server       # SSE delivery & worker thread release
-```
+`Dockerfile.jetson` targets JetPack 6 (L4T r36.x). Its base image brings
+CUDA 12.6, TensorRT 10 and ONNX Runtime 1.20.2 built with the CUDA and
+TensorRT providers.
 
 <details>
-<summary><b>🛠 Address/Thread Sanitizers Build</b></summary>
-
-Catch memory leaks or race conditions by enabling compiler sanitizers:
-```bash
-cmake -B build -DENABLE_TSAN=ON   # ThreadSanitizer
-cmake -B build -DENABLE_ASAN=ON   # AddressSanitizer
-```
-</details>
-
----
-
-## 📚 References & Resources
-
-- 🏗️ [**Architecture Deep-Dive**](docs/ARCHITECTURE.md) — Threading models, data lifecycle, queue mechanics.
-- 👨‍💻 [**Development Guide**](docs/DEVELOPMENT.md) — Tooling, advanced prerequisites, application profiling.
-
-## 📦 Core Dependencies
-
-| Library | Version | Purpose |
-|---------|---------|---------|
-| **[OpenCV](https://opencv.org/)** | `>= 4.6` | Video capture, image processing |
-| **[ONNX Runtime](https://nxruntime.ai/)** | `>= 1.17` | YOLOv8 inference (C++ API) |
-| **[nlohmann/json](https://github.com/nlohmann/json)** | `3.11.3` | JSON serialization (fetched by CMake) |
-| **[cpp-httplib](https://github.com/yhirose/cpp-httplib)** | `0.18.7` | HTTP/SSE/MJPEG server (fetched by CMake) |
+<summary><b>Board without internet: build on a PC, ship over SSH</b></summary>
 
 <br/>
 
+```bash
+# On an x86 PC with Docker buildx and QEMU (qemu-user-static, binfmt-support)
+docker build --platform linux/arm64 -f Dockerfile.jetson -t video-analytics:jetson .
+docker save video-analytics:jetson | ssh USER@BOARD 'docker load'
+scp models/yolov8n.onnx USER@BOARD:~/video-analytics/models/
+```
+
+</details>
+
+<details>
+<summary><b>CSI cameras through GStreamer</b></summary>
+
+<br/>
+
+`--device` opens USB cameras. A CSI sensor needs a pipeline:
+
+```bash
+build/src/video_analytics --headless --provider tensorrt --gst \
+  "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 \
+   ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR \
+   ! appsink drop=true max-buffers=1"
+```
+
+Any pipeline works as long as it ends in `appsink` and delivers BGR frames.
+No camera at hand? Use a test source:
+
+```bash
+--gst "videotestsrc is-live=true ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1"
+```
+
+</details>
+
+Things worth knowing on a Jetson:
+
+- Mount `models` writable when using `--provider tensorrt`: the engine is
+  cached in `models/trt-cache/`.
+- An engine only loads with the TensorRT version that built it. Delete
+  `models/trt-cache/` after switching between a native build and the container.
+- Use the top power mode for real runs: `sudo nvpmodel -m 2 && sudo jetson_clocks`
+  (MAXN SUPER on JetPack 6.2).
+- Known gap: inside the container `nvarguscamerasrc` does not load (`libEGL`
+  is missing from the image), so CSI cameras currently need a native build.
+  USB cameras work in the container.
+
+## 📂 Project layout
+
+```text
+src/
+├── main.cpp          CLI, live loop, benchmark loop
+├── capture/          Camera, GStreamer and video file input (OpenCV)
+├── inference/        ONNX Runtime session, preprocess, postprocess + NMS
+├── pipeline/         Threads and bounded queues: capture → workers → results
+├── server/           HTTP server: SSE, MJPEG, static files, JSON serializer
+├── benchmark/        Latency percentiles and Markdown report
+└── utils/            FPS tracker
+web/                  Dashboard (plain HTML, CSS, JS)
+tests/                Five test binaries, no framework needed
+scripts/              Model download/export, FP16 conversion
+Dockerfile            x86-64, CPU
+Dockerfile.jetson     JetPack 6, CUDA + TensorRT
+```
+
+## 🧪 Testing
+
+```bash
+build/tests/test_pipeline         # bounded queue, drop policy, threading
+build/tests/test_inference        # model load, detection, postprocess
+build/tests/test_serializer       # JSON payload and rounding
+build/tests/test_latency_tracker  # p50 / p95 / p99 math
+build/tests/test_sse_server       # SSE delivery, MJPEG stream, shutdown
+```
+
+Each prints `Failed: 0` when it passes. CI builds and runs all five on every
+push, plus a ThreadSanitizer build of the pipeline tests.
+
+<details>
+<summary><b>Sanitizer builds</b></summary>
+
+<br/>
+
+```bash
+cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON   # data races
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON   # memory errors
+```
+
+</details>
+
+## 🩺 Troubleshooting
+
+| Symptom | Fix |
+|:--------|:----|
+| `Failed to load model ... File doesn't exist` | Run `scripts/download-model.sh`, or check the `-v ...:/app/models` mount. |
+| `Failed to open camera 0` | No `/dev/video0`, or `--device /dev/video0` is missing from `docker run`. |
+| `Execution provider 'cuda' not available` | This ONNX Runtime build is CPU only. On a Jetson use the `video-analytics:jetson` image. |
+| `TensorRT EP could not deserialize engine from cache` | The cached engine came from another TensorRT version. Delete `models/trt-cache/`. |
+| First `tensorrt` start sits silent for minutes | It is building the engine. Later starts are fast. |
+| Dashboard shows `Not found` | Start the binary from the repository root so it can find `web/`. |
+| Dashboard unreachable from another machine | Add `--bind 0.0.0.0` and publish the port. |
+
+More cases, including offline builds, are in the step-by-step guide below.
+
+## 📚 Documentation
+
+| Document | What is inside |
+|:---------|:---------------|
+| [docs/GUIDE.md](docs/GUIDE.md) | Step-by-step build and usage guide (Vietnamese) |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Threading model, data lifecycle, queue mechanics |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Tooling, Docker details, profiling, sanitizers |
+
+## 📦 Dependencies
+
+| Library | Version | Used for |
+|:--------|:--------|:---------|
+| [OpenCV](https://opencv.org/) | 4.5+ | Capture, image processing, NMS, JPEG encoding |
+| [ONNX Runtime](https://onnxruntime.ai/) | 1.17+ (1.18+ for TensorRT 10) | YOLOv8 inference through the C++ API |
+| [nlohmann/json](https://github.com/nlohmann/json) | 3.11.3 | JSON serialization, fetched by CMake |
+| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | 0.18.7 | HTTP, SSE and MJPEG server, fetched by CMake |
+
 <div align="center">
-  <i>Developed with ❤️ for high-performance C++ engineering.</i><br>
-  <!--- Feel free to add a screenshot or GIF here showcasing your dashboard! --->
-  <!--- <img src="URL_TO_YOUR_GIF_OR_IMAGE" width="800"> --->
+<br/>
+<sub>C++17 · YOLOv8 · ONNX Runtime · TensorRT</sub>
 </div>
