@@ -60,10 +60,26 @@ void SseServer::updateFrame(const cv::Mat& frame) {
 
 void SseServer::start() {
   if (running_) return;
-  running_ = true;
 
+  server_ = std::make_unique<httplib::Server>();
+  // httplib defaults to SO_REUSEPORT, which lets a second instance bind the
+  // same port silently. SO_REUSEADDR still allows a quick restart.
+  server_->set_socket_options([](socket_t sock) {
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  });
+  if (!server_->bind_to_port(config_.bindAddress, config_.port)) {
+    std::cerr << "SSE server: cannot bind " << config_.bindAddress << ":"
+              << config_.port << "\n";
+    server_.reset();
+    return;
+  }
+  std::cout << "SSE server listening on http://" << config_.bindAddress << ":"
+            << config_.port << "\n";
+
+  running_ = true;
   httpThread_ = std::thread([this]() {
-    httplib::Server svr;
+    httplib::Server& svr = *server_;
 
     // Health check
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
@@ -163,10 +179,10 @@ void SseServer::start() {
               }
             });
 
-    std::cout << "SSE server listening on http://" << config_.bindAddress << ":"
-              << config_.port << "\n";
-    svr.listen(config_.bindAddress, config_.port);
+    svr.listen_after_bind();
   });
+  // stop() only works once the listen loop is up
+  server_->wait_until_ready();
 }
 
 void SseServer::stop() {
@@ -175,6 +191,10 @@ void SseServer::stop() {
   frameReady_.notify_all();
   eventReady_.notify_all();
 
-  if (httpThread_.joinable()) httpThread_.detach();
+  // Closes the listening socket; handlers see !running_ and return, so the
+  // join also guarantees nothing still uses this object.
+  server_->stop();
+  if (httpThread_.joinable()) httpThread_.join();
+  server_.reset();
   std::cout << "SSE server stopped\n";
 }

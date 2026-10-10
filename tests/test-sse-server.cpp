@@ -42,7 +42,6 @@ void testBroadcastDeliveredOnce() {
   config.port = kPort;
   SseServer server(config);
   server.start();
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   server.broadcast("{\"n\":1}");
 
@@ -70,7 +69,6 @@ void testAbandonedClientsReleaseThreads() {
   config.port = kPort + 1;
   SseServer server(config);
   server.start();
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   server.broadcast("{\"n\":1}");
 
@@ -98,6 +96,41 @@ void testAbandonedClientsReleaseThreads() {
   server.stop();
 }
 
+// Test 3: a busy port is reported, and stop() really closes the port
+void testBindFailureAndStop() {
+  std::cout << "\n=== Test 3: Bind Failure And Stop ===\n";
+
+  SseServerConfig config;
+  config.port = kPort + 2;
+  SseServer first(config);
+  first.start();
+  test::assert_true(first.isRunning(), "server is running after start()");
+
+  SseServer second(config);
+  second.start();
+  test::assert_true(!second.isRunning(),
+                    "second server on a busy port does not start");
+
+  // A connected client must not keep stop() waiting
+  std::thread viewer([&] {
+    httplib::Client client("127.0.0.1", config.port);
+    client.Get("/events", [](const char*, size_t) { return true; });
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  auto begin = std::chrono::steady_clock::now();
+  first.stop();
+  double stopSec = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - begin)
+                       .count();
+  viewer.join();
+  test::assert_true(stopSec < 2.0, "stop() returns with a client connected");
+
+  httplib::Client client("127.0.0.1", config.port);
+  client.set_connection_timeout(1);
+  test::assert_true(!client.Get("/health"), "port is closed after stop()");
+}
+
 int main() {
   std::cout << "==================================================\n";
   std::cout << "SSE Server Test Suite\n";
@@ -105,6 +138,7 @@ int main() {
 
   testBroadcastDeliveredOnce();
   testAbandonedClientsReleaseThreads();
+  testBindFailureAndStop();
 
   std::cout << "\n==================================================\n";
   std::cout << "Test Summary\n";
