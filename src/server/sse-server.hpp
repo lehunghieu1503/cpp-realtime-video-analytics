@@ -2,15 +2,11 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <memory>
 #include <mutex>
 #include <opencv2/core.hpp>
 #include <string>
 #include <thread>
 #include <vector>
-
-// Forward declare — defined in sse-server.cpp
-struct SseClients;
 
 // SSE + MJPEG server for streaming detection results and video to browsers.
 // Main thread calls broadcast() and updateFrame() — no queue dependency.
@@ -40,8 +36,11 @@ private:
   std::thread httpThread_;
   std::atomic<bool> running_{false};
 
-  // SSE client tracking (shared with http thread)
-  std::shared_ptr<SseClients> sseClients_;
+  // Latest SSE event; each /events handler sends it when the sequence advances
+  std::mutex eventMutex_;
+  std::condition_variable eventReady_;
+  std::string latestEvent_;
+  uint64_t eventSeq_ = 0;
 
   // Latest JPEG frame for MJPEG streaming
   std::mutex frameMutex_;
