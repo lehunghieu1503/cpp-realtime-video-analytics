@@ -28,8 +28,7 @@ wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxrunt
 
 ```bash
 pip install ultralytics
-yolo export model=yolov8n.pt format=onnx
-mkdir -p models && mv yolov8n.onnx models/
+scripts/download-model.sh
 ```
 
 ## Build
