@@ -160,6 +160,9 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
   config.inferenceConfig.confidenceThreshold = 0.5f;
   config.inferenceConfig.nmsThreshold = 0.45f;
   config.numWorkers = numWorkers;
+  // When inference is slower than the camera the queue stays full, and every
+  // queued frame adds one inference time of delay to what is shown
+  config.frameQueueSize = static_cast<size_t>(numWorkers);
 
   Pipeline pipeline(config);
   pipeline.start();
