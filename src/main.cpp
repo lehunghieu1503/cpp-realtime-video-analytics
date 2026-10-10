@@ -181,12 +181,13 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
   std::cout << "Dashboard: http://localhost:" << port << "\n";
 
   FpsTracker fpsTracker;
+  uint64_t nextFrameId = 0;
 
   // Create the window up front so waitKey() can pump events before the first
   // frame arrives
   if (!headless) cv::namedWindow("Video Analytics");
 
-  // isRunning() turns false when the camera is lost
+  // isRunning() turns false when the camera is lost or inference fails
   while (!gShutdown && pipeline.isRunning()) {
     // Every pass, not only when a frame arrived, so the window stays
     // responsive and 'q' works while the camera stalls
@@ -197,6 +198,9 @@ int runLive(int deviceIndex, const std::string& modelPath, int port,
     if (!resultOpt) continue;
 
     auto& result = *resultOpt;
+    // Workers finish out of order; never step back to an older frame
+    if (result.frameId < nextFrameId) continue;
+    nextFrameId = result.frameId + 1;
     fpsTracker.update();
 
     drawDetections(result.frame, result.detections);
