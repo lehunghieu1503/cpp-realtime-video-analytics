@@ -14,17 +14,18 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config)
   sessionOptions.SetGraphOptimizationLevel(
       GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-  // CUDA execution provider (optional)
-  if (config_.useCuda) {
-    try {
+  // No silent fallback to CPU: it would look like a working GPU setup that is
+  // several times slower
+  try {
+    if (config_.provider == "cuda") {
       OrtCUDAProviderOptions cudaOptions;
       cudaOptions.device_id = 0;
       sessionOptions.AppendExecutionProvider_CUDA(cudaOptions);
-      std::cout << "CUDA execution provider enabled\n";
-    } catch (const Ort::Exception& e) {
-      std::cerr << "CUDA not available, falling back to CPU: " << e.what()
-                << "\n";
     }
+  } catch (const Ort::Exception& e) {
+    std::cerr << "Execution provider '" << config_.provider
+              << "' not available: " << e.what() << "\n";
+    return;
   }
 
   // Load model

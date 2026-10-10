@@ -66,14 +66,15 @@ void drawOverlay(cv::Mat& frame, double fps, double latencyMs,
 // ── Benchmark mode ──────────────────────────────────────────────────────────
 int runBenchmark(const std::string& inputVideo, int maxFrames,
                  const std::string& outputReport, const std::string& modelPath,
-                 int numWorkers) {
+                 int numWorkers, const std::string& provider) {
   std::cout << "Benchmark mode: " << inputVideo << " (" << maxFrames
             << " frames, model: " << modelPath << ", workers: " << numWorkers
-            << ")\n";
+            << ", provider: " << provider << ")\n";
 
   PipelineConfig config;
   config.captureConfig.videoPath = inputVideo;
   config.inferenceConfig.modelPath = modelPath;
+  config.inferenceConfig.provider = provider;
   config.inferenceConfig.confidenceThreshold = 0.5f;
   config.inferenceConfig.nmsThreshold = 0.45f;
   config.numWorkers = numWorkers;
@@ -134,6 +135,7 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
   results.fpsMean = elapsedSec > 0.0 ? frameCount / elapsedSec : 0.0;
   results.totalFrames = frameCount;
   results.latency = latency;
+  results.device = provider;
 
   std::cout << "\n" << generateReport(results);
 
@@ -146,13 +148,15 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
 
 // ── Live mode (camera + dashboard) ──────────────────────────────────────────
 int runLive(int deviceIndex, const std::string& modelPath, int port,
-            int numWorkers, const std::string& bindAddress, bool headless) {
+            int numWorkers, const std::string& bindAddress, bool headless,
+            const std::string& provider) {
   PipelineConfig config;
   config.captureConfig.deviceIndex = deviceIndex;
   config.captureConfig.width = 640;
   config.captureConfig.height = 480;
   config.captureConfig.codec = "MJPG";
   config.inferenceConfig.modelPath = modelPath;
+  config.inferenceConfig.provider = provider;
   config.inferenceConfig.confidenceThreshold = 0.5f;
   config.inferenceConfig.nmsThreshold = 0.45f;
   config.numWorkers = numWorkers;
@@ -235,6 +239,7 @@ void printUsage(const char* prog) {
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
       << "  --workers N      Inference worker threads (default: 2)\n"
+      << "  --provider NAME  Execution provider: cpu, cuda (default: cpu)\n"
       << "  --headless       No local window; dashboard only\n\n"
       << "Benchmark options:\n"
       << "  --input FILE     Input video file (required)\n"
@@ -257,6 +262,7 @@ int main(int argc, char* argv[]) {
   std::string bindAddress = "127.0.0.1";
   int numWorkers = 2;
   bool headless = false;
+  std::string provider = "cpu";
 
   auto parseIntArg = [&](const char* val, const char* name) -> int {
     try {
@@ -286,6 +292,8 @@ int main(int argc, char* argv[]) {
       bindAddress = argv[++i];
     } else if (std::strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
       numWorkers = parseIntArg(argv[++i], "--workers");
+    } else if (std::strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
+      provider = argv[++i];
     } else if (std::strcmp(argv[i], "--headless") == 0) {
       headless = true;
     } else if (std::strcmp(argv[i], "--help") == 0) {
@@ -306,6 +314,11 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
+  if (provider != "cpu" && provider != "cuda") {
+    std::cerr << "Error: --provider must be cpu or cuda\n";
+    return -1;
+  }
+
   if (benchmarkMode) {
     if (inputVideo.empty()) {
       std::cerr << "Error: --benchmark requires --input VIDEO_FILE\n";
@@ -317,9 +330,9 @@ int main(int argc, char* argv[]) {
       return -1;
     }
     return runBenchmark(inputVideo, maxFrames, outputReport, modelPath,
-                        numWorkers);
+                        numWorkers, provider);
   }
 
   return runLive(deviceIndex, modelPath, port, numWorkers, bindAddress,
-                 headless);
+                 headless, provider);
 }

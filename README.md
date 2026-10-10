@@ -146,6 +146,7 @@ video_analytics --benchmark OPTIONS        Benchmark mode
 | `--port N` | HTTP Dashboard port | `9001` |
 | `--bind ADDR` | Server bind IPv4 address | `127.0.0.1` |
 | `--workers N` | Number of ONNX inference threads | `2` |
+| `--provider NAME` | Execution provider: `cpu`, `cuda` | `cpu` |
 | `--headless` | No local window, dashboard only | off |
 
 ### Benchmark Options

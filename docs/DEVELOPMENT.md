@@ -135,8 +135,7 @@ docker run --rm --runtime nvidia --device /dev/video0 \
 - Base `dustynv/onnxruntime:1.20.2-r36.4.0` (~6 GB download): CUDA 12.6,
   TensorRT 10, ONNX Runtime 1.20.2 with the CUDA and TensorRT providers
 - `--runtime nvidia` mounts the host GPU driver into the container
-- Inference still runs on the CPU: the app has no option yet to select a GPU
-  execution provider
+- Inference runs on the CPU unless `--provider cuda` is passed
 
 ## Profiling
 

@@ -17,7 +17,8 @@ struct InferenceConfig {
   float confidenceThreshold = 0.5f;
   float nmsThreshold = 0.45f;
   int numThreads = 4;
-  bool useCuda = false;
+  // "cpu" or "cuda"; the engine stays unloaded if the provider is unavailable
+  std::string provider = "cpu";
 };
 
 // ONNX Runtime-based YOLOv8 inference engine
