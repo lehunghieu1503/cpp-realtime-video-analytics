@@ -2,6 +2,8 @@
 
 #include <opencv2/dnn.hpp>
 
+#include <algorithm>
+
 std::vector<Detection> postprocess(const float* outputData,
                                    const std::vector<int64_t>& outputShape,
                                    float confThreshold, float nmsThreshold,
@@ -49,12 +51,17 @@ std::vector<Detection> postprocess(const float* outputData,
 
     if (bestScore < confThreshold) continue;
 
-    // Convert center-format to top-left corner and scale to original image
-    // Clamp to image boundaries to avoid out-of-bounds coords
+    // Convert center-format to corners, scale to original image, and clamp
+    // each edge to the image so a clipped box shrinks instead of shifting
     float x = std::max(0.0f, (cx - w / 2.0f) * scaleX);
     float y = std::max(0.0f, (cy - h / 2.0f) * scaleY);
-    float bw = std::min(w * scaleX, static_cast<float>(origWidth) - x);
-    float bh = std::min(h * scaleY, static_cast<float>(origHeight) - y);
+    float x2 =
+        std::min(static_cast<float>(origWidth), (cx + w / 2.0f) * scaleX);
+    float y2 =
+        std::min(static_cast<float>(origHeight), (cy + h / 2.0f) * scaleY);
+    if (x2 <= x || y2 <= y) continue;  // entirely outside the image
+    float bw = x2 - x;
+    float bh = y2 - y;
 
     bboxes.emplace_back(x, y, bw, bh);
     // NMSBoxes requires cv::Rect (int) — round for NMS, keep float for result
