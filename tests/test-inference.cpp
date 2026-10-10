@@ -344,6 +344,24 @@ void testPostprocess() {
       postprocess(data.data(), {1, 84}, 0.5f, 0.45f, 640, 640, 640, 640);
   test::assert_true(none.empty(),
                     "Output shape with < 3 dims returns no detections");
+
+  // One candidate hanging over the top-left corner: center (10, 10), 40x40,
+  // class 0 at 0.9. Layout is feature-major, shape [1, 84, 1].
+  data[0] = 10.0f;
+  data[1] = 10.0f;
+  data[2] = 40.0f;
+  data[3] = 40.0f;
+  data[4] = 0.9f;
+  auto dets =
+      postprocess(data.data(), {1, 84, 1}, 0.5f, 0.45f, 640, 640, 640, 640);
+  test::assert_true(dets.size() == 1, "Clipped candidate is kept");
+  if (dets.size() == 1) {
+    test::assert_equal(dets[0].bbox.x, 0.0f, 0.001f, "Clipped bbox x is 0");
+    test::assert_equal(dets[0].bbox.width, 30.0f, 0.001f,
+                       "Clipped bbox width is the visible 30 px");
+    test::assert_equal(dets[0].bbox.height, 30.0f, 0.001f,
+                       "Clipped bbox height is the visible 30 px");
+  }
 }
 
 int main() {
