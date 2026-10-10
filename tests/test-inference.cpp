@@ -10,6 +10,7 @@
 
 #include "inference/detection.hpp"
 #include "inference/inference-engine.hpp"
+#include "inference/post-process.hpp"
 
 // Test utilities
 namespace test {
@@ -333,6 +334,18 @@ void testCocoClassNames() {
                     "Out-of-range class ID returns 'unknown'");
 }
 
+// Test 7: postprocess on hand-built tensors (no model needed)
+void testPostprocess() {
+  std::cout << "\n=== Test 7: Postprocess (synthetic tensor) ===\n";
+
+  // An output with fewer than 3 dimensions is rejected, not indexed
+  std::vector<float> data(84, 0.0f);
+  auto none =
+      postprocess(data.data(), {1, 84}, 0.5f, 0.45f, 640, 640, 640, 640);
+  test::assert_true(none.empty(),
+                    "Output shape with < 3 dims returns no detections");
+}
+
 int main() {
   std::cout << "==================================================\n";
   std::cout << "ONNX Runtime Inference Engine Test Suite\n";
@@ -348,6 +361,7 @@ int main() {
   testPerformance();
   testMultipleInferences();
   testCocoClassNames();
+  testPostprocess();
 
   // Print summary
   std::cout << "\n==================================================\n";

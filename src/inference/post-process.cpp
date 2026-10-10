@@ -7,6 +7,9 @@ std::vector<Detection> postprocess(const float* outputData,
                                    float confThreshold, float nmsThreshold,
                                    int origWidth, int origHeight,
                                    int inputWidth, int inputHeight) {
+  // Validate output shape before indexing it
+  if (outputShape.size() < 3) return {};
+
   // YOLOv8 output shape: [1, 84, 8400]
   //   84 = 4 bbox coords (cx, cy, w, h) + 80 class scores
   //   8400 = number of candidate detections
@@ -17,9 +20,6 @@ std::vector<Detection> postprocess(const float* outputData,
   // Scale factors to map model coordinates back to original image
   float scaleX = static_cast<float>(origWidth) / inputWidth;
   float scaleY = static_cast<float>(origHeight) / inputHeight;
-
-  // Validate output shape has expected dimensions
-  if (outputShape.size() < 3) return {};
 
   // Collect candidates that pass confidence threshold
   std::vector<int> classIds;
