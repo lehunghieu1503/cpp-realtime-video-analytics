@@ -120,6 +120,24 @@ in the `video` group; if the host's `video` group has a different GID, add
 - ONNX Runtime 1.17.0 with CPU support
 - Ubuntu 22.04 base with minimal OpenCV runtime dependencies
 
+### Jetson (JetPack 6, aarch64)
+
+`Dockerfile` is x86-64 and CPU only. On a Jetson Orin use `Dockerfile.jetson`,
+built on the board itself:
+
+```bash
+docker build -f Dockerfile.jetson -t video-analytics:jetson .
+
+docker run --rm --runtime nvidia --device /dev/video0 \
+  -v "$(pwd)/models:/app/models:ro" -p 9001:9001 video-analytics:jetson
+```
+
+- Base `dustynv/onnxruntime:1.20.2-r36.4.0` (~6 GB download): CUDA 12.6,
+  TensorRT 10, ONNX Runtime 1.20.2 with the CUDA and TensorRT providers
+- `--runtime nvidia` mounts the host GPU driver into the container
+- Inference still runs on the CPU: the app has no option yet to select a GPU
+  execution provider
+
 ## Profiling
 
 ### ThreadSanitizer (data races)

@@ -1,0 +1,48 @@
+# Jetson (JetPack 6, L4T r36.x, aarch64) image.
+# The base ships CUDA 12.6, cuDNN 9, TensorRT 10 and ONNX Runtime 1.20.2 built
+# with the CUDA and TensorRT execution providers, headers and libs in /usr/local.
+# TensorRT 10 needs ONNX Runtime >= 1.18.
+ARG BASE_IMAGE=dustynv/onnxruntime:1.20.2-r36.4.0
+
+# Stage 1: Build
+FROM ${BASE_IMAGE} AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git ca-certificates \
+    libopencv-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --parallel $(nproc)
+
+# Stage 2: Runtime (same base: the GPU libraries are needed at run time)
+FROM ${BASE_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopencv-core4.5d \
+    libopencv-imgcodecs4.5d \
+    libopencv-imgproc4.5d \
+    libopencv-dnn4.5d \
+    libopencv-videoio4.5d \
+    libopencv-highgui4.5d \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy application binary and web assets.
+# Models are not in the repo; mount them at /app/models when running.
+WORKDIR /app
+COPY --from=builder /app/build/src/video_analytics .
+COPY web/ web/
+
+# Run as non-root; the video group is needed to open /dev/video* and the GPU
+# device nodes
+RUN useradd -m -G video appuser
+USER appuser
+
+EXPOSE 9001
+
+# No display in the container, and the published port needs 0.0.0.0
+ENTRYPOINT ["./video_analytics", "--headless", "--bind", "0.0.0.0"]
+CMD ["--device", "0", "--port", "9001"]
