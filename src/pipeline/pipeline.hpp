@@ -15,6 +15,9 @@ struct PipelineConfig {
   int numWorkers = 2;
   size_t frameQueueSize = 8;
   size_t resultQueueSize = 16;
+  // false: capture waits for room in the frame queue instead of dropping the
+  // oldest frame (benchmark mode — every frame is processed)
+  bool dropWhenFull = true;
   CaptureConfig captureConfig;
   InferenceConfig inferenceConfig;
 };

@@ -85,6 +85,14 @@ void Pipeline::captureLoop() {
   const int kMaxFails = 30;
 
   while (running_) {
+    // Only this thread pushes, so once there is room the push cannot drop.
+    // shortcut: polls every 1 ms, use a blocking push if capture rate matters
+    if (!config_.dropWhenFull &&
+        frameQueue_.size() >= config_.frameQueueSize) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+
     cv::Mat frame;
     if (!capture_->read(frame)) {
       if (isVideoFile) {
@@ -128,6 +136,7 @@ void Pipeline::inferenceWorker(int workerId) {
     if (!frameOpt) break;  // queue stopped
 
     auto& fd = *frameOpt;
+    auto detectStart = std::chrono::steady_clock::now();
     auto detections = engine->detect(fd.frame);
     auto now = std::chrono::steady_clock::now();
 
@@ -139,6 +148,8 @@ void Pipeline::inferenceWorker(int workerId) {
     result.detections = std::move(detections);
     result.inferenceLatencyMs =
         std::chrono::duration<double, std::milli>(now - fd.captureTime).count();
+    result.detectMs =
+        std::chrono::duration<double, std::milli>(now - detectStart).count();
 
     resultQueue_.push(std::move(result));
   }

@@ -77,11 +77,11 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
   config.inferenceConfig.confidenceThreshold = 0.5f;
   config.inferenceConfig.nmsThreshold = 0.45f;
   config.numWorkers = numWorkers;
-  // Use larger queues for benchmark — no frame dropping, capped at 2000
-  size_t benchQueueSize = std::min(static_cast<size_t>(maxFrames + 10),
-                                   static_cast<size_t>(2000));
-  config.frameQueueSize = benchQueueSize;
-  config.resultQueueSize = benchQueueSize;
+  // Process every frame: capture waits for room instead of dropping, so a
+  // short queue is enough and memory stays bounded
+  config.dropWhenFull = false;
+  config.frameQueueSize = static_cast<size_t>(numWorkers) * 2;
+  config.resultQueueSize = 64;
 
   Pipeline pipeline(config);
   pipeline.start();
@@ -94,6 +94,8 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
   LatencyTracker latency;
   FpsTracker fpsTracker;
   int frameCount = 0;
+  auto startTime = std::chrono::steady_clock::now();
+  auto lastResultTime = startTime;
 
   while (frameCount < maxFrames && !gShutdown) {
     auto resultOpt =
@@ -107,7 +109,9 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
     }
 
     frameCount++;
-    latency.record(resultOpt->inferenceLatencyMs);
+    lastResultTime = std::chrono::steady_clock::now();
+    // detect() time only; capture → done would mostly measure queue wait
+    latency.record(resultOpt->detectMs);
     fpsTracker.update();
 
     // Progress every 100 frames
@@ -122,7 +126,10 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
 
   // Print results
   BenchmarkResults results;
-  results.fpsMean = fpsTracker.fps;
+  // Mean over the whole run; FpsTracker only knows its last 1 s window
+  double elapsedSec =
+      std::chrono::duration<double>(lastResultTime - startTime).count();
+  results.fpsMean = elapsedSec > 0.0 ? frameCount / elapsedSec : 0.0;
   results.totalFrames = frameCount;
   results.latency = latency;
 
