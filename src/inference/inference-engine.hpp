@@ -17,7 +17,9 @@ struct InferenceConfig {
   float confidenceThreshold = 0.5f;
   float nmsThreshold = 0.45f;
   int numThreads = 4;
-  // "cpu" or "cuda"; the engine stays unloaded if the provider is unavailable
+  // "cpu", "cuda" or "tensorrt"; the engine stays unloaded if the provider is
+  // unavailable. tensorrt builds an FP16 engine and caches it in trt-cache/
+  // next to the model, so that directory must be writable.
   std::string provider = "cpu";
 };
 

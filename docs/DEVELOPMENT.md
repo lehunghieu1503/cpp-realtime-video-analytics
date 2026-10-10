@@ -135,7 +135,21 @@ docker run --rm --runtime nvidia --device /dev/video0 \
 - Base `dustynv/onnxruntime:1.20.2-r36.4.0` (~6 GB download): CUDA 12.6,
   TensorRT 10, ONNX Runtime 1.20.2 with the CUDA and TensorRT providers
 - `--runtime nvidia` mounts the host GPU driver into the container
-- Inference runs on the CPU unless `--provider cuda` is passed
+- Inference runs on the CPU unless `--provider cuda` or `--provider tensorrt`
+  is passed
+
+TensorRT (FP16) is the fastest option on a Jetson. The first start builds the
+engine, which takes a few minutes, and caches it in `models/trt-cache/`, so
+mount `models` writable (the container user has UID 1000):
+
+```bash
+docker run --rm --runtime nvidia --device /dev/video0 \
+  -v "$(pwd)/models:/app/models" -p 9001:9001 video-analytics:jetson \
+  --provider tensorrt
+```
+
+The engine is built from the FP32 model; `scripts/quantize-fp16.py` is not
+needed with `--provider tensorrt`.
 
 ## Profiling
 

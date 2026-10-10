@@ -2,6 +2,7 @@
 #include "post-process.hpp"
 #include "pre-process.hpp"
 
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
@@ -17,7 +18,27 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config)
   // No silent fallback to CPU: it would look like a working GPU setup that is
   // several times slower
   try {
-    if (config_.provider == "cuda") {
+    if (config_.provider == "tensorrt") {
+      const OrtApi& api = Ort::GetApi();
+      OrtTensorRTProviderOptionsV2* raw = nullptr;
+      Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&raw));
+      std::unique_ptr<OrtTensorRTProviderOptionsV2,
+                      decltype(api.ReleaseTensorRTProviderOptions)>
+          trtOptions(raw, api.ReleaseTensorRTProviderOptions);
+
+      // Building the engine takes minutes, so keep it across runs
+      auto modelDir = std::filesystem::path(config_.modelPath).parent_path();
+      std::string cacheDir =
+          ((modelDir.empty() ? "." : modelDir) / "trt-cache").string();
+      const char* keys[] = {"trt_fp16_enable", "trt_engine_cache_enable",
+                            "trt_engine_cache_path"};
+      const char* values[] = {"1", "1", cacheDir.c_str()};
+      Ort::ThrowOnError(
+          api.UpdateTensorRTProviderOptions(trtOptions.get(), keys, values, 3));
+      sessionOptions.AppendExecutionProvider_TensorRT_V2(*trtOptions);
+    }
+    // After TensorRT, CUDA runs the nodes TensorRT does not support
+    if (config_.provider != "cpu") {
       OrtCUDAProviderOptions cudaOptions;
       cudaOptions.device_id = 0;
       sessionOptions.AppendExecutionProvider_CUDA(cudaOptions);

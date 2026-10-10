@@ -239,7 +239,8 @@ void printUsage(const char* prog) {
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
       << "  --workers N      Inference worker threads (default: 2)\n"
-      << "  --provider NAME  Execution provider: cpu, cuda (default: cpu)\n"
+      << "  --provider NAME  Execution provider: cpu, cuda, tensorrt\n"
+      << "                   (default: cpu)\n"
       << "  --headless       No local window; dashboard only\n\n"
       << "Benchmark options:\n"
       << "  --input FILE     Input video file (required)\n"
@@ -314,8 +315,8 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
-  if (provider != "cpu" && provider != "cuda") {
-    std::cerr << "Error: --provider must be cpu or cuda\n";
+  if (provider != "cpu" && provider != "cuda" && provider != "tensorrt") {
+    std::cerr << "Error: --provider must be cpu, cuda or tensorrt\n";
     return -1;
   }
 
