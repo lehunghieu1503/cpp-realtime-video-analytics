@@ -1,6 +1,9 @@
 #include "pipeline.hpp"
 #include "capture/opencv-capture.hpp"
 
+#include <sched.h>
+
+#include <algorithm>
 #include <iostream>
 
 Pipeline::Pipeline(const PipelineConfig& config)
@@ -22,6 +25,17 @@ void Pipeline::start() {
     return;
   }
   std::cout << "Pipeline: " << capture_->getInfo() << "\n";
+
+  // Keep workers x intra-op threads within the cores, leaving one for capture
+  // and the consumer of the results. The affinity mask, unlike
+  // hardware_concurrency(), follows taskset and docker --cpuset-cpus.
+  cpu_set_t cpus;
+  if (sched_getaffinity(0, sizeof(cpus), &cpus) == 0) {
+    int cores = CPU_COUNT(&cpus);
+    config_.inferenceConfig.numThreads =
+        std::min(config_.inferenceConfig.numThreads,
+                 std::max(1, (cores - 1) / config_.numWorkers));
+  }
 
   // Create one InferenceEngine per worker (session-per-worker for thread safety)
   engines_.clear();
@@ -50,7 +64,8 @@ void Pipeline::start() {
   }
 
   std::cout << "Pipeline: started with " << config_.numWorkers
-            << " inference worker(s)\n";
+            << " inference worker(s), "
+            << config_.inferenceConfig.numThreads << " thread(s) each\n";
 }
 
 void Pipeline::stop() {
