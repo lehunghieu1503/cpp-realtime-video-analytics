@@ -80,7 +80,7 @@ Get the pipeline running in seconds without installing local dependencies:
 
 ```bash
 docker build -t video-analytics .
-docker run --rm --device /dev/video0 -p 9001:9001 video-analytics
+docker run --rm --device /dev/video0 -p 127.0.0.1:9001:9001 video-analytics
 ```
 
 ### 🛠️ Manual Build Strategy
