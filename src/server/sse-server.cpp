@@ -75,7 +75,6 @@ void SseServer::start() {
     // once the client is gone.
     svr.Get("/events", [this](const httplib::Request&, httplib::Response& res) {
       res.set_header("Cache-Control", "no-cache");
-      res.set_header("Access-Control-Allow-Origin", "*");
       res.set_chunked_content_provider(
           "text/event-stream",
           [this, lastSeq = uint64_t{0}](size_t,
@@ -99,7 +98,6 @@ void SseServer::start() {
     // MJPEG video stream endpoint
     svr.Get("/video", [this](const httplib::Request&, httplib::Response& res) {
       res.set_header("Cache-Control", "no-cache");
-      res.set_header("Access-Control-Allow-Origin", "*");
       res.set_chunked_content_provider(
           "multipart/x-mixed-replace; boundary=frame",
           [this](size_t, httplib::DataSink& sink) {

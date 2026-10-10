@@ -53,7 +53,7 @@ cmake --build build --parallel $(nproc)
 # Live mode (camera 0, localhost only)
 build/src/video_analytics --device 0
 
-# Live mode on all interfaces
+# Live mode on all interfaces (no authentication: anyone on the network can watch)
 build/src/video_analytics --device 0 --bind 0.0.0.0 --port 9001
 
 # Custom port and worker threads
@@ -93,14 +93,14 @@ Test structure:
 # Build image (multi-stage: builder + runtime, ~400 MB)
 docker build -t video-analytics .
 
-# Run with camera access (binds to 0.0.0.0:9001 by default)
-docker run --rm --device /dev/video0 -p 9001:9001 video-analytics
+# Run with camera access, dashboard reachable from this machine only
+docker run --rm --device /dev/video0 -p 127.0.0.1:9001:9001 video-analytics
 
 # Custom device and port
-docker run --rm --device /dev/video1 -p 8080:8080 video-analytics --device 1 --port 8080
+docker run --rm --device /dev/video1 -p 127.0.0.1:8080:8080 video-analytics --device 1 --port 8080
 
-# Localhost only (security)
-docker run --rm --device /dev/video0 -p 127.0.0.1:9001:9001 video-analytics --bind 127.0.0.1
+# Expose to the network (no authentication: anyone on the network can watch)
+docker run --rm --device /dev/video0 -p 9001:9001 video-analytics
 ```
 
 **Production Dockerfile**
