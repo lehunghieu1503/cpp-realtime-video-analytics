@@ -50,6 +50,13 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config)
     inputShape_ = tensorInfo.GetShape();
   }
 
+  // Use the model's own input size when it is fixed (e.g. exported at 320 or
+  // 1280). Dynamic dimensions come back as -1 and keep the configured size.
+  if (inputShape_.size() == 4 && inputShape_[2] > 0 && inputShape_[3] > 0) {
+    config_.inputHeight = static_cast<int>(inputShape_[2]);
+    config_.inputWidth = static_cast<int>(inputShape_[3]);
+  }
+
   // Query output metadata
   size_t numOutputs = session_->GetOutputCount();
   for (size_t i = 0; i < numOutputs; i++) {
