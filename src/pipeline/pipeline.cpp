@@ -8,9 +8,7 @@ Pipeline::Pipeline(const PipelineConfig& config)
       frameQueue_(config.frameQueueSize),
       resultQueue_(config.resultQueueSize) {}
 
-Pipeline::~Pipeline() {
-  if (running_) stop();
-}
+Pipeline::~Pipeline() { stop(); }
 
 void Pipeline::start() {
   if (running_) return;
@@ -56,7 +54,9 @@ void Pipeline::start() {
 }
 
 void Pipeline::stop() {
-  if (!running_) return;
+  // Not gated on running_: the capture thread clears it when the camera is
+  // lost, and the threads still have to be joined.
+  if (!captureThread_.joinable() && workerThreads_.empty()) return;
 
   running_ = false;
 
