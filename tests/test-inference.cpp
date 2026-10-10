@@ -362,6 +362,30 @@ void testPostprocess() {
     test::assert_equal(dets[0].bbox.height, 30.0f, 0.001f,
                        "Clipped bbox height is the visible 30 px");
   }
+
+  // Three candidates, shape [1, 84, 3]: each keeps its own best class, and
+  // the one below the threshold is dropped
+  std::vector<float> multi(84 * 3, 0.0f);
+  auto at = [&multi](int feature, int candidate) -> float& {
+    return multi[feature * 3 + candidate];
+  };
+  at(0, 0) = 100.0f; at(1, 0) = 100.0f; at(2, 0) = 50.0f; at(3, 0) = 50.0f;
+  at(4 + 2, 0) = 0.6f;
+  at(4 + 5, 0) = 0.9f;
+  at(0, 1) = 400.0f; at(1, 1) = 300.0f; at(2, 1) = 60.0f; at(3, 1) = 60.0f;
+  at(4 + 17, 1) = 0.8f;
+  at(0, 2) = 250.0f; at(1, 2) = 500.0f; at(2, 2) = 40.0f; at(3, 2) = 40.0f;
+  at(4 + 79, 2) = 0.3f;
+  auto multiDets =
+      postprocess(multi.data(), {1, 84, 3}, 0.5f, 0.45f, 640, 640, 640, 640);
+  test::assert_true(multiDets.size() == 2, "Two of three candidates pass");
+  if (multiDets.size() == 2) {
+    // NMS returns the highest confidence first
+    test::assert_true(multiDets[0].classId == 5, "Best class of candidate 0");
+    test::assert_equal(multiDets[0].confidence, 0.9f, 0.001f,
+                       "Best score of candidate 0");
+    test::assert_true(multiDets[1].classId == 17, "Best class of candidate 1");
+  }
 }
 
 int main() {
