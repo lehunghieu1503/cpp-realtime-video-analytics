@@ -137,7 +137,17 @@ void Pipeline::inferenceWorker(int workerId) {
 
     auto& fd = *frameOpt;
     auto detectStart = std::chrono::steady_clock::now();
-    auto detections = engine->detect(fd.frame);
+    std::vector<Detection> detections;
+    try {
+      detections = engine->detect(fd.frame);
+    } catch (const std::exception& e) {
+      // An exception leaving a std::thread would terminate the process
+      std::cerr << "Pipeline: inference failed, stopping: " << e.what()
+                << "\n";
+      running_ = false;
+      frameQueue_.stop();
+      break;
+    }
     auto now = std::chrono::steady_clock::now();
 
     AnalyticsResult result;

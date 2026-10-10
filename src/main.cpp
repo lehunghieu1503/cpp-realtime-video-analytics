@@ -122,6 +122,8 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
     }
   }
 
+  // False only if a worker or the capture gave up; a finished video keeps it
+  bool pipelineFailed = !pipeline.isRunning();
   pipeline.stop();
 
   // Print results
@@ -139,7 +141,7 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
     writeReport(results, outputReport);
   }
 
-  return 0;
+  return pipelineFailed ? -1 : 0;
 }
 
 // ── Live mode (camera + dashboard) ──────────────────────────────────────────
