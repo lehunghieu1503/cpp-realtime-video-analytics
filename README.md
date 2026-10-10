@@ -5,19 +5,17 @@
 <br/>
 
 [![Build & Test](https://github.com/lehunghieu1503/cpp-realtime-video-analytics/actions/workflows/build.yml/badge.svg)](https://github.com/lehunghieu1503/cpp-realtime-video-analytics/actions/workflows/build.yml)
-![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
-![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-1.17+-005CED?logo=onnx&logoColor=white)
-![TensorRT](https://img.shields.io/badge/TensorRT-FP16-76B900?logo=nvidia&logoColor=white)
-![OpenCV](https://img.shields.io/badge/OpenCV-4.5+-5C3EE8?logo=opencv&logoColor=white)
-![Jetson](https://img.shields.io/badge/Jetson-Orin-76B900?logo=nvidia&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-x86__64_|_arm64-2496ED?logo=docker&logoColor=white)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-555)
+![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-1.17+-555)
+![TensorRT](https://img.shields.io/badge/TensorRT-FP16-555)
+![Platforms](https://img.shields.io/badge/platforms-x86__64_|_Jetson_Orin-555)
 
-**[Quick start](#-quick-start)** ·
-**[Performance](#-performance)** ·
-**[Architecture](#-architecture)** ·
-**[CLI](#-cli-reference)** ·
-**[Jetson](#-jetson-orin)** ·
-**[Docs](#-documentation)**
+**[Quick start](#quick-start)** ·
+**[Performance](#performance)** ·
+**[Architecture](#architecture)** ·
+**[CLI](#cli-reference)** ·
+**[Jetson](#jetson-orin)** ·
+**[Docs](#documentation)**
 
 </div>
 
@@ -33,13 +31,13 @@ build/src/video_analytics --device 0 --provider tensorrt
 # then open http://localhost:9001
 ```
 
-## ✨ Highlights
+## Highlights
 
 <table>
 <tr>
 <td width="33%" valign="top">
 
-### 🧵 Built for throughput
+### Built for throughput
 Capture, inference and HTTP serving each run on their own threads. Bounded
 queues drop the oldest frame, so memory and delay stay flat when inference
 falls behind the camera.
@@ -47,7 +45,7 @@ falls behind the camera.
 </td>
 <td width="33%" valign="top">
 
-### ⚡ CPU, CUDA or TensorRT
+### CPU, CUDA or TensorRT
 `--provider cpu | cuda | tensorrt`. TensorRT builds an FP16 engine once and
 caches it. A provider that is missing fails loudly at startup; it never
 silently falls back to CPU.
@@ -55,7 +53,7 @@ silently falls back to CPU.
 </td>
 <td width="33%" valign="top">
 
-### 🌐 Zero-install dashboard
+### Zero-install dashboard
 Server-Sent Events for detections, MJPEG for video, served by the binary
 itself. Any browser on the network is a client. No JavaScript build step.
 
@@ -64,21 +62,21 @@ itself. Any browser on the network is a client. No JavaScript build step.
 <tr>
 <td valign="top">
 
-### 📷 Any video source
+### Any video source
 USB cameras by index, CSI cameras and anything else through a GStreamer
 pipeline (`--gst`), video files for benchmarking.
 
 </td>
 <td valign="top">
 
-### 📊 Honest benchmarks
+### Honest benchmarks
 A benchmark mode that processes every frame and reports FPS with p50, p95
 and p99 latency as Markdown. Every number in this README came out of it.
 
 </td>
 <td valign="top">
 
-### 🐳 Two Docker images
+### Two Docker images
 `Dockerfile` for x86-64 CPU, `Dockerfile.jetson` for JetPack 6 with CUDA and
 TensorRT. Both run as a non-root user.
 
@@ -86,7 +84,7 @@ TensorRT. Both run as a non-root user.
 </tr>
 </table>
 
-## 📊 Performance
+## Performance
 
 Measured with `--benchmark` on a **Jetson Orin Nano Super 8GB**, inside the
 `Dockerfile.jetson` container, 25 W power mode, 640x480 video, YOLOv8n at
@@ -121,11 +119,11 @@ spends about 8 minutes building the engine; later starts take seconds.
 > Run it on your own hardware:
 > `build/src/video_analytics --benchmark --input video.avi --provider tensorrt --output report.md`
 
-## 🏗 Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
-    src(["📷 Camera · GStreamer · video file"]) --> cap["Capture thread"]
+    src(["Camera · GStreamer · video file"]) --> cap["Capture thread"]
     cap --> fq[("Frame queue<br/>bounded · drop-oldest")]
     fq --> w1["Inference worker 1<br/>own ORT session"]
     fq --> wn["Inference worker N<br/>own ORT session"]
@@ -136,15 +134,8 @@ flowchart LR
     main --> http["HTTP server thread"]
     http --> ev["/events<br/>SSE · JSON per frame"]
     http --> vid["/video<br/>MJPEG"]
-    ev --> dash(["🌐 Browser dashboard"])
+    ev --> dash(["Browser dashboard"])
     vid --> dash
-
-    classDef q fill:#3b2a63,stroke:#9b7bff,color:#fff
-    classDef t fill:#12304a,stroke:#4cc3ff,color:#fff
-    classDef io fill:#123b2c,stroke:#76e3a0,color:#fff
-    class fq,rq q
-    class cap,w1,wn,main,http t
-    class src,dash,win,ev,vid io
 ```
 
 | Design choice | Why |
@@ -158,7 +149,7 @@ flowchart LR
 The threading model, data lifecycle and queue mechanics are covered in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## 🚀 Quick start
+## Quick start
 
 **1. Get the model** (not stored in the repo):
 
@@ -172,7 +163,7 @@ scripts/download-model.sh        # writes models/yolov8n.onnx
 **2. Pick how to run it:**
 
 <details open>
-<summary><b>🐳 Docker on x86-64 (CPU)</b></summary>
+<summary><b>Docker on x86-64 (CPU)</b></summary>
 
 <br/>
 
@@ -185,7 +176,7 @@ docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
 </details>
 
 <details>
-<summary><b>🛠 Build from source on x86-64</b></summary>
+<summary><b>Build from source on x86-64</b></summary>
 
 <br/>
 
@@ -214,7 +205,7 @@ To keep ONNX Runtime out of `/usr/local`, unpack it anywhere and add
 </details>
 
 <details>
-<summary><b>🟢 Docker on Jetson Orin (GPU)</b></summary>
+<summary><b>Docker on Jetson Orin (GPU)</b></summary>
 
 <br/>
 
@@ -227,7 +218,7 @@ docker run -d --name video-analytics --restart unless-stopped --runtime nvidia \
   video-analytics:jetson --provider tensorrt
 ```
 
-See [Jetson Orin](#-jetson-orin) for boards without internet access and for
+See [Jetson Orin](#jetson-orin) for boards without internet access and for
 CSI cameras.
 
 </details>
@@ -239,7 +230,7 @@ CSI cameras.
 > only. The Docker images listen on `0.0.0.0`, so publish the port with
 > `-p 127.0.0.1:9001:9001` unless you trust the network.
 
-## 🖥 What the server exposes
+## What the server exposes
 
 | Endpoint | Content |
 |:---------|:--------|
@@ -269,7 +260,7 @@ new EventSource('/events').onmessage = (e) => {
 };
 ```
 
-## ⌨ CLI reference
+## CLI reference
 
 ```text
 video_analytics [OPTIONS]                  Live camera mode
@@ -306,7 +297,7 @@ build/src/video_analytics --benchmark --input test.avi --frames 500 --output rep
 > Run the binary from the repository root: the dashboard is read from `web/`
 > relative to the working directory.
 
-## 🟢 Jetson Orin
+## Jetson Orin
 
 `Dockerfile.jetson` targets JetPack 6 (L4T r36.x). Its base image brings
 CUDA 12.6, TensorRT 10 and ONNX Runtime 1.20.2 built with the CUDA and
@@ -361,7 +352,7 @@ Things worth knowing on a Jetson:
   is missing from the image), so CSI cameras currently need a native build.
   USB cameras work in the container.
 
-## 📂 Project layout
+## Project layout
 
 ```text
 src/
@@ -379,7 +370,7 @@ Dockerfile            x86-64, CPU
 Dockerfile.jetson     JetPack 6, CUDA + TensorRT
 ```
 
-## 🧪 Testing
+## Testing
 
 ```bash
 build/tests/test_pipeline         # bounded queue, drop policy, threading
@@ -404,7 +395,7 @@ cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON   # memory errors
 
 </details>
 
-## 🩺 Troubleshooting
+## Troubleshooting
 
 | Symptom | Fix |
 |:--------|:----|
@@ -418,7 +409,7 @@ cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON   # memory errors
 
 More cases, including offline builds, are in the step-by-step guide below.
 
-## 📚 Documentation
+## Documentation
 
 | Document | What is inside |
 |:---------|:---------------|
@@ -426,7 +417,7 @@ More cases, including offline builds, are in the step-by-step guide below.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Threading model, data lifecycle, queue mechanics |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Tooling, Docker details, profiling, sanitizers |
 
-## 📦 Dependencies
+## Dependencies
 
 | Library | Version | Used for |
 |:--------|:--------|:---------|
