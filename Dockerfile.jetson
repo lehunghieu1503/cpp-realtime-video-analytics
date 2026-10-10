@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopencv-dnn4.5d \
     libopencv-videoio4.5d \
     libopencv-highgui4.5d \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy application binary and web assets.

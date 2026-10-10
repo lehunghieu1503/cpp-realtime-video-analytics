@@ -142,6 +142,7 @@ video_analytics --benchmark OPTIONS        Benchmark mode
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--device N` | Camera USB device index | `0` |
+| `--gst PIPELINE` | GStreamer pipeline ending in `appsink`, used instead of `--device` | *(none)* |
 | `--model PATH`| Path to `.onnx` model file | `models/yolov8n.onnx` |
 | `--port N` | HTTP Dashboard port | `9001` |
 | `--bind ADDR` | Server bind IPv4 address | `127.0.0.1` |

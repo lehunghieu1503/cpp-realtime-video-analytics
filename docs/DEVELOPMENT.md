@@ -151,6 +151,18 @@ docker run --rm --runtime nvidia --device /dev/video0 \
 The engine is built from the FP32 model; `scripts/quantize-fp16.py` is not
 needed with `--provider tensorrt`.
 
+`--device` opens USB (UVC) cameras. A CSI camera needs a GStreamer pipeline:
+
+```bash
+build/src/video_analytics --headless --provider tensorrt --gst \
+  "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 \
+   ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR \
+   ! appsink drop=true max-buffers=1"
+```
+
+In Docker, `nvarguscamerasrc` also needs `-v /tmp/argus_socket:/tmp/argus_socket`
+(not tested).
+
 ## Profiling
 
 ### ThreadSanitizer (data races)

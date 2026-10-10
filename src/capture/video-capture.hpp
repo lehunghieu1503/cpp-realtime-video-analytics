@@ -11,6 +11,9 @@ struct CaptureConfig {
   std::string codec = "MJPG";
   int bufferSize = 1;
   std::string videoPath;  // if set, open video file instead of camera
+  // if set, open this GStreamer pipeline (ending in appsink) as the camera,
+  // e.g. a Jetson CSI sensor through nvarguscamerasrc
+  std::string gstPipeline;
 };
 
 class IVideoCapture {

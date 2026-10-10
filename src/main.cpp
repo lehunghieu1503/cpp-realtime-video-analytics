@@ -149,9 +149,10 @@ int runBenchmark(const std::string& inputVideo, int maxFrames,
 // ── Live mode (camera + dashboard) ──────────────────────────────────────────
 int runLive(int deviceIndex, const std::string& modelPath, int port,
             int numWorkers, const std::string& bindAddress, bool headless,
-            const std::string& provider) {
+            const std::string& provider, const std::string& gstPipeline) {
   PipelineConfig config;
   config.captureConfig.deviceIndex = deviceIndex;
+  config.captureConfig.gstPipeline = gstPipeline;
   config.captureConfig.width = 640;
   config.captureConfig.height = 480;
   config.captureConfig.codec = "MJPG";
@@ -238,6 +239,8 @@ void printUsage(const char* prog) {
       << "  " << prog << " --benchmark OPTIONS        Benchmark mode\n\n"
       << "General options:\n"
       << "  --device N       Camera device index (default: 0)\n"
+      << "  --gst PIPELINE   GStreamer pipeline ending in appsink, used\n"
+      << "                   instead of --device (e.g. a CSI camera)\n"
       << "  --model PATH     ONNX model path (default: models/yolov8n.onnx)\n"
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
@@ -269,6 +272,7 @@ int main(int argc, char* argv[]) {
   bool workersGiven = false;
   bool headless = false;
   std::string provider = "cpu";
+  std::string gstPipeline;
 
   auto parseIntArg = [&](const char* val, const char* name) -> int {
     try {
@@ -290,6 +294,8 @@ int main(int argc, char* argv[]) {
       outputReport = argv[++i];
     } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
       deviceIndex = parseIntArg(argv[++i], "--device");
+    } else if (std::strcmp(argv[i], "--gst") == 0 && i + 1 < argc) {
+      gstPipeline = argv[++i];
     } else if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
       modelPath = argv[++i];
     } else if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -344,5 +350,5 @@ int main(int argc, char* argv[]) {
   }
 
   return runLive(deviceIndex, modelPath, port, numWorkers, bindAddress,
-                 headless, provider);
+                 headless, provider, gstPipeline);
 }

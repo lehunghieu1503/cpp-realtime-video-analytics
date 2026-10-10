@@ -17,6 +17,16 @@ bool OpenCvCapture::open(const CaptureConfig& config) {
     return true;  // skip codec/resolution settings for video files
   }
 
+  if (!config.gstPipeline.empty()) {
+    cap_.open(config.gstPipeline, cv::CAP_GSTREAMER);
+    if (!cap_.isOpened()) {
+      std::cerr << "Failed to open GStreamer pipeline: " << config.gstPipeline
+                << "\n";
+      return false;
+    }
+    return true;  // size, rate and format are set inside the pipeline
+  }
+
   cap_.open(config.deviceIndex);
   if (!cap_.isOpened()) {
     std::cerr << "Failed to open camera " << config.deviceIndex << "\n";
