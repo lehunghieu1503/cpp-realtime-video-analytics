@@ -365,17 +365,28 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   }
   impl_->context.reset(impl_->engine->createExecutionContext());
 
-  // One input and one output, as the YOLO detectors export
+  // One float32 input and one float32 output, as the YOLO detectors and the
+  // lane model export. Anything else is refused: picking one tensor of
+  // several would run, and return another tensor's numbers.
   const char* inputName = nullptr;
   const char* outputName = nullptr;
+  int inputs = 0, outputs = 0;
   for (int i = 0; i < impl_->engine->getNbIOTensors(); i++) {
     const char* tensor = impl_->engine->getIOTensorName(i);
     bool isInput = impl_->engine->getTensorIOMode(tensor) ==
                    nvinfer1::TensorIOMode::kINPUT;
     (isInput ? inputName : outputName) = tensor;
+    (isInput ? inputs : outputs)++;
+    if (impl_->engine->getTensorDataType(tensor) !=
+        nvinfer1::DataType::kFLOAT) {
+      throw std::runtime_error(std::string("tensor ") + tensor +
+                               " is not float32");
+    }
   }
-  if (!inputName || !outputName) {
-    throw std::runtime_error("the engine needs one input and one output");
+  if (inputs != 1 || outputs != 1) {
+    throw std::runtime_error("the engine has " + std::to_string(inputs) +
+                             " input(s) and " + std::to_string(outputs) +
+                             " output(s); one of each is supported");
   }
   inputShape_ = toVector(impl_->engine->getTensorShape(inputName));
   outputShape_ = toVector(impl_->engine->getTensorShape(outputName));

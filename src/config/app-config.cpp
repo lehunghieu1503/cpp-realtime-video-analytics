@@ -39,6 +39,7 @@ bool readSource(const YAML::Node& node, size_t index, SourceConfig& out) {
   read(node["width"], out.capture.width);
   read(node["height"], out.capture.height);
   read(node["fps"], out.capture.fps);
+  read(node["lane"], out.lane);
 
   for (const auto& zoneNode : node["zones"]) {
     ZoneConfig zone;
@@ -118,6 +119,40 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     read(root["tls"]["key"], config.tlsKey);
     read(root["snapshots"]["dir"], config.snapshotDir);
     read(root["snapshots"]["keep"], config.snapshotKeep);
+    const YAML::Node lane = root["lane"];
+    read(lane["model"], config.lane.model);
+    read(lane["backend"], config.lane.backend);
+    read(lane["precision"], config.lane.precision);
+    read(lane["roi_x_min_m"], config.lane.geometry.roiXMin);
+    read(lane["roi_x_max_m"], config.lane.geometry.roiXMax);
+    read(lane["reference_x_m"], config.lane.geometry.referenceX);
+    read(lane["min_points"], config.lane.geometry.minPoints);
+    read(lane["min_support_m"], config.lane.geometry.minSupport);
+    read(lane["max_residual_m"], config.lane.geometry.maxResidual);
+    read(lane["width_min_m"], config.lane.geometry.widthMin);
+    read(lane["width_max_m"], config.lane.geometry.widthMax);
+
+    if (const YAML::Node rig = root["calibration"]) {
+      read(rig["width"], config.calibration.width);
+      read(rig["height"], config.calibration.height);
+      read(rig["fov_deg"], config.calibration.fovDeg);
+      read(rig["ground_z"], config.calibration.groundZ);
+      if (const YAML::Node camera = rig["camera"]) {
+        read(camera["x"], config.calibration.x);
+        read(camera["y"], config.calibration.y);
+        read(camera["z"], config.calibration.z);
+        read(camera["pitch_deg"], config.calibration.pitchDeg);
+        read(camera["yaw_deg"], config.calibration.yawDeg);
+        read(camera["roll_deg"], config.calibration.rollDeg);
+      }
+      for (const auto& k : rig["distortion"]) {
+        if (k.as<double>() != 0.0) {
+          std::cerr << "Config: lens distortion is not supported\n";
+          return false;
+        }
+      }
+    }
+
     read(root["simulation"]["enabled"], config.simulation.enabled);
     read(root["simulation"]["run_id"], config.simulation.runId);
   } catch (const YAML::Exception& e) {
@@ -170,4 +205,15 @@ std::string checkSimulation(const AppConfig& config) {
   }
   return "";
 #endif
+}
+
+std::string checkLane(const AppConfig& config) {
+  bool wanted = false;
+  for (const auto& source : config.sources) wanted = wanted || source.lane;
+  if (!wanted) return "";
+  if (config.lane.model.empty()) return "a source has lane: true but lane.model is not set";
+  if (!config.calibration.isSet()) {
+    return "a source has lane: true but there is no calibration section";
+  }
+  return config.calibration.check();
 }

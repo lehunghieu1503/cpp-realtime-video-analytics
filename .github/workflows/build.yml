@@ -23,6 +23,7 @@ jobs:
             build-essential cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
             libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             wget
 
       - name: Install ONNX Runtime
@@ -48,6 +49,7 @@ jobs:
           build/tests/test_rules
           build/tests/test_inference
           build/tests/test_capture_timestamps
+          build/tests/test_lane
 
       # Geometry, filter and protocol code of the simulation; no simulator,
       # ROS or device is involved
@@ -76,6 +78,7 @@ jobs:
             build-essential g++-12 cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
             libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             wget
 
       - name: Install ONNX Runtime

@@ -5,6 +5,7 @@
 #include "benchmark/power-meter.hpp"
 #include "config/app-config.hpp"
 #include "inference/detection.hpp"
+#include "inference/lane-engine.hpp"
 #include "output/mqtt-publisher.hpp"
 #include "pipeline/pipeline.hpp"
 #include "server/result-serializer.hpp"
@@ -534,6 +535,26 @@ int runLive(const AppConfig& app) {
     streams[i].rules = std::make_unique<Rules>(streams[i].id, rules);
   }
 
+  // One lane model for the sources that ask for it; it runs here, on the
+  // main thread, on the frame as captured
+  std::unique_ptr<LaneEngine> laneEngine;
+  for (const auto& source : app.sources) {
+    if (!source.lane || laneEngine) continue;
+    LaneEngineConfig laneConfig;
+    laneConfig.modelPath = app.lane.model;
+    laneConfig.backend = app.lane.backend.empty() ? app.backend : app.lane.backend;
+    laneConfig.precision = app.lane.precision;
+    laneEngine = std::make_unique<LaneEngine>(laneConfig);
+    if (!laneEngine->isLoaded()) {
+      // No fallback: a controller would steer on a lane that is not there
+      std::cerr << "Failed to load the lane model\n";
+      pipeline.stop();
+      return -1;
+    }
+  }
+  const std::string calibrationId =
+      app.calibration.isSet() ? app.calibration.calibrationId() : "";
+
   PowerMeter power(app.backend == "cuda" ||
                    app.backend.rfind("tensorrt", 0) == 0);
   SnapshotWriter snapshots(app.snapshotDir, app.snapshotKeep);
@@ -647,6 +668,32 @@ int runLive(const AppConfig& app) {
       events = stream.rules->update(result.detections, unixNow());
     }
 
+    // Before anything is drawn on the frame: the model must see the image
+    LaneResult lane;
+    if (app.sources[s].lane) {
+      cv::Mat& image = result.cpuFrame();
+      if (image.cols != app.calibration.width ||
+          image.rows != app.calibration.height) {
+        lane.reason = "image_size";
+      } else {
+        try {
+          double preMs = 0.0, inferMs = 0.0, postMs = 0.0;
+          auto pixels = laneEngine->detect(image, &preMs, &inferMs, &postMs);
+          auto geometryStart = Clock::now();
+          lane = estimateLane(pixels, app.calibration, app.lane.geometry);
+          lane.preMs = preMs;
+          lane.inferMs = inferMs;
+          lane.postMs = postMs + std::chrono::duration<double, std::milli>(
+                                     Clock::now() - geometryStart)
+                                     .count();
+        } catch (const std::exception& e) {
+          std::cerr << "Lane model failed, stopping: " << e.what() << "\n";
+          failed = true;
+          break;
+        }
+      }
+    }
+
     // Drawing costs more than the rules; skip it when nobody will see it
     bool needFrame = !app.headless || sseServer.hasViewers(s) ||
                      (!events.empty() && !app.snapshotDir.empty());
@@ -655,6 +702,11 @@ int runLive(const AppConfig& app) {
       // because somebody is going to look at it
       result.cpuFrame();
       drawDetections(result.frame, result.detections);
+      for (const auto& points : lane.pixels) {
+        for (const auto& p : points) {
+          cv::circle(result.frame, p, 3, cv::Scalar(0, 255, 255), -1);
+        }
+      }
       if (stream.rules) drawRules(result.frame, *stream.rules);
       drawOverlay(result.frame, stream.fps.fps, result.inferenceLatencyMs,
                   static_cast<int>(result.detections.size()), result.frameId);
@@ -664,6 +716,7 @@ int runLive(const AppConfig& app) {
         result, stream.fps.fps,
         app.simulation.enabled ? app.simulation.runId : std::string());
     json["stream"] = stream.id;
+    if (app.sources[s].lane) json["lane"] = serializeLane(lane, calibrationId);
     if (!events.empty()) {
       // One snapshot per frame, shared by the events it raised
       std::string snapshot = snapshots.save(result.frame, events.front());
@@ -870,6 +923,10 @@ int main(int argc, char* argv[]) {
   // Validate
   if (app.port < 1 || app.port > 65535) {
     std::cerr << "Error: --port must be between 1 and 65535\n";
+    return -1;
+  }
+  if (std::string reason = checkLane(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
     return -1;
   }
   if (std::string reason = checkSimulation(app); !reason.empty()) {

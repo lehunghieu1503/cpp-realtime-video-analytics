@@ -34,12 +34,14 @@ target_compile_options(bytetrack PRIVATE -w)
 
 # Everything except main(), shared by the application and the tests
 add_library(va_core STATIC
+    analytics/lane-geometry.cpp
     analytics/rules.cpp
     analytics/tracker.cpp
     capture/opencv-capture.cpp
     config/app-config.cpp
     output/mqtt-publisher.cpp
     inference/inference-engine.cpp
+    inference/lane-engine.cpp
     inference/pre-process.cpp
     inference/post-process.cpp
     inference/backends/backend-factory.cpp

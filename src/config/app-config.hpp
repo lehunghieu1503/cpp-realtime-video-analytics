@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analytics/lane-geometry.hpp"
 #include "analytics/rules.hpp"
 #include "capture/video-capture.hpp"
 
@@ -10,6 +11,15 @@ struct SourceConfig {
   CaptureConfig capture;
   std::vector<ZoneConfig> zones;
   std::vector<LineConfig> lines;
+  bool lane = false;  // run the lane model on this source
+};
+
+// The lane model; used by the sources that set `lane: true`
+struct LaneConfig {
+  std::string model;
+  std::string backend;  // empty: the detector's backend
+  std::string precision = "fp16";
+  LaneGeometryConfig geometry;
 };
 
 struct MqttConfig {
@@ -66,7 +76,14 @@ struct AppConfig {
   std::string tlsCert;
   std::string tlsKey;
   SimulationConfig simulation;
+  LaneConfig lane;
+  // The camera of the sources that run the lane model
+  CameraRig calibration;
 };
+
+// Empty when no source asks for lanes or when everything they need is
+// there: a model and a usable calibration. The reason otherwise.
+std::string checkLane(const AppConfig& config);
 
 // Empty when the simulation settings can be used; the reason otherwise.
 // A simulation needs a run id and, for every source, a GStreamer pipeline
