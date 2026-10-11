@@ -203,7 +203,10 @@ class ScriptedActor:
         self.lane_offset = float(spec.get("lane", 0))
         self.visible = False
         self.actor = world.spawn_actor(blueprint, self.transform_at(0)[0])
-        self.actor.set_simulate_physics(False)
+        # physics: true lets the actor hit things (the collision negative
+        # control); it is then driven by a velocity, not placed
+        self.physics = bool(spec.get("physics", False))
+        self.actor.set_simulate_physics(self.physics)
         self.extent = self.actor.bounding_box.extent
         self.box_centre = self.actor.bounding_box.location
         self.previous_velocity = (0.0, 0.0)
@@ -255,15 +258,22 @@ class ScriptedActor:
         return self.carla.Transform(location, rotation), speed
 
     def step(self, tick):
+        tick = max(0, tick)  # before the run starts: the first placement
         spec = self.spec
         present = spec.get("from_tick", 0) <= tick < spec.get("until_tick", 10 ** 9)
         transform, speed = self.transform_at(tick)
+        self.visible = present
+        self.speed = speed
+        if self.physics:
+            yaw = math.radians(self.actor.get_transform().rotation.yaw)
+            v = float(spec.get("speed_mps", 0.0)) if tick >= spec.get("move_from_tick", 0) else 0.0
+            self.actor.set_target_velocity(self.carla.Vector3D(
+                v * math.cos(yaw), v * math.sin(yaw), 0.0))
+            return
         if not present:
             # Parked far below the road instead of destroyed: ids stay stable
             transform.location.z -= 500.0
         self.actor.set_transform(transform)
-        self.visible = present
-        self.speed = speed
 
     def truth(self, snapshot_actor):
         """State at the tick just simulated, from the simulator's snapshot."""
@@ -330,6 +340,7 @@ class Simulator:
         self.pending_commands = []
         self.pending_arm = []
         self.controller_ready = False
+        self.controller_frames = 0
         self.arm_sent = False
         self.stats = {"ticks": 0, "sent": 0, "dropped": 0, "jpeg_bytes": 0,
                       "encode_ms": 0.0, "tick_ms": 0.0, "wait_images_ms": 0.0}
@@ -372,8 +383,10 @@ class Simulator:
             status = json.loads(message.data)
         except ValueError:
             return
-        self.controller_ready = (status.get("run_id") == self.run_id
-                                 and status.get("ready") is True)
+        if status.get("run_id") != self.run_id:
+            return
+        self.controller_ready = status.get("ready") is True
+        self.controller_frames = int(status.get("perception_frames", 0))
 
     def spin(self):
         # Everything that is waiting, without blocking the tick
@@ -539,6 +552,19 @@ class Simulator:
                 "centre": [waypoint.transform.location.x, waypoint.transform.location.y],
                 "centre_ahead": points}
 
+    def open_loop(self, tick):
+        """A scripted command, for the scenarios that measure the vehicle
+        itself (steering sign and gain, braking). They do not use the
+        controller: no perception is involved."""
+        steps = self.scenario.get("open_loop")
+        if not steps:
+            return None
+        current = {"throttle": 0.0, "brake": 1.0, "steer": 0.0}
+        for step in steps:
+            if tick >= step["from_tick"]:
+                current = {k: float(step.get(k, 0.0)) for k in ("throttle", "brake", "steer")}
+        return dict(current, reason="open_loop", command_seq=None)
+
     def fault(self, kind, tick):
         for f in self.scenario.get("faults", []):
             if f["kind"] == kind and f.get("from_tick", 0) <= tick < f.get("until_tick", 10 ** 9):
@@ -671,7 +697,7 @@ class Simulator:
 
         # 1. What the vehicle does during this tick
         self.take_commands(last["sim_ns"] if last else 0)
-        if self.args.arm and self.controller_ready and not self.arm_sent:
+        if self.args.arm and tick >= 0 and self.controller_ready and not self.arm_sent:
             # The operator's explicit action, taken once the controller says
             # its gates pass; without --arm nobody arms
             self.pub_arm.publish(self.String(data=json.dumps(
@@ -682,6 +708,9 @@ class Simulator:
             for bad in forged["commands"]:
                 self.pub_control.publish(self.String(data=json.dumps(bad)))
         applied = self.lease.control(last["sim_ns"] if last else 0, mono_ns())
+        open_loop = self.open_loop(tick)
+        if open_loop is not None:
+            applied = open_loop
         self.ego.apply_control(self.carla.VehicleControl(
             throttle=float(applied["throttle"]), brake=float(applied["brake"]),
             steer=float(applied["steer"])))
@@ -739,7 +768,8 @@ class Simulator:
             except queue.Full:
                 self.ledger.update(frame, "dropped", reason="sender_queue_full")
                 self.stats["dropped"] += 1
-        self.stats["ticks"] += 1
+        if tick >= 0:
+            self.stats["ticks"] += 1
 
         kill = self.fault("kill_controller", tick)
         if kill and self.args.controller_pid and not getattr(self, "killed", False):
@@ -838,6 +868,16 @@ class Simulator:
             output = threading.Thread(target=self.output_loop, args=(sender,),
                                       daemon=True)
             output.start()
+            # Before the run: the same loop, vehicle braked, until the first
+            # result has come all the way back (the device may still be
+            # loading its models). These ticks carry tick -1 and are not part
+            # of the run's frames.
+            preroll = time.monotonic() + float(self.args.wait_result)
+            while sender.clients() > 0 and self.controller_frames == 0 \
+                    and time.monotonic() < preroll and not self.stop_requested:
+                self.tick(-1)
+            for key in self.stats:  # the rates are those of the run itself
+                self.stats[key] = 0
             started = time.monotonic()
             for tick in range(ticks):
                 if self.stop_requested:
@@ -914,6 +954,8 @@ def main():
                         help="for the kill_controller fault")
     parser.add_argument("--wait-client", type=float, default=30.0,
                         help="seconds to wait for the device to connect")
+    parser.add_argument("--wait-result", type=float, default=120.0,
+                        help="seconds to wait, ticking, for the first result")
     parser.add_argument("--no-pacing", action="store_true",
                         help="tick as fast as possible instead of in real time")
     args = parser.parse_args()

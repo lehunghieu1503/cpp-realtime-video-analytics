@@ -95,6 +95,7 @@ class ControlCore:
         self.stop_reason = ""
         self.basis = None
         self.fresh_frames = 0
+        self.accepted = 0
         self.seq = 0
         self.integral = 0.0
         self.steer = 0.0
@@ -157,6 +158,7 @@ class ControlCore:
             return self.reject("not_newer")
         age_ok = now_sim_ns is None or now_sim_ns - sim_ns <= self.age_limit_ns
         self.fresh_frames = self.fresh_frames + 1 if (lane.get("valid") and age_ok) else 0
+        self.accepted += 1
         self.basis = {"sim_ns": sim_ns, "lane": lane, "metric": metric,
                       "pose": capture["pose"], "detections": envelope.get("detections", [])}
         return metric, ""
@@ -385,7 +387,10 @@ class ControlCore:
         target_speed = min(self.c["target_speed_kmh"], 10.0) / 3.6
         error = target_speed - speed
         gains = self.c["speed"]
-        self.integral = max(-2.0, min(2.0, self.integral + error * dt))
+        # Only near the target: while the vehicle is still getting up to
+        # speed the integral would wind up and carry it past 10 km/h
+        if abs(error) < gains.get("integral_band_mps", 0.5):
+            self.integral = max(-2.0, min(2.0, self.integral + error * dt))
         throttle = gains["kp"] * error + gains["ki"] * self.integral
         brake = 0.0
         if error < -0.5:
@@ -399,6 +404,7 @@ class ControlCore:
         return {"run_id": self.run_id, "state": self.state,
                 "ready": self.state == WAIT_DATA and not reasons,
                 "not_ready": reasons, "stop_reason": self.stop_reason,
+                "perception_frames": self.accepted,
                 "rejected": self.rejected}
 
 

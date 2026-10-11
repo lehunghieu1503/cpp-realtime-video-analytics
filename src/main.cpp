@@ -513,6 +513,27 @@ int runLive(const AppConfig& app) {
   config.resultQueueSize = std::max<size_t>(16, app.sources.size() * 4);
   config.requireSourceTimestamp = app.simulation.enabled;
 
+  // One lane model for the sources that ask for it; it runs here, on the
+  // main thread, on the frame as captured. Loaded before the pipeline starts:
+  // building its engine takes minutes, and the cameras must not be read, and
+  // their frames dropped, while nothing can use them.
+  std::unique_ptr<LaneEngine> laneEngine;
+  for (const auto& source : app.sources) {
+    if (!source.lane || laneEngine) continue;
+    LaneEngineConfig laneConfig;
+    laneConfig.modelPath = app.lane.model;
+    laneConfig.backend = app.lane.backend.empty() ? app.backend : app.lane.backend;
+    laneConfig.precision = app.lane.precision;
+    laneEngine = std::make_unique<LaneEngine>(laneConfig);
+    if (!laneEngine->isLoaded()) {
+      // No fallback: a controller would steer on a lane that is not there
+      std::cerr << "Failed to load the lane model\n";
+      return -1;
+    }
+  }
+  const std::string calibrationId =
+      app.calibration.isSet() ? app.calibration.calibrationId() : "";
+
   Pipeline pipeline(config);
   pipeline.start();
 
@@ -534,26 +555,6 @@ int runLive(const AppConfig& app) {
     rules.dwellSec = app.dwellSeconds;
     streams[i].rules = std::make_unique<Rules>(streams[i].id, rules);
   }
-
-  // One lane model for the sources that ask for it; it runs here, on the
-  // main thread, on the frame as captured
-  std::unique_ptr<LaneEngine> laneEngine;
-  for (const auto& source : app.sources) {
-    if (!source.lane || laneEngine) continue;
-    LaneEngineConfig laneConfig;
-    laneConfig.modelPath = app.lane.model;
-    laneConfig.backend = app.lane.backend.empty() ? app.backend : app.lane.backend;
-    laneConfig.precision = app.lane.precision;
-    laneEngine = std::make_unique<LaneEngine>(laneConfig);
-    if (!laneEngine->isLoaded()) {
-      // No fallback: a controller would steer on a lane that is not there
-      std::cerr << "Failed to load the lane model\n";
-      pipeline.stop();
-      return -1;
-    }
-  }
-  const std::string calibrationId =
-      app.calibration.isSet() ? app.calibration.calibrationId() : "";
 
   PowerMeter power(app.backend == "cuda" ||
                    app.backend.rfind("tensorrt", 0) == 0);

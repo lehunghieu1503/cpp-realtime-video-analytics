@@ -79,8 +79,8 @@ class Bridge(Node):
                         if line.startswith(b"data: "):
                             self.publish(json.loads(line[6:]))
             except Exception as error:  # the device restarting is routine
-                self.get_logger().warning(f"{self.url}: {error}; retrying in 2 s")
-            time.sleep(2)
+                self.get_logger().warning(f"{self.url}: {error}; retrying")
+            time.sleep(0.5)
 
     def publisher_for(self, source):
         if source not in self.detections:

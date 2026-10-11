@@ -1,12 +1,22 @@
 # Scenarios of CARLA stage 1. Run one with
-#   scripts/run-carla-simulation.sh --scenario <name> [--arm]
+#   scripts/run-carla-simulation.sh --scenario <name> [--arm] [--device ...]
 #
 # Other road users are scripted: placed on a lane relative to the ego
 # vehicle's start and moved without physics, so a scenario repeats exactly.
-#   ahead_m   distance along the lane from the ego vehicle's origin
-#   lane      0: the ego lane, 1: the lane to its right, -1: to its left
+#   ahead_m     distance along the lane from the ego vehicle's origin to the
+#               actor's origin (a Tesla Model 3 is 2.4 m from origin to bumper)
+#   lane        0: the ego lane, 1: the lane to its right, -1: to its left
+#   lateral_m   further to the right, metres
+#   sweep       the actor stands at each distance for hold_ticks ticks
+#   cut_in      the actor slides to another lane
 # Their positions are written to truth.jsonl for the evaluation and are never
 # given to the controller.
+#
+# `expect` is what scripts/evaluate-carla.py checks. The numbers are targets
+# set before the runs; docs/SIMULATION.md has what was measured.
+#
+# "needs --arm" scenarios drive the vehicle; without --arm it stays braked
+# and their expectations fail.
 
 defaults:
   map: Town04
@@ -16,6 +26,254 @@ defaults:
   rgb_artifact_every: 30   # keep one JPEG a second, as sent, to look at
 
 scenarios:
-  # Nothing but the road: transport, timestamps, throughput
+  # ── No device needed: the vehicle and the sensors themselves ──────────────
+
+  # Steering sign and gain, then braking from about 10 km/h. Open loop.
+  vehicle_response:
+    ticks: 520
+    depth_artifact_frames: 0
+    open_loop:
+      - {from_tick: 0, throttle: 0.4}
+      - {from_tick: 50, throttle: 0.15, steer: 0.05}    # right
+      - {from_tick: 95, throttle: 0.15, steer: -0.05}   # left
+      - {from_tick: 185, throttle: 0.15, steer: 0.05}   # back to straight
+      - {from_tick: 230, throttle: 0.15}
+      - {from_tick: 260, brake: 1.0}
+      - {from_tick: 350, throttle: 0.4}
+      - {from_tick: 400, throttle: 0.15}
+      - {from_tick: 430, brake: 1.0}
+    expect: {steer_sign: true, brake_deceleration_min_mps2: 2.5, collisions: 0}
+
+  # Depth and calibration on the road plane and on cars 5, 10 and 20 m from
+  # the camera, on and off the optical axis. With a device it also checks
+  # the range the metric tracking gives for them.
+  calibration:
+    ticks: 270
+    depth_fixture: true
+    actors:
+      - {name: centre, class: car, blueprint: vehicle.tesla.model3,
+         sweep: {distances_m: [8.0, 13.0, 23.0], hold_ticks: 90}}
+      - {name: right, class: car, blueprint: vehicle.tesla.model3, lane: 1,
+         sweep: {distances_m: [14.0, 14.0, 24.0], hold_ticks: 90}}
+      - {name: left, class: car, blueprint: vehicle.tesla.model3, lane: -1,
+         sweep: {distances_m: [15.0, 25.0, 25.0], hold_ticks: 90}}
+    expect: {depth_is: along_optical_axis, road_height_rmse_m: 0.03,
+             silhouette_p95_px: 2, range_error_max_m: 0.2, unknown_frames: 0}
+
+  # ── Transport and detection, vehicle braked ───────────────────────────────
+
+  # Nothing but the road: timestamps, throughput, lane model
   baseline:
     ticks: 600
+    expect: {unknown_frames: 0, drives: false, lane_coverage: 0.95,
+             lane_centre_rmse_m: 0.3}
+
+  # One isolated car at 12 distances up to 120 m, 45 ticks each
+  sweep_car:
+    ticks: 540
+    actors:
+      - {name: car, class: car, blueprint: vehicle.tesla.model3,
+         sweep: {distances_m: [10, 20, 28, 35, 45, 55, 65, 75, 85, 95, 105, 115],
+                 hold_ticks: 45}}
+    expect: {unknown_frames: 0}
+
+  sweep_person:
+    ticks: 540
+    actors:
+      - {name: person, class: person, blueprint: walker.pedestrian.0001,
+         sweep: {distances_m: [10, 20, 28, 35, 45, 55, 65, 75, 85, 95, 105, 115],
+                 hold_ticks: 45}}
+    expect: {unknown_frames: 0}
+
+  # The other four hazard classes, one at a time, 20 m and 40 m ahead
+  sweep_classes:
+    ticks: 480
+    actors:
+      - {name: truck, class: truck, blueprint: vehicle.carlamotors.carlacola,
+         from_tick: 0, until_tick: 120, sweep: {distances_m: [22, 42], hold_ticks: 60}}
+      - {name: bus, class: bus, blueprint: vehicle.mitsubishi.fusorosa,
+         from_tick: 120, until_tick: 240,
+         sweep: {distances_m: [22, 22, 22, 42], hold_ticks: 60}}
+      - {name: motorcycle, class: motorcycle, blueprint: vehicle.yamaha.yzf,
+         from_tick: 240, until_tick: 360,
+         sweep: {distances_m: [20, 20, 20, 20, 20, 40], hold_ticks: 60}}
+      - {name: bicycle, class: bicycle, blueprint: vehicle.diamondback.century,
+         from_tick: 360, until_tick: 480,
+         sweep: {distances_m: [20, 20, 20, 20, 20, 20, 20, 40], hold_ticks: 60}}
+    expect: {unknown_frames: 0}
+
+  # ── Metric tracking: position, velocity, acceleration ─────────────────────
+
+  # Ego stands; a car drives away at a constant 3 m/s
+  metric_constant_speed:
+    ticks: 300
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3,
+         ahead_m: 9.0, speed_mps: 3.0}
+    expect: {speed_rmse_mps: 0.5, range_error_max_m: 0.2}
+
+  # Ego stands; a car accelerates away at 1.5 m/s^2 up to 9 m/s
+  metric_accelerating:
+    ticks: 330
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3,
+         ahead_m: 9.0, speed_mps: 0.0, accel_mps2: 1.5, max_speed_mps: 9.0,
+         move_from_tick: 60}
+    expect: {speed_rmse_mps: 0.5, accel_rmse_mps2: 1.0}
+
+  # Ego drives past a car parked in the next lane: its world velocity must
+  # stay near zero although it moves in the image. Needs --arm.
+  metric_parked_ego_moving:
+    ticks: 600
+    actors:
+      - {name: parked, class: car, blueprint: vehicle.tesla.model3,
+         ahead_m: 45.0, lane: 1}
+    expect: {speed_rmse_mps: 0.5, drives: true, stops: false, collisions: 0}
+
+  # ── Lane keeping, no obstacles. Need --arm ────────────────────────────────
+
+  lane_straight:
+    ticks: 900
+    expect: &lane_expectations
+      {drives: true, stops: false, collisions: 0, lateral_rmse_m: 0.3,
+       max_lateral_deviation_m: 0.6, lane_coverage: 0.95, lane_centre_rmse_m: 0.3,
+       unknown_frames: 0}
+
+  lane_curve_right:
+    route: curve_right
+    ticks: 900
+    expect: *lane_expectations
+
+  lane_curve_left:
+    route: curve_left
+    ticks: 900
+    expect: *lane_expectations
+
+  # Starts 0.5 m right of the lane centre, 2 degrees off its direction
+  lane_offset_start:
+    ticks: 900
+    ego_lateral_m: 0.5
+    ego_yaw_offset_deg: 2.0
+    expect: {drives: true, stops: false, collisions: 0, max_lateral_deviation_m: 0.8,
+             unknown_frames: 0}
+
+  # ── Obstacle braking. Need --arm ──────────────────────────────────────────
+
+  brake_static_car: &brake_static_car
+    ticks: 900
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3, ahead_m: 40.0}
+    expect: &brake_expectations
+      {drives: true, stops: true, stop_reason_prefix: obstacle, min_gap_m: 1.0,
+       collisions: 0}
+
+  brake_static_car_30:
+    <<: *brake_static_car
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3, ahead_m: 30.0}
+
+  brake_static_car_50:
+    <<: *brake_static_car
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3, ahead_m: 50.0,
+         lateral_m: 0.5}
+
+  brake_static_car_curve:
+    <<: *brake_static_car
+    route: curve_right
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.audi.tt, ahead_m: 45.0}
+
+  brake_truck:
+    <<: *brake_static_car
+    actors:
+      - {name: lead, class: truck, blueprint: vehicle.carlamotors.carlacola,
+         ahead_m: 45.0, lateral_m: -0.4}
+
+  brake_person:
+    ticks: 900
+    actors:
+      - {name: person, class: person, blueprint: walker.pedestrian.0001, ahead_m: 35.0}
+    expect: *brake_expectations
+
+  brake_person_offset:
+    ticks: 900
+    actors:
+      - {name: person, class: person, blueprint: walker.pedestrian.0001,
+         ahead_m: 42.0, lateral_m: 0.8}
+    expect: *brake_expectations
+
+  # A slower car in the next lane moves into the ego lane ahead of the vehicle
+  brake_cut_in:
+    ticks: 900
+    actors:
+      - {name: cutter, class: car, blueprint: vehicle.tesla.model3, ahead_m: 22.0,
+         lane: 1, speed_mps: 1.0, cut_in: {start_tick: 240, duration_ticks: 75, to_lane: 0}}
+    expect: *brake_expectations
+
+  # Cars and a person beside the lane: nothing to brake for
+  negative_adjacent:
+    ticks: 900
+    actors:
+      - {name: right_20, class: car, blueprint: vehicle.tesla.model3, ahead_m: 20.0, lane: 1}
+      - {name: right_45, class: car, blueprint: vehicle.audi.tt, ahead_m: 45.0, lane: 1}
+      - {name: left_30, class: car, blueprint: vehicle.tesla.model3, ahead_m: 30.0, lane: -1}
+      - {name: left_55, class: truck, blueprint: vehicle.carlamotors.carlacola,
+         ahead_m: 55.0, lane: -1}
+      - {name: verge, class: person, blueprint: walker.pedestrian.0001,
+         ahead_m: 38.0, lane: 1, lateral_m: 0.8}
+    expect: {drives: true, no_stop_reason_prefix: obstacle, collisions: 0}
+
+  # ── Faults. Need --arm ────────────────────────────────────────────────────
+  # The vehicle is driving when the fault starts; it must be braked within
+  # the age limit (200 ms of simulation) plus one tick.
+
+  fault_no_frames:      # the camera stream stops reaching the device
+    ticks: 500
+    faults: [{kind: drop_rgb, from_tick: 300}]
+    expect: {drives: true, stops: true, fault_brake_within_sim_ms: 240, collisions: 0}
+
+  fault_no_depth:       # the depth image stops reaching the controller
+    ticks: 500
+    faults: [{kind: drop_depth, from_tick: 300}]
+    expect: {drives: true, stops: true, fault_brake_within_sim_ms: 240, collisions: 0}
+
+  fault_controller_killed:   # SIGKILL; the simulator keeps ticking
+    ticks: 500
+    faults: [{kind: kill_controller, from_tick: 300}]
+    expect: {drives: true, fault_brake_within_sim_ms: 340, collisions: 0}
+
+  # Commands the simulator must refuse, sent while the vehicle is braked and
+  # not armed: none of them may move it. Run without --arm.
+  fault_forged_commands:
+    ticks: 240
+    faults:
+      - kind: forge_commands
+        from_tick: 120
+        until_tick: 121
+        commands:
+          - {run_id: r_other, source: carla-front, command_seq: 900000, basis_sim_ns: 0,
+             control_sim_ns: 0, control_frame: 0, valid_until_sim_ns: 0,
+             throttle: 1.0, brake: 0.0, steer: 0.0, reason: ""}
+          - {throttle: 1.0, brake: 0.0}
+          - "full throttle"
+    expect: {drives: false, commands_rejected: [wrong_run, not_an_object]}
+
+  # ── Negative control ──────────────────────────────────────────────────────
+  # A car drives into the standing ego vehicle. Everything else about the run
+  # is fine; the evaluation is right only if it fails the run.
+  negative_control_collision:
+    ticks: 300
+    actors:
+      - {name: rammer, class: car, blueprint: vehicle.tesla.model3, ahead_m: 25.0,
+         yaw_deg: 180.0, physics: true, speed_mps: 4.0, move_from_tick: 60}
+    expect: {collisions: 0, evaluator_must_fail: true}
+
+  # ── Sustained run: 10 minutes, vehicle braked ─────────────────────────────
+  # Transport, the two engines on the device and the control loop at their
+  # real rates. The scene is static so that the rates are the only variable.
+  sustained:
+    ticks: 18000
+    depth_artifact_frames: 300
+    rgb_artifact_every: 900
+    expect: {unknown_frames: 0}

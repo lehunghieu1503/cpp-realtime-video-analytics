@@ -8,6 +8,8 @@
 #                        USER@HOST  a Jetson that has the video-analytics:jetson
 #                                   image (scripts/deploy-jetson.sh ships it)
 #                        local      build/src/video_analytics on this PC
+#                        none       no device: scenarios that measure the
+#                                   vehicle or the sensors only
 #                      (default: local)
 #   --remote-dir DIR   directory on the device (default: video-analytics-carla,
 #                      relative to the home directory); everything this script
@@ -121,7 +123,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ "$DEVICE" = local ]; then
+WAIT_CLIENT=600
+if [ "$DEVICE" = none ]; then
+  SIM_HOST=127.0.0.1 DEVICE_URL=http://127.0.0.1:9 WAIT_CLIENT=0
+elif [ "$DEVICE" = local ]; then
   SIM_HOST="${SIM_HOST:-127.0.0.1}"
   DEVICE_URL=http://127.0.0.1:9011
 else
@@ -146,7 +151,7 @@ echo "== Starting the simulator"
 "$CARLA_PYTHON" -m video_analytics_simulation.simulator --config "$CONFIG" \
   --scenarios "$SCENARIOS" --scenario "$SCENARIO" --run-dir "$RUN_DIR" \
   --run-id "$RUN_ID" --ticks "$TICKS" --controller-pid "$CONTROLLER" \
-  --wait-client 600 $ARM 2>&1 | tee "$RUN_DIR/simulator.log" &
+  --wait-client "$WAIT_CLIENT" $ARM 2>&1 | tee "$RUN_DIR/simulator.log" &
 SIMULATOR=$!
 # The simulator listens once it has written the manifest
 for _ in $(seq 120); do
@@ -155,8 +160,10 @@ for _ in $(seq 120); do
   sleep 0.5
 done
 
-echo "== Starting the device ($DEVICE), camera from $SIM_HOST"
-if [ "$DEVICE" = local ]; then
+[ "$DEVICE" = none ] || echo "== Starting the device ($DEVICE), camera from $SIM_HOST"
+if [ "$DEVICE" = none ]; then
+  :
+elif [ "$DEVICE" = local ]; then
   sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
   VA_RUN_ID=$RUN_ID build/src/video_analytics --config "$RUN_DIR/device.yaml" \
     --headless --port 9011 >"$RUN_DIR/device.log" 2>&1 &

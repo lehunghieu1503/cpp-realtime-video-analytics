@@ -78,7 +78,7 @@ metric:
   max_gap_s: 0.5
 
 control:
-  target_speed_kmh: 10.0
+  target_speed_kmh: 9.0    # the limit of this stage is 10; the rest is margin
   # Perception older than this, in simulation time, is not driven on
   age_limit_ms: 200
   # No accepted command for this long, in wall time: the simulator brakes
@@ -93,7 +93,7 @@ control:
   unknown_closing_mps: 2.0
   pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
   steer: {gain: 1.0, rate_per_s: 2.0}
-  speed: {kp: 0.4, ki: 0.2, max_throttle: 0.6}
+  speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
   ready_frames: 3
 
 # Where the ego vehicle starts, snapped to the lane centre. Town04, all on

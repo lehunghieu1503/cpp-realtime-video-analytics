@@ -234,7 +234,7 @@ def ego_lateral_deviation(row):
 # ── Sections of the report ───────────────────────────────────────────────────
 
 def frames_section(frames, ticks):
-    run_ticks = {f for f, t in ticks.items() if "tick" in t}
+    run_ticks = {f for f, t in ticks.items() if t.get("tick", -1) >= 0}
     # Images of the ticks before the run (the vehicle settling) are not its
     # frames, even when one of them arrives after the run began
     generated = {f: e for f, e in frames.items() if e["registered"] and f in run_ticks}
@@ -243,7 +243,9 @@ def frames_section(frames, ticks):
         key = entry["status"] if entry["status"] != "dropped" else \
             "dropped:" + entry.get("reason", "?")
         statuses[key] = statuses.get(key, 0) + 1
-    return generated, {
+    before = {e["sim_ns"] for f, e in frames.items()
+              if e["registered"] and f not in run_ticks and e["status"] == "sent"}
+    return generated, before, {
         "ticks": len(run_ticks),
         "rgb_generated": len(generated),
         # The tick happened and the camera gave no image: a loss of its own
@@ -255,11 +257,14 @@ def frames_section(frames, ticks):
     }
 
 
-def identity_section(perception, generated, run_id):
-    """Every result received must name a frame this run sent, once."""
+def identity_section(perception, generated, run_id, before_run=()):
+    """Every result received must name a frame this run sent, once.
+    before_run: timestamps of the frames sent while waiting for the device,
+    before the first tick of the run; their results are set aside."""
     by_ns = {e["sim_ns"]: f for f, e in generated.items() if e["status"] == "sent"}
     seen = set()
-    counts = {"received": len(perception), "matched": 0, "wrong_run": 0,
+    counts = {"received": len(perception), "matched": 0, "before_run": 0,
+              "wrong_run": 0,
               "unknown_frame": 0, "repeated": 0, "out_of_order": 0,
               "bad_identity": 0}
     usable = {}
@@ -272,6 +277,9 @@ def identity_section(perception, generated, run_id):
             continue
         if not isinstance(sim_ns, int) or isinstance(sim_ns, bool):
             counts["bad_identity"] += 1
+            continue
+        if sim_ns in before_run:
+            counts["before_run"] += 1
             continue
         if sim_ns not in by_ns:
             # A timestamp that is not one the simulator sent: the join key
@@ -535,6 +543,147 @@ def fault_section(controls, scenario, dt):
     return out, rejected
 
 
+def vehicle_section(controls, ego_rows, manifest):
+    """Open-loop scenarios: what the vehicle does for a given command.
+
+    Steering: sign and gain of the response to a constant steer. Braking:
+    the delay from the brake command to the first loss of speed, and the
+    deceleration between 90 % and 10 % of the speed it had.
+    """
+    applied = {c["sim_ns_after"]: c for c in controls
+               if c.get("event") == "applied" and c["reason"] == "open_loop"}
+    if not applied:
+        return None
+    rows = [(e, applied[e["sim_ns"]]) for e in ego_rows if e["sim_ns"] in applied]
+    wheelbase = manifest["vehicle"]["wheelbase_m"]
+    max_steer = math.radians(manifest["vehicle"]["max_steer_deg"])
+    out = {"steer": [], "brake": None}
+    segments = {}
+    for ego, command in rows:
+        if command["steer"] != 0.0 and ego["speed_mps"] > 1.0:
+            segments.setdefault(command["steer"], []).append(
+                ego["yaw_rate_radps"] / ego["speed_mps"])
+    for steer, curvatures in sorted(segments.items()):
+        # The first second is the vehicle turning in
+        settled = curvatures[len(curvatures) // 2:]
+        curvature = float(np.mean(settled))
+        wheel = math.atan(wheelbase * curvature)
+        out["steer"].append({
+            "steer": steer, "curvature_inv_m": curvature, "wheel_angle_rad": wheel,
+            "turns_right": curvature > 0,
+            "sign_ok": (curvature > 0) == (steer > 0),
+            # 1.0 would be: steer 1 turns the wheels by max_steer_deg
+            "gain": wheel / (steer * max_steer)})
+    braking = [(ego, c) for ego, c in rows if c["brake"] >= 1.0]
+    moving = [i for i, (ego, c) in enumerate(rows) if c["brake"] >= 1.0
+              and i > 0 and rows[i - 1][1]["brake"] < 1.0 and ego["speed_mps"] > 1.0]
+    if moving:
+        start = moving[0]
+        v0 = rows[start][0]["speed_mps"]
+        t0 = rows[start][0]["sim_ns"]
+        series = [(e["sim_ns"] - t0, e["speed_mps"], e["pose"]) for e, _ in rows[start:]]
+        onset = next((t for t, v, _ in series if v < v0 - 0.05), None)
+        t90 = next((t for t, v, _ in series if v <= 0.9 * v0), None)
+        t10 = next((t for t, v, _ in series if v <= 0.1 * v0), None)
+        stopped = next((i for i, (t, v, _) in enumerate(series) if v < 0.05), None)
+        distance = None
+        if stopped is not None:
+            a, b = series[0][2], series[stopped][2]
+            distance = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        out["brake"] = {
+            "speed_at_brake_mps": v0,
+            # The command is applied before the tick whose state this is
+            "delay_to_first_deceleration_s": None if onset is None else onset * 1e-9 + 1 / 30,
+            "deceleration_90_to_10_mps2": (0.8 * v0 / ((t10 - t90) * 1e-9))
+            if t90 is not None and t10 is not None and t10 > t90 else None,
+            "stopping_distance_m": distance,
+            "stopping_time_s": None if stopped is None else series[stopped][0] * 1e-9}
+    del braking
+    return out
+
+
+def depth_fixture_section(run_dir, generated, truth_by_ns, rig, every=15):
+    """What the depth image measures, checked on the road itself.
+
+    The road is a known plane: z = ground_z in the ego frame. Each sampled
+    road pixel is turned into a point twice, reading depth as the distance
+    along the optical axis and as the distance along the ray; the reading
+    that puts the points on the road is the right one. With it, the point
+    must also agree with the ray-plane intersection of the same pixel.
+
+    Then the silhouette of each scripted object in the depth image against
+    its projected bounding box: left, right and bottom edge, in pixels.
+    """
+    axis, radial, plane_xy, edges = [], [], [], []
+    frames = 0
+    for entry in sorted(generated.values(), key=lambda e: e["sim_ns"])[::every]:
+        path = entry.get("depth_artifact")
+        row = truth_by_ns.get(entry["sim_ns"])
+        if not path or row is None:
+            continue
+        with open(os.path.join(run_dir, path), "rb") as f:
+            raw = zlib.decompress(f.read())
+        h, w = entry["depth_shape"]
+        bgr = np.frombuffer(raw, np.uint8).reshape(h, w, 3)
+        depth = decode_depth(np.concatenate(
+            [bgr, np.full((h, w, 1), 255, np.uint8)], axis=2)).astype(np.float64)
+        frames += 1
+        ego_pose = Pose.from_dict(row["ego"]["pose"])
+        objects = [t for t in (truth_object(a, ego_pose, rig) for a in row["actors"]) if t]
+
+        # Road pixels on a grid over the lower image, away from the objects
+        v, u = np.mgrid[h // 2 + 20:h:16, 8:w:16]
+        keep = np.ones(u.shape, bool)
+        for t in objects:
+            x0, y0, x1, y1 = t["box"]
+            keep &= ~((u >= x0 - 20) & (u <= x1 + 20) & (v >= y0 - 20) & (v <= y1 + 60))
+        u, v = u[keep], v[keep]
+        d = depth[v, u]
+        expected, on_road = rig.uv_to_ground(u + 0.5, v + 0.5, 60.0)
+        # Only where the road is the nearest thing: the lane ahead, within 60 m
+        on_road &= np.abs(expected[:, 1]) < 5.0
+        u, v, d, expected = u[on_road], v[on_road], d[on_road], expected[on_road]
+        along_axis = rig.depth_to_ego(u + 0.5, v + 0.5, d)
+        along_ray = rig.depth_to_ego(u + 0.5, v + 0.5, d, radial=True)
+        axis.extend(along_axis[:, 2] - rig.ground_z)
+        radial.extend(along_ray[:, 2] - rig.ground_z)
+        plane_xy.extend(np.linalg.norm(along_axis[:, :2] - expected, axis=1)
+                        / np.maximum(1.0, expected[:, 0]))
+
+        for t in objects:
+            x0, y0, x1, y1 = [int(round(c)) for c in t["box"]]
+            pad = 12
+            ys, xs = np.mgrid[max(0, y0 - pad):min(h, y1 + pad),
+                              max(0, x0 - pad):min(w, x1 + pad)]
+            points = rig.depth_to_ego(xs + 0.5, ys + 0.5, depth[ys, xs])
+            solid = (points[..., 2] > rig.ground_z + 0.15) & \
+                    (np.abs(points[..., 0] - t["near_x_m"]) < 6.0)
+            if solid.sum() < 20:
+                continue
+            columns = xs[solid]
+            rows_ = ys[solid]
+            edges.append({"name": t["name"], "distance_m": t["distance_m"],
+                          "left_px": float(columns.min() - t["box"][0]),
+                          "right_px": float(columns.max() + 1 - t["box"][2]),
+                          "bottom_px": float(rows_.max() + 1 - t["box"][3])})
+    if not frames:
+        return None
+    axis, radial = np.array(axis), np.array(radial)
+    edge_values = [abs(e[k]) for e in edges for k in ("left_px", "right_px", "bottom_px")]
+    return {
+        "frames": frames, "road_pixels": int(len(axis)),
+        "road_height_error_m": {"depth_along_optical_axis": error_summary(axis),
+                                "depth_along_ray": error_summary(radial)},
+        "depth_is": "along_optical_axis"
+        if np.sqrt(np.mean(axis ** 2)) < np.sqrt(np.mean(radial ** 2)) else "along_ray",
+        "road_point_error_relative": percentile_summary(plane_xy),
+        "silhouette_edges_px": percentile_summary(edge_values),
+        "silhouettes": len(edges),
+        "note": "silhouette edges compare the rendered mesh with the actor's "
+                "bounding box, which is larger than the mesh",
+    }
+
+
 def replay(run_dir, manifest, perception, ego_rows, generated, metric_live):
     """Recomputes the metric tracking from the stored artifacts alone."""
     rig = Rig.from_config(manifest["calibration"])
@@ -669,6 +818,34 @@ def check_expectations(expect, metrics):
             e = metrics["metric"]["0-30"]["acceleration_error_mps2"]
             add("acceleration RMSE 0-30 m <= %.2f m/s2" % value,
                 e["count"] > 0 and e["rmse"] <= value, str(e.get("rmse")))
+        elif key == "steer_sign":
+            for item in (metrics.get("vehicle") or {}).get("steer", []):
+                add("steer %+.2f turns %s" % (item["steer"],
+                                              "right" if item["steer"] > 0 else "left"),
+                    item["sign_ok"], "curvature %.4f 1/m, gain %.2f" % (
+                        item["curvature_inv_m"], item["gain"]))
+            if not (metrics.get("vehicle") or {}).get("steer"):
+                add("steering response measured", False, "no steering segment")
+        elif key == "brake_deceleration_min_mps2":
+            brake = (metrics.get("vehicle") or {}).get("brake") or {}
+            got = brake.get("deceleration_90_to_10_mps2")
+            add("full brake decelerates at >= %.1f m/s2" % value,
+                got is not None and got >= value, str(got))
+        elif key == "depth_is":
+            fixture = metrics.get("depth_fixture") or {}
+            add("depth is measured %s" % value, fixture.get("depth_is") == value,
+                str(fixture.get("depth_is")))
+        elif key == "road_height_rmse_m":
+            fixture = metrics.get("depth_fixture") or {}
+            e = (fixture.get("road_height_error_m") or {}).get(
+                "depth_along_optical_axis", {})
+            add("road from depth within %.2f m RMSE of the calibrated plane" % value,
+                e.get("count", 0) > 0 and e["rmse"] <= value, str(e.get("rmse")))
+        elif key == "silhouette_p95_px":
+            fixture = metrics.get("depth_fixture") or {}
+            e = fixture.get("silhouette_edges_px") or {}
+            add("object edges within %d px of the projected box (P95)" % value,
+                e.get("count", 0) > 0 and e["p95"] <= value, str(e.get("p95")))
         elif key == "evaluator_must_fail":
             pass  # handled by the caller: a negative control
         else:
@@ -684,8 +861,11 @@ def evaluate(run_dir, do_replay=False):
         manifest = json.load(f)
     rig = Rig.from_config(manifest["calibration"])
     frames, ticks = protocol.read_ledger(os.path.join(run_dir, "frames.jsonl"))
-    truth_rows = read_jsonl(os.path.join(run_dir, "truth.jsonl"))
-    controls = read_jsonl(os.path.join(run_dir, "controls.jsonl"))
+    # Ticks before the run began (tick -1) are not part of it
+    truth_rows = [r for r in read_jsonl(os.path.join(run_dir, "truth.jsonl"))
+                  if r["tick"] >= 0]
+    controls = [c for c in read_jsonl(os.path.join(run_dir, "controls.jsonl"))
+                if c.get("tick", 0) >= 0]
     ego_rows = read_jsonl(os.path.join(run_dir, "ego.jsonl"))
     perception = read_jsonl(os.path.join(run_dir, "perception.jsonl"))
     metric_rows = read_jsonl(os.path.join(run_dir, "metric.jsonl"))
@@ -697,8 +877,9 @@ def evaluate(run_dir, do_replay=False):
             simulator = json.load(f)
 
     truth_by_ns = {row["sim_ns"]: row for row in truth_rows}
-    generated, frame_metrics = frames_section(frames, ticks)
-    usable, identity = identity_section(perception, generated, manifest["run_id"])
+    generated, before_run, frame_metrics = frames_section(frames, ticks)
+    usable, identity = identity_section(perception, generated, manifest["run_id"],
+                                        before_run)
     matches, detection = detection_section(truth_by_ns, usable, generated, rig)
     faults, rejected = fault_section(controls, manifest["scenario_config"],
                                      manifest["fixed_delta_seconds"])
@@ -724,6 +905,12 @@ def evaluate(run_dir, do_replay=False):
         },
         "simulator": simulator,
     }
+    vehicle = vehicle_section(controls, ego_rows, manifest)
+    if vehicle:
+        metrics["vehicle"] = vehicle
+    if manifest["scenario_config"].get("depth_fixture"):
+        metrics["depth_fixture"] = depth_fixture_section(run_dir, generated,
+                                                         truth_by_ns, rig)
     if do_replay:
         metrics["replay"] = replay(run_dir, manifest, perception, ego_rows, generated,
                                    metric_rows)
@@ -766,10 +953,11 @@ def summary_markdown(m):
         "- %d ticks; %d RGB images produced, %d never produced" % (
             f["ticks"], f["rgb_generated"], f["rgb_never_generated"]),
         "- what became of them: %s" % json.dumps(f["status"]),
-        "- results received: %d; joined to a sent frame: %d; naming an unknown "
-        "frame: %d; repeated: %d; wrong run: %d" % (
-            i["received"], i["matched"], i["unknown_frame"], i["repeated"],
-            i["wrong_run"]),
+        "- results received: %d; joined to a sent frame: %d; of frames sent "
+        "before the run began: %d; naming an unknown frame: %d; repeated: %d; "
+        "wrong run: %d" % (
+            i["received"], i["matched"], i["before_run"], i["unknown_frame"],
+            i["repeated"], i["wrong_run"]),
         "- delivery: %.1f %% of produced frames came back with a result" % (
             100 * i["delivery_rate"]),
         "- wall rate %s ticks/s (simulated %s), results %s/s, JPEG %s Mbit/s; "
@@ -845,6 +1033,45 @@ def summary_markdown(m):
                          fault["kind"], fault["from_tick"], fault.get("brake_tick"),
                          fault.get("reason"), fmt(fault.get("sim_ms_to_brake"), 0),
                          fmt(fault.get("wall_ms_to_brake"), 0)))
+    if m.get("vehicle"):
+        lines += ["", "## Vehicle response (open loop)", ""]
+        for item in m["vehicle"]["steer"]:
+            lines.append("- steer %+.2f: curvature %+.4f 1/m, wheel angle %+.2f deg, "
+                         "gain %.2f of the nominal, sign %s" % (
+                             item["steer"], item["curvature_inv_m"],
+                             math.degrees(item["wheel_angle_rad"]), item["gain"],
+                             "ok" if item["sign_ok"] else "WRONG"))
+        b = m["vehicle"]["brake"]
+        if b:
+            lines.append("- full brake from %s m/s: first deceleration after %s s, "
+                         "%s m/s2 between 90 %% and 10 %% of the speed, stopped "
+                         "after %s m and %s s" % (
+                             fmt(b["speed_at_brake_mps"]),
+                             fmt(b["delay_to_first_deceleration_s"], 3),
+                             fmt(b["deceleration_90_to_10_mps2"]),
+                             fmt(b["stopping_distance_m"]), fmt(b["stopping_time_s"])))
+    if m.get("depth_fixture"):
+        d = m["depth_fixture"]
+        h = d["road_height_error_m"]
+        lines += ["", "## Depth and calibration fixture", "",
+                  "- %d frames, %d road pixels" % (d["frames"], d["road_pixels"]),
+                  "- road height from depth, reading depth along the optical axis: "
+                  "RMSE %s m, max %s m" % (
+                      fmt(h["depth_along_optical_axis"].get("rmse"), 4),
+                      fmt(h["depth_along_optical_axis"].get("max_abs"), 4)),
+                  "- reading it along the ray: RMSE %s m, max %s m" % (
+                      fmt(h["depth_along_ray"].get("rmse"), 4),
+                      fmt(h["depth_along_ray"].get("max_abs"), 4)),
+                  "- so depth is measured **%s**" % d["depth_is"].replace("_", " "),
+                  "- road point from depth against the ray-plane intersection, "
+                  "relative to range: P95 %s, max %s" % (
+                      fmt(d["road_point_error_relative"].get("p95"), 4),
+                      fmt(d["road_point_error_relative"].get("max"), 4)),
+                  "- %d object silhouettes against the projected box: P50 %s px, "
+                  "P95 %s px, max %s px (%s)" % (
+                      d["silhouettes"], fmt(d["silhouette_edges_px"].get("p50"), 1),
+                      fmt(d["silhouette_edges_px"].get("p95"), 1),
+                      fmt(d["silhouette_edges_px"].get("max"), 1), d["note"])]
     if "replay" in m:
         p = m["replay"]
         lines += ["", "## Replay from artifacts", "",
