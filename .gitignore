@@ -39,3 +39,10 @@ deploy/.env
 deploy/secrets/
 deploy/prometheus-data/
 models/trt-cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# CARLA runs
+.cache/
