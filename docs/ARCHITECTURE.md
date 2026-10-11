@@ -70,15 +70,40 @@ float tensor and return the output tensor.
 | Backend | `--backend` | Notes |
 |:--------|:------------|:------|
 | `OnnxBackend` | `cpu`, `cuda`, `tensorrt` | One class, three ONNX Runtime execution providers. TensorRT builds an engine at `--precision fp32/fp16/int8` and caches it in `trt-cache/` next to the model. |
+| `TensorRtBackend` | `tensorrt-native` | TensorRT's own API. Parses the ONNX file, builds and caches the engine, saves the engine inspector's layer list, can time every layer. Pre-processes on the GPU and can read frames that are already there. Built with `WITH_TENSORRT`. |
 | `OpenVinoBackend` | `openvino:CPU`, `openvino:GPU`, `openvino:NPU` | Reads ONNX or OpenVINO IR. Built only when OpenVINO is found (`WITH_OPENVINO`). |
 
-Pre-processing, post-processing and NMS live in `InferenceEngine` and are the
-same for every backend. That is what makes a benchmark between backends fair,
-and what `test_inference` checks: every backend available on the machine must
-return the same detections as the CPU on `tests/test-image.jpg`.
+Post-processing and NMS live in `InferenceEngine` and are the same for every
+backend, and so is pre-processing unless a backend takes it over. That is
+what makes a benchmark between backends fair, and what `test_inference`
+checks: every backend available on the machine must return the same
+detections as the CPU on `tests/test-image.jpg`, whichever way it
+pre-processes.
 
 Adding a backend means one class implementing `inputShape()` and `run()`, and
 one line in `backend-factory.cpp`.
+
+### Where the pixels are
+
+A backend may implement two faster entry points, tried in this order:
+
+| Entry point | Input | Copies of the image |
+|:------------|:------|:--------------------|
+| `runDeviceFrame()` | A `DeviceFrame`: the frame as it sits in device memory. `NvmmFrame` is a Jetson hardware buffer. | None. `TensorRtBackend` registers the buffer with CUDA as an EGLImage and its kernel reads it in place. |
+| `runFrame()` | The 8-bit BGR frame in system memory | One upload of the 8-bit frame; the kernel resizes, reorders, scales and lays it out directly in the engine's input. |
+| `run()` | The float tensor prepared on the CPU by `preprocess()` | The CPU builds the tensor, the backend uploads it. |
+
+`cuda-preprocess.cu` is that kernel: bilinear resize with pixel centres
+mapped like `cv::resize`, BGR or RGBA to RGB, scale to [0, 1], planar float32,
+in one pass. A kernel that cannot be launched throws rather than leaving the
+engine to run on an empty input.
+
+On the capture side, `GstCapture` runs the GStreamer pipeline through its
+appsink. When the pipeline ends in `video/x-raw(memory:NVMM)`, `read()`
+returns an `NvmmFrame` holding the GStreamer sample instead of pixels. The
+frame travels through the queues as a `shared_ptr`; the buffer returns to
+the decoder's pool when the last reference goes. `AnalyticsResult::cpuFrame()`
+makes the CPU copy on first use, which only happens when a frame is drawn.
 
 ### Tracking and rules
 
@@ -135,11 +160,22 @@ never stalls a producer.
 | The model or backend fails to load | The pipeline does not start and the process exits with an error. There is no fallback to CPU. |
 | Inference throws | The pipeline stops and the process exits non-zero, so a supervisor restarts it. |
 | A source is connected but no result arrives for 60 s | The watchdog exits the process (`watchdog_seconds`). |
+| A GStreamer pipeline fails | `GstCapture` reads the error from the pipeline's bus and logs the element and the reason; the source is then retried like any other. |
 | The MQTT broker is away | The client keeps reconnecting; QoS 1 messages are queued by the client library meanwhile. |
 | SIGINT or SIGTERM | The main loop ends, the server and the pipeline are stopped and every thread is joined. |
 
 `/health` returns 200 only while the pipeline is running, at least one source
 is connected and a result arrived in the last 10 seconds.
+
+## Security
+
+Off by default; on when credentials are configured.
+
+| Part | Mechanism |
+|:-----|:----------|
+| HTTP server | With a password, every route except `/health` requires HTTP Basic credentials, compared in constant time. With a certificate and key the server is an `httplib::SSLServer` and speaks HTTPS only. |
+| MQTT client | Username and password, and with a CA file TLS with the broker's certificate verified against it. |
+| Secrets | Read from the environment (`VA_HTTP_*`, `VA_TLS_*`, `VA_MQTT_*`) over the config file, so a deployment keeps them out of it. `scripts/make-secrets.sh` creates a CA, a server certificate valid from the day before (boards' clocks drift) and random passwords. |
 
 ## HTTP routes
 
@@ -150,5 +186,5 @@ is connected and a result arrived in the last 10 seconds.
 | `/events` | `text/event-stream` | The latest JSON of each stream whenever it changes. |
 | `/video?stream=N` | `multipart/x-mixed-replace` | MJPEG of stream N. Frames are drawn and encoded only while someone watches. |
 | `/streams` | `application/json` | Source ids with their zone and line names. |
-| `/metrics` | Prometheus text | Per-stream FPS, latency, frames, reconnects; events, zone occupancy, line crossings; stage times, power, resident memory. |
+| `/metrics` | Prometheus text | Per-stream FPS, latency, frames, reconnects; events, zone occupancy, line crossings; stage times, power, GPU load, resident memory, uptime. |
 | `/health` | `application/json` | 200 or 503, see above. |

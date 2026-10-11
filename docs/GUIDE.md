@@ -66,7 +66,8 @@ Cần Ubuntu 22.04 trở lên, GCC 11+, CMake 3.20+.
    ```bash
    sudo apt update
    sudo apt install -y build-essential cmake git wget \
-     libopencv-dev libeigen3-dev libmosquitto-dev
+     libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
    ```
 
 2. Cài ONNX Runtime 1.20.1 (bản CPU):
@@ -235,8 +236,9 @@ Mỗi sự kiện ở `/events` có dạng:
 | `--gst PIPELINE` | Pipeline GStreamer kết thúc bằng `appsink` | không |
 | `--streams N` | Mở nguồn trên dòng lệnh N lần (đo số camera tối đa) | `1` |
 | `--model PATH` | Model ONNX, hoặc OpenVINO IR (`.xml`) cho backend OpenVINO | `models/yolov8n.onnx` |
-| `--backend NAME` | `cpu`, `cuda`, `tensorrt`, `openvino:CPU`, `openvino:GPU`, `openvino:NPU` | `cpu` |
-| `--precision P` | Chỉ cho `tensorrt`: `fp32`, `fp16`, `int8` | `fp16` |
+| `--backend NAME` | `cpu`, `cuda`, `tensorrt`, `tensorrt-native`, `openvino:CPU`, `openvino:GPU`, `openvino:NPU` | `cpu` |
+| `--precision P` | Cho các backend TensorRT: `fp32`, `fp16`, `int8` | `fp16` |
+| `--cpu-preprocess` | Tiền xử lý trên CPU dù backend làm được trên GPU (để so sánh) | tắt |
 | `--conf X` | Ngưỡng confidence | `0.5` |
 | `--workers N` | Số luồng inference, 1 đến 16 | `2`, hoặc `1` khi dùng bộ tăng tốc |
 | `--port N` | Cổng dashboard | `9001` |
@@ -248,6 +250,7 @@ Mỗi sự kiện ở `/events` có dạng:
 | `--warmup N` | Số frame đầu bỏ qua, không đo | `30` |
 | `--output FILE` | Ghi báo cáo benchmark ra file Markdown | không |
 | `--csv FILE` | Ghi thêm một dòng kết quả vào file CSV | không |
+| `--profile-layers` | Thêm thời gian từng layer vào báo cáo (`tensorrt-native`) | tắt |
 | `--eval-coco DIR` | Chạy detector trên một thư mục ảnh `.jpg` để đo mAP | không |
 | `--eval-out FILE` | Nơi ghi kết quả của `--eval-coco` | `detections.json` |
 
@@ -258,13 +261,20 @@ Chọn backend:
 
 - `cpu`: chạy ở mọi nơi. Số thread ONNX Runtime tự giới hạn theo số nhân CPU.
 - `cuda`: cần ONNX Runtime bản GPU. Không cần bước chuẩn bị nào.
-- `tensorrt`: nhanh nhất trên Jetson. Build engine ở lần chạy đầu với mỗi
-  model và mỗi precision.
+- `tensorrt`: TensorRT qua execution provider của ONNX Runtime. Build engine ở
+  lần chạy đầu với mỗi model và mỗi precision.
+- `tensorrt-native`: gọi thẳng TensorRT, nhanh nhất trên Jetson và trên GPU
+  NVIDIA. Tiền xử lý (resize, đổi màu, chuẩn hoá) chạy trong một kernel CUDA
+  ghi thẳng vào input của engine. Lưu danh sách layer của engine ra JSON và
+  đo được thời gian từng layer. Cần build với TensorRT và trình biên dịch
+  CUDA; trên GPU có driver cũ hơn CUDA toolkit thì thêm
+  `-DCMAKE_CUDA_ARCHITECTURES=120-real` (RTX 50).
 - `openvino:CPU`, `openvino:GPU`, `openvino:NPU`: CPU, iGPU và NPU của Intel.
   Cần build với `-DOpenVINO_DIR=<openvino>/runtime/cmake`.
 
-Mọi backend dùng chung pre-process, post-process và NMS; backend chỉ chạy
-tensor. Nếu backend được yêu cầu không có, chương trình báo
+Mọi backend dùng chung post-process và NMS. Tiền xử lý mặc định cũng dùng
+chung trên CPU; backend nào tự làm được trên thiết bị của nó thì có test bắt
+kết quả phải khớp với CPU. Nếu backend được yêu cầu không có, chương trình báo
 `Backend '...' failed to load ...` và thoát, chứ không âm thầm chạy CPU.
 
 ## 5. Đo tốc độ bằng benchmark
@@ -313,10 +323,23 @@ video 640x480, model YOLO11s 640x640, mAP trên 500 ảnh COCO val2017:
 
 | Backend | Precision | FPS | Độ trễ p50 | Công suất | FPS/W | mAP50-95 |
 |---------|-----------|-----|------------|-----------|-------|----------|
+| `tensorrt-native` | INT8 | 182,3 | 5,5 ms | 14,0 W | 13,02 | 0,455 |
+| `tensorrt-native` | FP16 | 135,2 | 7,4 ms | 17,0 W | 7,95 | 0,469 |
 | `tensorrt` | INT8 | 107,4 | 9,5 ms | 12,3 W | 8,73 | 0,459 |
 | `tensorrt` | FP16 | 68,7 | 14,6 ms | 12,6 W | 5,45 | 0,470 |
 | `cuda` | FP32 | 31,9 | 31,4 ms | 15,8 W | 2,03 | 0,470 |
 | `cpu` | FP32 | 3,6 | 556,6 ms | 10,8 W | 0,33 | 0,469 |
+
+Khoảng cách gấp đôi giữa hai backend TensorRT (FP16) đến từ đâu:
+
+| Bước | FPS | Tiền xử lý | Inference |
+|------|-----|------------|-----------|
+| `tensorrt` (qua ONNX Runtime) | 68,3 | 5,20 ms | 8,93 ms |
+| `tensorrt-native`, tiền xử lý trên CPU | 92,9 | 2,59 ms | 7,67 ms |
+| `tensorrt-native`, tiền xử lý bằng kernel CUDA | 135,2 | 0,27 ms | 6,63 ms |
+
+Trên laptop RTX 5060 (TensorRT 11.4): `tensorrt-native` đạt 262,8 FPS, so với
+203,6 FPS khi tiền xử lý trên CPU.
 
 Video thử chỉ có 250 frame, nên mỗi lần đo 190 frame sau 60 frame warm-up:
 đủ để lấy tốc độ, chưa đủ dài để thấy thermal throttling.
@@ -341,8 +364,35 @@ BGR. Ví dụ nguồn giả để thử khi chưa có camera:
 ```
 
 Image Docker đã có `libEGL` và `libGLESv2` mà các plugin GStreamer của NVIDIA
-cần. Decode H.264 bằng phần cứng (`nvv4l2decoder`) đã thử chạy được trong
-container; pipeline camera CSI thì chưa thử với cảm biến thật.
+cần. Pipeline camera CSI thì chưa thử với cảm biến thật.
+
+### Decode phần cứng và zero-copy
+
+Kết thúc pipeline bằng `video/x-raw(memory:NVMM),format=RGBA` thì frame ở
+nguyên trong bộ đệm của bộ giải mã; `tensorrt-native` cho CUDA đọc thẳng bộ
+đệm đó, không copy qua bộ nhớ hệ thống:
+
+```yaml
+backend: tensorrt-native
+sources:
+  - id: cong
+    gst: "rtspsrc location=rtsp://CAMERA/stream protocols=tcp latency=100 ! rtph264depay ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw(memory:NVMM),format=RGBA ! appsink max-buffers=2 drop=true"
+```
+
+Với H.265 đổi thành `rtph265depay ! h265parse`. Frame chỉ được copy về CPU
+khi có người xem luồng đó hoặc sự kiện cần snapshot.
+
+Đo trên board, video H.264 1080p decode nhanh hết mức, YOLO11s FP16:
+
+| | Copy về CPU | Zero-copy |
+|---|---|---|
+| CPU của tiến trình | 209% | 70% |
+| Frame decode mỗi giây | 241 | 250 |
+| Frame inference mỗi giây | 114 | 119 |
+| Công suất board | 19,3 W | 17,9 W |
+
+Hai đường cho cùng kết quả nhận diện. Đã thử trong container với H.264 và
+H.265 qua RTSP (camera giả lập) và với file H.264.
 
 ## 7. Nhiều camera, tracking và sự kiện
 
@@ -400,9 +450,10 @@ MJPEG 960x540 decode bằng phần mềm, có tracking):
 
 | Cấu hình | Số camera ở 25 FPS | Số camera ở 15 FPS |
 |----------|--------------------|--------------------|
-| TensorRT FP16, 1 worker | 3 (13,8 W) | 4 (12,6 W) |
-| TensorRT FP16, 2 worker | 4 (16,7 W) | 8 (18,6 W) |
-| TensorRT INT8, 2 worker | 5 ở 24,4 FPS (14,3 W) | 10 ở 14,6 FPS (15,4 W) |
+| `tensorrt-native` FP16, 1 worker | 4 (15,1 W) | 6 (14,6 W) |
+| `tensorrt-native` FP16, 2 worker | 6 (20,1 W) | 10 (20,4 W) |
+| `tensorrt-native` INT8, 2 worker | 10 ở 24,3 FPS (18,6 W) | 14 (17,5 W) |
+| `tensorrt` FP16, 2 worker | 4 (16,7 W) | 8 (18,6 W) |
 
 Khi chạy nhiều camera trên GPU nên đặt `workers: 2`: pre-process và
 post-process khi đó chạy song song.
@@ -419,7 +470,39 @@ và Grafana. `scripts/deploy-jetson.sh` đưa cả stack lên board.
 | Prometheus | `http://BOARD:9090` |
 | MQTT | `BOARD:1883` |
 
-Không dịch vụ nào có xác thực. Chỉ mở các cổng này trong mạng bạn tin tưởng.
+Mặc định không dịch vụ nào có xác thực: chỉ mở các cổng này trong mạng bạn
+tin tưởng, hoặc deploy ở chế độ bảo mật.
+
+### Chế độ bảo mật
+
+```bash
+SECURE=1 scripts/deploy-jetson.sh USER@BOARD
+```
+
+- Dashboard và `/metrics` chạy HTTPS, cần mật khẩu (user `admin`).
+- MQTT chạy TLS ở cổng 8883, cần mật khẩu (user `va`), tắt truy cập ẩn danh.
+- Grafana phải đăng nhập; Prometheus chỉ mở cho chính board.
+- `scripts/make-secrets.sh` tạo CA, chứng chỉ server và mật khẩu ngẫu nhiên
+  trong `deploy/secrets/` trên PC (đã gitignore). Khoá của CA không được gửi
+  sang board. Script in ra đường dẫn từng file mật khẩu.
+- Trình duyệt sẽ cảnh báo chứng chỉ: import `deploy/secrets/run/ca.crt` hoặc
+  chấp nhận cảnh báo.
+
+Xem sự kiện ở chế độ bảo mật:
+
+```bash
+R=deploy/secrets/run
+mosquitto_sub -h BOARD -p 8883 --cafile $R/ca.crt -u va -P "$(cat $R/mqtt.password)" \
+  -t 'video-analytics/#' -v
+```
+
+### Camera RTSP giả lập
+
+`SIM=1 scripts/deploy-jetson.sh USER@BOARD` chạy thêm một server RTSP phát
+lặp hai file video thành luồng H.264 và H.265, và dùng
+`deploy/config/rtsp-sim.yaml` để đọc chúng như camera mạng: `rtspsrc`, decode
+phần cứng, zero-copy. Cần `walk-1080p-h264.mp4` và `walk-1080p-h265.mp4` trong
+`VIDEO_DIR`.
 
 Thao tác trên board, trong thư mục triển khai:
 
@@ -440,8 +523,27 @@ Chạy liên tục:
   thấp nhất, số lần mất kết nối, số lần khởi động lại):
 
   ```bash
-  scripts/soak-report.sh BOARD 24     # 24 giờ gần nhất
+  scripts/soak-report.sh USER@BOARD THƯ_MỤC 24     # 24 giờ gần nhất
   ```
+
+  Báo cáo chỉ tính lượt chạy hiện tại của ứng dụng: gộp qua một lần khởi động
+  lại thì độ dốc bộ nhớ sẽ sai.
+
+### ROS 2
+
+`ros2/video_analytics_bridge` là một package ROS 2 đọc `/events` của thiết bị
+và publish `vision_msgs/Detection2DArray` cho từng nguồn
+(`/video_analytics/<nguồn>/detections`, `Detection2D.id` là track id) cùng
+các sự kiện ở `/video_analytics/events`.
+
+```bash
+cp -r ros2/video_analytics_bridge ~/ros2_ws/src/ && cd ~/ros2_ws
+colcon build --packages-select video_analytics_bridge && source install/setup.bash
+ros2 run video_analytics_bridge bridge --ros-args -p url:=http://BOARD:9001
+```
+
+Với thiết bị ở chế độ bảo mật, thêm `-p url:=https://BOARD:9001`,
+`-p password:=...` và `-p ca_file:=.../deploy/secrets/run/ca.crt`.
 
 ## 9. Lỗi thường gặp
 
@@ -457,5 +559,8 @@ Chạy liên tục:
 | Mở dashboard báo `Not found` | Chương trình không được chạy từ thư mục gốc repo, nên không thấy `web/`. |
 | Dashboard không vào được từ máy khác | Mặc định chỉ lắng nghe `127.0.0.1`. Thêm `--bind 0.0.0.0` (Docker đã bật sẵn) và kiểm tra `-p 9001:9001`. |
 | CMake báo `Could not resolve host: github.com` | Máy không có internet để tải `nlohmann/json`, `cpp-httplib`, `yaml-cpp` và `ByteTrack-cpp`. Chép các thư mục source từ `build/_deps/` của máy khác sang, rồi thêm `-DFETCHCONTENT_SOURCE_DIR_JSON=... -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=... -DFETCHCONTENT_SOURCE_DIR_YAML-CPP=... -DFETCHCONTENT_SOURCE_DIR_BYTETRACK=...` vào lệnh `cmake`. |
+| Build engine báo `Could not find any implementation for node` | CUDA thấy quá ít bộ nhớ trống vì page cache. `tensorrt-native` tự giải phóng cache trước khi build; với `tensorrt` cần `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`. |
+| `the provided PTX was compiled with an unsupported toolchain` | CUDA toolkit mới hơn driver. Cấu hình lại với `-DCMAKE_CUDA_ARCHITECTURES=<GPU của bạn>-real`. |
+| `GStreamer: <element>: <lý do>` | Element đó của pipeline bị lỗi vì lý do nêu ra (đọc từ bus của pipeline). |
 | `Watchdog: no result for 60 s, exiting` | Có nguồn đang kết nối nhưng inference không ra kết quả. Chương trình tự thoát để Docker khởi động lại; xem các dòng log ngay trước đó. |
 | `MQTT: this build has no MQTT support` | Lúc build thiếu `libmosquitto-dev`. |

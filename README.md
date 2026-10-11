@@ -40,10 +40,9 @@ build/src/video_analytics --config deploy/config/config.yaml
 <td width="33%" valign="top">
 
 ### One pipeline, many accelerators
-`--backend cpu | cuda | tensorrt | openvino:CPU | openvino:GPU | openvino:NPU`.
-Backends only run the tensor; pre-processing, post-processing and NMS are
-shared, so comparisons are fair. A missing backend fails loudly at startup;
-it never falls back to CPU.
+`--backend cpu | cuda | tensorrt | tensorrt-native | openvino:CPU | openvino:GPU | openvino:NPU`.
+Post-processing and NMS are shared, so comparisons are fair. A missing
+backend fails loudly at startup; it never falls back to CPU.
 
 </td>
 <td width="33%" valign="top">
@@ -74,10 +73,28 @@ Every number in this README came out of them.
 </td>
 <td valign="top">
 
+### Zero-copy on the Jetson
+A frame goes from the hardware decoder to the network input without touching
+system memory: the CUDA kernel that resizes and normalises it reads the
+decoder's buffer in place. Same detections, a third of the CPU.
+
+</td>
+<td valign="top">
+
 ### Runs unattended
 A lost camera is reopened with exponential backoff. A watchdog exits when
 results stop, so the restart policy brings up a fresh process. `/health`
 and `/metrics` tell a supervisor how it is doing.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### Secured when asked
+`SECURE=1` puts the dashboard behind HTTPS and a password, MQTT behind TLS
+and a password, and Grafana behind a login. Certificates and passwords are
+generated on the PC; the CA key never leaves it.
 
 </td>
 <td valign="top">
@@ -86,6 +103,14 @@ and `/metrics` tell a supervisor how it is doing.
 `scripts/deploy-jetson.sh` builds the arm64 image with `docker buildx`,
 sends only the layers the board lacks, copies the config and starts the
 stack. The board needs no internet and builds nothing.
+
+</td>
+<td valign="top">
+
+### ROS 2 ready
+A [bridge node](#ros-2) publishes each source's detections as
+`vision_msgs/Detection2DArray` and the events as a topic, so the core stays
+free of ROS.
 
 </td>
 </tr>
@@ -102,7 +127,9 @@ mAP is on the first 500 images of COCO val2017.
 
 | Backend | Precision | FPS | Latency p50 | p95 | Power | FPS/W | mAP50-95 |
 |:--------|:----------|----:|------------:|----:|------:|------:|---------:|
-| `tensorrt` | INT8 | **107.4** | **9.5 ms** | 9.5 ms | 12.3 W | **8.73** | 0.459 |
+| `tensorrt-native` | INT8 | **182.3** | **5.5 ms** | 5.5 ms | 14.0 W | **13.02** | 0.455 |
+| `tensorrt-native` | FP16 | 135.2 | 7.4 ms | 7.4 ms | 17.0 W | 7.95 | 0.469 |
+| `tensorrt` | INT8 | 107.4 | 9.5 ms | 9.5 ms | 12.3 W | 8.73 | 0.459 |
 | `tensorrt` | FP16 | 68.7 | 14.6 ms | 14.9 ms | 12.6 W | 5.45 | **0.470** |
 | `cuda` | FP32 | 31.9 | 31.4 ms | 31.5 ms | 15.8 W | 2.03 | 0.470 |
 | `cpu` (2 workers) | FP32 | 3.6 | 556.6 ms | 559.2 ms | 10.8 W | 0.33 | 0.469 |
@@ -110,15 +137,47 @@ mAP is on the first 500 images of COCO val2017.
 ```mermaid
 xychart-beta
     title "FPS per watt, YOLO11s on Jetson Orin Nano Super"
-    x-axis ["tensorrt INT8", "tensorrt FP16", "cuda", "cpu"]
-    y-axis "FPS / W" 0 --> 10
-    bar [8.73, 5.45, 2.03, 0.33]
+    x-axis ["native INT8", "native FP16", "tensorrt INT8", "tensorrt FP16", "cuda", "cpu"]
+    y-axis "FPS / W" 0 --> 14
+    bar [13.02, 7.95, 8.73, 5.45, 2.03, 0.33]
 ```
 
-TensorRT INT8 is 30x faster than the CPU at 1/26 of the energy per frame, for
-0.011 mAP. The video has 250 frames, so each run measures 190 frames after a
+`tensorrt` runs TensorRT through ONNX Runtime's execution provider;
+`tensorrt-native` talks to TensorRT itself and pre-processes on the GPU.
+Native INT8 is 51x faster than the CPU at 1/39 of the energy per frame, for
+0.014 mAP. The video has 250 frames, so each run measures 190 frames after a
 60-frame warm-up: long enough for a rate, too short to show thermal
 throttling.
+
+Where the 2x between the two TensorRT backends comes from, FP16:
+
+| Step | FPS | Latency p50 | Pre-process | Inference |
+|:-----|----:|------------:|------------:|----------:|
+| `tensorrt` (ONNX Runtime execution provider) | 68.3 | 14.7 ms | 5.20 ms | 8.93 ms |
+| `tensorrt-native`, pre-processing on the CPU | 92.9 | 10.6 ms | 2.59 ms | 7.67 ms |
+| `tensorrt-native`, pre-processing in a CUDA kernel | 135.2 | 7.4 ms | 0.27 ms | 6.63 ms |
+
+`--profile-layers` then says where the remaining 6.6 ms go, layer by layer,
+and the engine's layers and their precisions are saved as JSON next to it:
+FP16 gives 192 FP16 and 17 FP32 layers, INT8 gives 126 INT8, 30 FP16 and
+17 FP32.
+
+### Zero-copy from the hardware decoder
+
+1080p H.264 decoded by `nvv4l2decoder` as fast as it goes, YOLO11s FP16.
+"Copy" converts each frame to BGRx in system memory and uploads it;
+"zero-copy" leaves it in the decoder's buffer (NVMM), which CUDA reads in
+place.
+
+| | Copy to CPU | Zero-copy |
+|:--|-----------:|----------:|
+| CPU use of the process | 209% | **70%** |
+| Frames decoded per second | 241 | 250 |
+| Frames inferred per second | 114 | 119 |
+| Board power | 19.3 W | 17.9 W |
+
+Both give the same detections. The frame is copied to the CPU only when
+somebody watches the stream or an event needs a snapshot.
 
 ### How many cameras fit
 
@@ -127,15 +186,16 @@ tracking on. A row holds when the slowest camera still gets the source rate.
 
 | Configuration | Cameras at 25 FPS | Cameras at 15 FPS |
 |:--------------|:------------------|:------------------|
-| TensorRT FP16, 1 worker | 3 (13.8 W) | 4 (12.6 W) |
-| TensorRT FP16, 2 workers | 4 (16.7 W) | 8 (18.6 W) |
-| TensorRT INT8, 2 workers | 5 at 24.4 FPS (14.3 W) | 10 at 14.6 FPS (15.4 W) |
+| `tensorrt-native` FP16, 1 worker | 4 (15.1 W) | 6 (14.6 W) |
+| `tensorrt-native` FP16, 2 workers | 6 (20.1 W) | 10 (20.4 W) |
+| `tensorrt-native` INT8, 2 workers | 10 at 24.3 FPS (18.6 W) | 14 (17.5 W) |
+| `tensorrt` FP16, 2 workers | 4 (16.7 W) | 8 (18.6 W) |
 
-Past the limit every camera slows together: 6 cameras at 25 FPS on FP16 with
-2 workers each get 20 FPS. The second worker helps because pre-processing
-and post-processing then run in parallel while the GPU serves both.
+Past the limit every camera slows together: 8 cameras at 25 FPS on native
+FP16 with 2 workers each get 19 FPS. The second worker helps because
+post-processing then runs in parallel while the GPU serves both.
 
-### Laptop (Intel Core Ultra 9 275HX)
+### Laptop (Intel Core Ultra 9 275HX, RTX 5060)
 
 Same model, video and images, built from source. Power is not reported: RAPL
 is readable only by root on this machine, and the laptop's power mode was not
@@ -143,13 +203,19 @@ controlled.
 
 | Backend | Model | FPS | Latency p50 | mAP50-95 |
 |:--------|:------|----:|------------:|---------:|
-| `openvino:NPU` | FP32 ONNX | **59.7** | **16.4 ms** | 0.469 |
+| `tensorrt-native` (RTX 5060, TensorRT 11.4) | FP32 ONNX | **262.8** | **3.5 ms** | 0.469 |
+| same, pre-processing on the CPU | FP32 ONNX | 203.6 | 4.9 ms | 0.470 |
+| `openvino:NPU` | FP32 ONNX | 59.7 | 16.4 ms | 0.469 |
 | `openvino:NPU` | INT8 (NNCF) | 40.7 | 24.1 ms | 0.367 |
 | `openvino:CPU` | INT8 (NNCF) | 34.7 | 27.9 ms | 0.397 |
 | `cpu` (ONNX Runtime, 2 workers) | FP32 ONNX | 18.2 | 108.9 ms | 0.470 |
 | `openvino:GPU` (Arc iGPU) | FP32 ONNX | 14.2 | 70.5 ms | 0.470 |
 | `openvino:CPU` | FP32 ONNX | 14.1 | 69.8 ms | 0.470 |
 | `openvino:GPU` (Arc iGPU) | INT8 (NNCF) | 11.8 | 84.6 ms | 0.400 |
+
+TensorRT 11 no longer has precision flags: it builds what the model file
+says, so FP16 there means converting the model first
+(`scripts/quantize-fp16.py`).
 
 Two things the table says that a guess would get wrong: with the FP32 model
 the NPU is about 4x faster than the CPU or the iGPU through OpenVINO, and
@@ -164,6 +230,8 @@ NPU is the one to use. Each worker uses 4 threads.
 
 | Change | Before | After | Measured on |
 |:-------|-------:|------:|:------------|
+| Talk to TensorRT directly and pre-process in a CUDA kernel | 68.3 FPS | 135.2 FPS | Jetson, YOLO11s FP16 |
+| Read the decoder's buffer in place instead of copying it out | 209% CPU | 70% CPU | Jetson, 1080p H.264 |
 | Serve streams round-robin instead of one shared queue | slowest camera: 0.7 FPS | every camera: 13.5 FPS | Jetson, 6 cameras at 25 FPS, 1 worker |
 | Cap ONNX Runtime threads to the available cores | 22.6 FPS | 30.8 FPS | x86 pinned to 6 cores, 2 workers |
 | Size the live frame queue to the worker count | 343 ms | 147 ms | capture-to-result delay, inference at 20 FPS |
@@ -183,7 +251,7 @@ NPU is the one to use. Each worker uses 4 threads.
 flowchart LR
     src(["USB · RTSP · GStreamer · file<br/>x N"]) --> cap["Capture threads<br/>one per source, auto-reconnect"]
     cap --> fq[("Frame queue<br/>per stream · round-robin")]
-    fq --> w["Inference workers<br/>shared pre/post-process"]
+    fq --> w["Inference workers<br/>shared post-process"]
     w --- be{{"IInferenceBackend<br/>ONNX Runtime · TensorRT · OpenVINO"}}
     w --> rq[("Result queue")]
     rq --> main["Main loop<br/>per stream, in frame order"]
@@ -197,7 +265,8 @@ flowchart LR
 
 | Design choice | Why |
 |:--------------|:----|
-| Backends run only the tensor | Pre-process, post-process and NMS are identical for every backend, so a benchmark compares the accelerators and nothing else. |
+| Backends run the tensor; post-process and NMS are shared | A benchmark compares the accelerators and nothing else. A backend may pre-process on its own device, and a test holds it to the CPU's detections. |
+| Frames may stay in device memory | A capture can hand over the decoder's buffer instead of pixels; a CPU copy is made only when a frame is drawn. |
 | One backend instance per worker | Sessions are never shared, so workers need no locking around inference. |
 | A queue slot per stream, served round-robin | A slow consumer can never grow memory, what you see stays recent, and no camera can starve another. |
 | Results are consumed in frame order per stream | Workers finish out of order; the tracker needs frames in order, so a stale result is dropped rather than buffered. |
@@ -231,7 +300,8 @@ Needs Ubuntu 22.04+, GCC 11+, CMake 3.20+.
 
 ```bash
 sudo apt install -y build-essential cmake git wget \
-  libopencv-dev libeigen3-dev libmosquitto-dev
+  libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
 # ONNX Runtime 1.20.1 (CPU)
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
@@ -253,8 +323,16 @@ To keep ONNX Runtime out of `/usr/local`, unpack it anywhere and add
 For the OpenVINO backends, install the
 [OpenVINO archive](https://docs.openvino.ai/latest/get-started/install-openvino.html)
 and add `-DOpenVINO_DIR=/path/to/openvino/runtime/cmake`. CMake prints
-`OpenVINO backend: ON` when it is found. `libmosquitto-dev` is optional too:
-without it the build has no MQTT.
+`OpenVINO backend: ON` when it is found. The other optional parts are found
+the same way and reported at configure time: MQTT (`libmosquitto-dev`),
+HTTPS (`libssl-dev`), the native GStreamer capture, and `tensorrt-native`
+(TensorRT headers and the CUDA compiler).
+
+On an NVIDIA GPU whose driver is older than the CUDA toolkit, compile the
+pre-processing kernel for the GPU's architecture so that the driver does
+not have to: `-DCMAKE_CUDA_ARCHITECTURES=120-real` for an RTX 50 card.
+Without it the backend stops with "the provided PTX was compiled with an
+unsupported toolchain".
 
 </details>
 
@@ -307,11 +385,12 @@ See [Deploy to a Jetson](#deploy-to-a-jetson).
 **3. Open the dashboard** at [http://localhost:9001](http://localhost:9001).
 
 > [!WARNING]
-> Nothing here has authentication. From source the dashboard listens on
-> `127.0.0.1` only. The Docker images listen on `0.0.0.0`, and the deployed
-> stack also opens MQTT (1883), Prometheus (9090) and Grafana (3000, anonymous
-> read-only, `admin`/`admin` to edit). Keep those ports inside a network you
-> trust.
+> By default nothing asks for a password. From source the dashboard listens
+> on `127.0.0.1` only. The Docker images listen on `0.0.0.0`, and the
+> deployed stack also opens MQTT (1883), Prometheus (9090) and Grafana (3000,
+> anonymous read-only, `admin`/`admin` to edit). Either keep those ports
+> inside a network you trust, or deploy with `SECURE=1`
+> ([Deploy to a Jetson](#deploy-to-a-jetson)).
 
 ## Configuration
 
@@ -346,6 +425,10 @@ snapshots:
   dir: snapshots
   keep: 200
 ```
+
+Passwords and certificates go in `auth`, `tls` and `mqtt`
+(`username`, `password`, `ca_file`), or better in the environment, where the
+`VA_HTTP_*`, `VA_TLS_*` and `VA_MQTT_*` variables override the file.
 
 An object is located by the bottom centre of its box. Crossing a line from
 the right of `a → b` to its left counts as `in`, the other way as `out`.
@@ -400,8 +483,9 @@ video_analytics --eval-coco DIR OPTIONS    Detections for mAP
 | `--gst PIPELINE` | GStreamer pipeline ending in `appsink` | none |
 | `--streams N` | Open the command-line source N times (capacity tests) | `1` |
 | `--model PATH` | ONNX model, or OpenVINO IR (`.xml`) for an OpenVINO backend | `models/yolov8n.onnx` |
-| `--backend NAME` | `cpu`, `cuda`, `tensorrt`, `openvino:CPU`, `openvino:GPU`, `openvino:NPU` | `cpu` |
-| `--precision P` | `tensorrt` only: `fp32`, `fp16`, `int8` | `fp16` |
+| `--backend NAME` | `cpu`, `cuda`, `tensorrt`, `tensorrt-native`, `openvino:CPU`, `openvino:GPU`, `openvino:NPU` | `cpu` |
+| `--precision P` | TensorRT backends: `fp32`, `fp16`, `int8` | `fp16` |
+| `--cpu-preprocess` | Pre-process on the CPU even when the backend can on the GPU | off |
 | `--conf X` | Confidence threshold | `0.5` |
 | `--workers N` | Inference worker threads, 1 to 16 | `2`, or `1` on an accelerator |
 | `--port N` | Dashboard port | `9001` |
@@ -413,6 +497,7 @@ video_analytics --eval-coco DIR OPTIONS    Detections for mAP
 | `--warmup N` | Frames to skip first | `30` |
 | `--output FILE` | Write the benchmark report as Markdown | none |
 | `--csv FILE` | Append the results as one CSV line | none |
+| `--profile-layers` | Add the time per layer to the report (`tensorrt-native`) | off |
 | `--eval-coco DIR` | Run the detector over a directory of `.jpg` images | none |
 | `--eval-out FILE` | Where to write those detections | `detections.json` |
 
@@ -443,8 +528,10 @@ scripts/calibrate-int8.py models/yolo11s.onnx data/coco/val2017      # TensorRT
 scripts/quantize-openvino.py models/yolo11s.onnx data/coco/val2017   # OpenVINO
 ```
 
-The first writes `models/yolo11s.calibration`; `deploy-jetson.sh` ships it
-and `precision: int8` uses it. The second writes `models/yolo11s_int8.xml`,
+The first writes `models/yolo11s.calibration` and
+`models/yolo11s.calibration.cache`; `deploy-jetson.sh` ships them and
+`precision: int8` uses them (TensorRT 10; TensorRT 11 takes INT8 only from a
+model with quantize/dequantize nodes). The second writes `models/yolo11s_int8.xml`,
 to be passed as `--model`.
 
 ## Deploy to a Jetson
@@ -474,6 +561,12 @@ To change cameras, zones or the model, edit
 again. `VIDEO_DIR=/path/on/board` mounts a directory of test videos at
 `/data/videos`.
 
+| Option | Effect |
+|:-------|:-------|
+| `SECURE=1` | HTTPS and a password on the dashboard and `/metrics`, TLS and a password on MQTT (port 8883, no anonymous access), a Grafana login, Prometheus reachable only from the board. `scripts/make-secrets.sh` creates a CA, a server certificate and random passwords under `deploy/secrets/` on the PC; the CA key is not shipped. The script prints where each password is. |
+| `SIM=1` | Adds an RTSP server that loops video files as H.264 and H.265 cameras, read with `rtspsrc`, the hardware decoder and zero-copy frames ([deploy/config/rtsp-sim.yaml](deploy/config/rtsp-sim.yaml)). |
+| `SKIP_BUILD=1` | Ships the image already built; for configuration-only changes. |
+
 Requirements: on the PC, Docker with buildx and QEMU (`qemu-user-static`,
 `binfmt-support`), `rsync` and Python 3. On the board, JetPack 6 (L4T r36.x)
 with Docker, the compose plugin and the NVIDIA container runtime.
@@ -486,8 +579,12 @@ with Docker, the compose plugin and the NVIDIA container runtime.
 Any pipeline works as long as it ends in `appsink` and delivers BGR frames.
 
 ```yaml
-# H.264 RTSP camera decoded by the Jetson's hardware decoder
-gst: "rtspsrc location=rtsp://CAMERA/stream latency=100 ! rtph264depay ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1"
+# H.264 RTSP camera, hardware decoder, zero-copy: the frame stays in the
+# decoder's memory (needs backend: tensorrt-native)
+gst: "rtspsrc location=rtsp://CAMERA/stream protocols=tcp latency=100 ! rtph264depay ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw(memory:NVMM),format=RGBA ! appsink max-buffers=2 drop=true"
+
+# The same camera copied out to system memory, for any backend
+gst: "rtspsrc location=rtsp://CAMERA/stream latency=100 ! rtph264depay ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx ! appsink drop=true max-buffers=1"
 
 # CSI sensor
 gst: "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1"
@@ -496,8 +593,10 @@ gst: "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerat
 gst: "multifilesrc location=/data/videos/clip/f%05d.jpg start-index=1 loop=true caps=image/jpeg,framerate=25/1 ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink"
 ```
 
-`nvv4l2decoder` was tested in the container on an H.264 file. The CSI
-pipeline has not been tested with a sensor.
+For H.265 use `rtph265depay ! h265parse`. Hardware decoding and the
+zero-copy path were tested in the container with H.264 and H.265 over RTSP
+from the simulator and with an H.264 file. The CSI pipeline has not been
+tested with a sensor.
 
 </details>
 
@@ -505,22 +604,53 @@ Things worth knowing on a Jetson:
 
 - The first start with a new model or precision builds a TensorRT engine,
   which takes 6 to 10 minutes. It is cached in `models/trt-cache/`.
-- An engine only loads with the TensorRT version that built it. Delete
-  `models/trt-cache/` after switching between a native build and the container.
+- `tensorrt-native` names its engines after the TensorRT version. The
+  `tensorrt` backend does not: delete its files in `models/trt-cache/` after
+  switching between a native build and the container.
+- The GPU shares the system memory, and CUDA counts only free pages:
+  memory held by the page cache looks taken. `tensorrt-native` evicts cache
+  before it builds an engine; with `tensorrt`, a build that fails with
+  "Could not find any implementation for node" wants
+  `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`.
 - Use the top power mode for real runs: `sudo nvpmodel -m 2 && sudo jetson_clocks`
   (MAXN SUPER on JetPack 6.2).
 - A soak test is the deployed stack left running:
-  `scripts/soak-report.sh BOARD 24` summarises memory growth, lowest FPS and
-  reconnects from Prometheus.
+  `scripts/soak-report.sh USER@BOARD [DIR] [HOURS]` summarises the current
+  run from Prometheus: memory growth, lowest FPS, reconnects, GPU load.
+
+## ROS 2
+
+[ros2/video_analytics_bridge](ros2/video_analytics_bridge) is a ROS 2
+package with one node. It reads a device's `/events` stream and publishes
+
+| Topic | Type | Content |
+|:------|:-----|:--------|
+| `/video_analytics/<source>/detections` | `vision_msgs/Detection2DArray` | One message per frame; `Detection2D.id` is the track id |
+| `/video_analytics/events` | `std_msgs/String` | One JSON object per rule event |
+
+```bash
+cp -r ros2/video_analytics_bridge ~/ros2_ws/src/ && cd ~/ros2_ws
+colcon build --packages-select video_analytics_bridge && source install/setup.bash
+ros2 run video_analytics_bridge bridge --ros-args -p url:=http://BOARD:9001
+
+# a secured device
+ros2 run video_analytics_bridge bridge --ros-args -p url:=https://BOARD:9001 \
+  -p password:="$(cat deploy/secrets/run/http.password)" \
+  -p ca_file:=$PWD/deploy/secrets/run/ca.crt
+```
+
+Checked on ROS 2 Humble: 25 Hz per source. The core has no ROS dependency;
+the bridge runs wherever ROS 2 does and reconnects when the device restarts.
 
 ## Project layout
 
 ```text
 src/
 ├── main.cpp          CLI, live loop, benchmark and evaluation modes
-├── capture/          Camera, RTSP, GStreamer and video file input (OpenCV)
+├── capture/          OpenCV capture, native GStreamer capture, NVMM frames
 ├── inference/        Shared pre-process and post-process + NMS
-│   └── backends/     IInferenceBackend: ONNX Runtime (CPU/CUDA/TensorRT), OpenVINO
+│   └── backends/     ONNX Runtime (CPU/CUDA/TensorRT), native TensorRT with
+│                     a CUDA pre-processing kernel, OpenVINO
 ├── pipeline/         Capture threads, per-stream queue, inference workers
 ├── analytics/        ByteTrack wrapper, zone and line rules, events
 ├── config/           YAML configuration
@@ -529,11 +659,13 @@ src/
 ├── benchmark/        Latency percentiles, power meter, reports
 └── utils/            FPS tracker
 web/                  Dashboard (plain HTML, CSS, JS)
-deploy/               docker compose stack, configuration, Grafana board
+deploy/               docker compose stack and overlays (Jetson, laptop,
+                      secured, RTSP simulator), configuration, Grafana board
+ros2/                 ROS 2 bridge package
 tests/                Six test binaries, no framework needed
-scripts/              Deploy, benchmark, mAP, INT8, model export
+scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak
 Dockerfile            x86-64: CPU and OpenVINO (Intel NPU)
-Dockerfile.jetson     JetPack 6, CUDA + TensorRT
+Dockerfile.jetson     JetPack 6: TensorRT, CUDA, hardware decode, zero-copy
 ```
 
 ## Testing
@@ -544,25 +676,28 @@ build/tests/test_inference        # model load, detection, postprocess, backend 
 build/tests/test_rules            # line crossing, zones, dwell, tracker ids, YAML config
 build/tests/test_serializer       # JSON payload and rounding
 build/tests/test_latency_tracker  # p50 / p95 / p99 math
-build/tests/test_sse_server       # SSE delivery, MJPEG stream, shutdown
+build/tests/test_sse_server       # SSE delivery, MJPEG stream, shutdown, auth, TLS
 ```
 
 Each exits non-zero on a failure. `test_inference` checks that every backend
 available on the machine returns the same detections as the CPU on
-`tests/test-image.jpg`. CI builds and runs all six on every push, plus a
-ThreadSanitizer build of the pipeline tests.
+`tests/test-image.jpg`, on the GPU pre-processing path and on the CPU one.
+CI builds and runs all six on every push.
 
-<details>
-<summary><b>Sanitizer builds</b></summary>
-
-<br/>
+### Sanitizers
 
 ```bash
-cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON   # data races
-cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON   # memory errors
+VIDEO=clip.avi scripts/sanitize.sh        # ASAN, then TSAN
 ```
 
-</details>
+builds with each sanitizer, runs the six test binaries and then the whole
+pipeline (two sources, two workers, tracking and rules) on the video.
+Neither sanitizer reports anything in this code; CI runs both on every push.
+The suppression files in `tests/` cover what they report in code that is
+not instrumented: a 384-byte start-up leak in ONNX Runtime, its and TBB's
+thread pools, and a lock-order inversion inside GDAL. ThreadSanitizer needs
+GCC 12 or newer: GCC 11's runtime reports a double lock in any program that
+uses `condition_variable::wait_for`.
 
 ## Troubleshooting
 
@@ -576,6 +711,10 @@ cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON   # memory errors
 | `Pipeline: cam0 not available, retry in N s` | The source cannot be opened yet; it is retried every 1 to 30 seconds. Check the URL, device or pipeline. |
 | `Watchdog: no result for 60 s, exiting` | A source is connected but inference produced nothing. The restart policy starts a new process; look at the lines before it. |
 | `MQTT: this build has no MQTT support` | `libmosquitto-dev` was missing at build time. |
+| `Could not find any implementation for node` while building an engine | CUDA sees too little free memory; see the Jetson notes above. |
+| `the provided PTX was compiled with an unsupported toolchain` | The CUDA toolkit is newer than the driver: configure with `-DCMAKE_CUDA_ARCHITECTURES=<your GPU>-real`. |
+| `GStreamer: <element>: <reason>` | The named element of the pipeline failed for that reason, read from the pipeline's bus. |
+| Browser warns about the certificate with `SECURE=1` | Import `deploy/secrets/run/ca.crt`, or accept the warning. |
 | Benchmark reports power as `n/a` on x86 | `sudo chmod a+r /sys/class/powercap/intel-rapl:0/energy_uj` |
 | Dashboard shows `Not found` | Start the binary from the repository root so it can find `web/`. |
 | Dashboard unreachable from another machine | Add `--bind 0.0.0.0` and publish the port. |
@@ -596,7 +735,10 @@ More cases, including offline builds, are in the step-by-step guide below.
 |:--------|:--------|:---------|
 | [OpenCV](https://opencv.org/) | 4.5+ | Capture, image processing, NMS, JPEG encoding |
 | [ONNX Runtime](https://onnxruntime.ai/) | 1.20 (1.18+ for TensorRT 10) | CPU, CUDA and TensorRT backends |
+| [TensorRT](https://developer.nvidia.com/tensorrt) + CUDA | 10 or 11, optional | `tensorrt-native` backend and its pre-processing kernel |
 | [OpenVINO](https://docs.openvino.ai/) | 2025.x, optional | Intel CPU, iGPU and NPU backends |
+| [GStreamer](https://gstreamer.freedesktop.org/) | 1.20, optional | Native capture; hardware decode and zero-copy on a Jetson |
+| [OpenSSL](https://www.openssl.org/) | 3.0, optional | HTTPS for the dashboard |
 | [ByteTrack-cpp](https://github.com/Vertical-Beach/ByteTrack-cpp) | pinned commit | Multi-object tracking, fetched by CMake |
 | [Eigen](https://eigen.tuxfamily.org/) | 3.3+ | Needed by ByteTrack |
 | [yaml-cpp](https://github.com/jbeder/yaml-cpp) | 0.8.0 | Configuration file, fetched by CMake |
