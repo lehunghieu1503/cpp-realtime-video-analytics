@@ -3,9 +3,10 @@
 
   scripts/calibrate-int8.py models/yolo11s.onnx data/coco/val2017
 
-Writes models/yolo11s.calibration next to the model. scripts/deploy-jetson.sh
-copies it into the board's models/trt-cache/, where the TensorRT execution
-provider looks for it. The table holds value ranges only, so it is generated
+Writes models/yolo11s.calibration (for the tensorrt backend) and
+models/yolo11s.calibration.cache (for tensorrt-native) next to the model.
+scripts/deploy-jetson.sh copies both into the board's models/trt-cache/,
+where the backends look for them. The table holds value ranges only, so it is generated
 once on a PC and works on any device.
 """
 import argparse
@@ -72,7 +73,9 @@ def main():
         finally:
             os.chdir(previous)
         os.replace(os.path.join(work, "calibration.flatbuffers"), output)
-    print(f"Saved {output}")
+        # The same ranges in TensorRT's own cache format, for tensorrt-native
+        os.replace(os.path.join(work, "calibration.cache"), output + ".cache")
+    print(f"Saved {output} and {output}.cache")
 
 
 if __name__ == "__main__":

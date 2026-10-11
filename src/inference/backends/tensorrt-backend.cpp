@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -85,6 +86,67 @@ private:
   std::string cache_;
 };
 #endif
+
+#if NV_TENSORRT_MAJOR < 11
+// scripts/calibrate-int8.py writes "tensor max_abs" lines; TensorRT reads
+// "tensor: <scale as float32 bits in hex>" under a header naming the
+// calibrator, where scale = max_abs / 127. A cache that already has the
+// header is passed through.
+std::string toTensorRtCache(const std::string& cache) {
+  if (cache.rfind("TRT-", 0) == 0) return cache;
+  std::ostringstream out;
+  out << "TRT-" << NV_TENSORRT_MAJOR << std::setfill('0') << std::setw(2)
+      << NV_TENSORRT_MINOR << std::setw(2) << NV_TENSORRT_PATCH
+      << "-EntropyCalibration2\n";
+  std::istringstream lines(cache);
+  std::string name;
+  float maxAbs = 0.0f;
+  while (lines >> name >> maxAbs) {
+    float scale = maxAbs / 127.0f;
+    uint32_t bits = 0;
+    std::memcpy(&bits, &scale, sizeof(bits));
+    out << name << ": " << std::hex << std::setw(8) << bits << std::dec
+        << "\n";
+  }
+  return out.str();
+}
+#endif
+
+// Megabytes from /proc/meminfo, 0 if the key is missing
+long meminfoMb(const char* key) {
+  std::ifstream file("/proc/meminfo");
+  std::string name;
+  long kb = 0;
+  while (file >> name >> kb) {
+    if (name == key) return kb / 1024;
+    file.ignore(256, '\n');
+  }
+  return 0;
+}
+
+// On a Jetson the GPU shares the system memory, and CUDA counts only free
+// pages as available: memory held by the page cache looks taken. With a few
+// megabytes "available" the builder rejects every tactic and fails with
+// "Could not find any implementation for node". Root would drop the cache;
+// without it, allocating and touching memory makes the kernel evict it.
+void reclaimPageCache() {
+  long freeMb = meminfoMb("MemFree:");
+  long availableMb = meminfoMb("MemAvailable:");
+  if (freeMb >= 2048 || availableMb - freeMb < 512) return;
+  // Leave a margin: MemAvailable is an estimate
+  long wantMb = std::min(availableMb - 768, 4096L) - freeMb;
+  std::cout << "TensorRT: " << freeMb << " MB free of " << availableMb
+            << " MB available; evicting page cache before the build\n";
+  const size_t kChunk = 64u << 20;
+  std::vector<std::unique_ptr<char[]>> chunks;
+  for (long mb = 0; mb < wantMb; mb += 64) {
+    chunks.emplace_back(new char[kChunk]);
+    // Touch every page so that it is really allocated
+    for (size_t offset = 0; offset < kChunk; offset += 4096) {
+      chunks.back()[offset] = 1;
+    }
+  }
+}
 
 std::string readFile(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
@@ -190,6 +252,7 @@ struct TensorRtBackend::Impl {
               << ", this takes minutes\n"
               << std::flush;
 
+    reclaimPageCache();
     std::unique_ptr<IBuilder> builder(createInferBuilder(logger));
     std::unique_ptr<INetworkDefinition> network(builder->createNetworkV2(0));
     std::unique_ptr<nvonnxparser::IParser> parser(
@@ -238,7 +301,7 @@ struct TensorRtBackend::Impl {
             "int8 needs " + cachePath.string() +
             "; create it with scripts/calibrate-int8.py");
       }
-      calibrator = std::make_unique<CacheCalibrator>(std::move(cache));
+      calibrator = std::make_unique<CacheCalibrator>(toTensorRtCache(cache));
       builderConfig->setFlag(BuilderFlag::kINT8);
       builderConfig->setInt8Calibrator(calibrator.get());
 #else

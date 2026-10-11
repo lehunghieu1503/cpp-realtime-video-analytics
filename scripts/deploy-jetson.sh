@@ -108,7 +108,7 @@ rsync -tz --progress "$MODEL" "$HOST:$REMOTE_DIR/models/"
 CALIBRATION="${MODEL%.onnx}.calibration"
 if [ -f "$CALIBRATION" ]; then
   ssh "$HOST" "mkdir -p '$REMOTE_DIR/models/trt-cache'"
-  rsync -tz "$CALIBRATION" "$HOST:$REMOTE_DIR/models/trt-cache/"
+  rsync -tz "$CALIBRATION" "$CALIBRATION".cache "$HOST:$REMOTE_DIR/models/trt-cache/"
 fi
 
 # Read by docker compose on the board, so `docker compose ...` there needs
