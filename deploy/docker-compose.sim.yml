@@ -1,0 +1,16 @@
+# Simulated network cameras, merged over docker-compose.yml: an RTSP server
+# streams looped video files, and the application reads them like cameras,
+# with hardware decoding. Enabled by SIM=1 scripts/deploy-jetson.sh.
+# Needs walk-1080p-h264.mp4 and walk-1080p-h265.mp4 in VIDEO_DIR.
+services:
+  rtsp-sim:
+    image: bluenviron/mediamtx:1.21.1-ffmpeg
+    restart: unless-stopped
+    volumes:
+      - ./rtsp-sim/mediamtx.yml:/mediamtx.yml:ro
+      - ${VIDEO_DIR:-./videos}:/videos:ro
+
+  app:
+    command: ["--config", "/app/config/rtsp-sim.yaml"]
+    depends_on:
+      - rtsp-sim

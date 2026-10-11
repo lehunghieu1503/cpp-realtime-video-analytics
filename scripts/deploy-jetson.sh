@@ -8,6 +8,8 @@
 #   VIDEO_DIR   directory on the board mounted at /data/videos (default:
 #               REMOTE_DIR/videos)
 #   SKIP_BUILD  set to 1 to ship the image already built
+#   SIM         set to 1 to run simulated RTSP cameras on the board and read
+#               them with hardware decoding (docker-compose.sim.yml)
 #   SECURE      set to 1 for HTTPS and passwords on the dashboard, TLS and
 #               passwords on MQTT, and a Grafana login. Certificates and
 #               passwords are created in deploy/secrets/ on this PC.
@@ -23,7 +25,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 HOST="$1"
@@ -34,7 +36,9 @@ cd "$(dirname "$0")/.."
 APP_IMAGE=video-analytics:jetson
 PLATFORM=linux/arm64
 # Third-party images, as named in deploy/docker-compose.yml
-OTHER_IMAGES=$(sed -n 's/^ *image: *\([a-z][^$ ]*\)$/\1/p' deploy/docker-compose.yml)
+COMPOSE_SOURCES=(deploy/docker-compose.yml)
+[ "${SIM:-0}" = 1 ] && COMPOSE_SOURCES+=(deploy/docker-compose.sim.yml)
+OTHER_IMAGES=$(sed -n 's/^ *image: *\([a-z][^$ ]*\)$/\1/p' "${COMPOSE_SOURCES[@]}")
 
 # The model named in the config must exist here: the board cannot export it
 MODEL=$(sed -n 's/^model: *//p' deploy/config/config.yaml)
@@ -95,6 +99,7 @@ rsync -rtz --delete deploy/ "$HOST:$REMOTE_DIR/" \
   --exclude secrets --exclude prometheus-data
 
 COMPOSE_FILE=docker-compose.yml:docker-compose.jetson.yml
+[ "${SIM:-0}" = 1 ] && COMPOSE_FILE=$COMPOSE_FILE:docker-compose.sim.yml
 if [ "${SECURE:-0}" = 1 ]; then
   echo "== Creating and copying secrets"
   scripts/make-secrets.sh "${HOST#*@}"
