@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <optional>
 #include <vector>
 
 // Data passed from a capture thread to the inference workers
@@ -18,6 +19,9 @@ struct FrameData {
   std::shared_ptr<DeviceFrame> device;
   int streamId = 0;       // index into PipelineConfig::sources
   double decodeMs = 0.0;  // time inside the capture read (decode included)
+  // The source's own timestamp of this frame, see
+  // IVideoCapture::sourceTimestampNs()
+  std::optional<uint64_t> sourcePtsNs;
 };
 
 // Result from inference worker, consumed by output/display
@@ -38,6 +42,10 @@ struct AnalyticsResult {
   double preMs = 0.0;
   double inferMs = 0.0;
   double postMs = 0.0;
+  std::optional<uint64_t> sourcePtsNs;
+  // Size of the source frame, known without copying a device frame to the CPU
+  int imageWidth = 0;
+  int imageHeight = 0;
 
   // The frame in system memory, copied from the device the first time it is
   // asked for. Most frames never are: nobody draws on them.

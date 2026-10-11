@@ -11,9 +11,14 @@
 // Serialize AnalyticsResult to compact JSON for SSE streaming
 // Example output:
 // {"frame_id":42,"detections":[{"class":"person","confidence":0.94,
-//   "bbox":{"x":100,"y":50,"w":200,"h":300}}],"latency_ms":35.2,"fps":21.5}
+//   "bbox":{"x":100,"y":50,"w":200,"h":300}}],"latency_ms":35.2,"fps":21.5,
+//   "image":{"width":1280,"height":720}}
+// With a simulation run id, and only for a frame that has a source
+// timestamp, it also carries the identity of the simulator's frame:
+//   "simulation":{"run_id":"r_20261011_ab12","sim_ns":1533333333}
 inline nlohmann::json serializeResult(const AnalyticsResult& result,
-                                       double currentFps) {
+                                       double currentFps,
+                                       const std::string& runId = "") {
   nlohmann::json detections = nlohmann::json::array();
   for (const auto& det : result.detections) {
     nlohmann::json item = {
@@ -31,12 +36,21 @@ inline nlohmann::json serializeResult(const AnalyticsResult& result,
     detections.push_back(std::move(item));
   }
 
-  return {
+  nlohmann::json json = {
       {"frame_id", result.frameId},
       {"detections", detections},
       {"latency_ms", std::round(result.inferenceLatencyMs * 10) / 10},
       {"fps", std::round(currentFps * 10) / 10}
   };
+  if (result.imageWidth > 0 && result.imageHeight > 0) {
+    json["image"] = {{"width", result.imageWidth},
+                     {"height", result.imageHeight}};
+  }
+  if (!runId.empty() && result.sourcePtsNs) {
+    // An integer: nanoseconds must come back exactly as the source sent them
+    json["simulation"] = {{"run_id", runId}, {"sim_ns", *result.sourcePtsNs}};
+  }
+  return json;
 }
 
 // Serialize an event for MQTT and SSE

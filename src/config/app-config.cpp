@@ -4,6 +4,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <iostream>
 
@@ -117,6 +118,8 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     read(root["tls"]["key"], config.tlsKey);
     read(root["snapshots"]["dir"], config.snapshotDir);
     read(root["snapshots"]["keep"], config.snapshotKeep);
+    read(root["simulation"]["enabled"], config.simulation.enabled);
+    read(root["simulation"]["run_id"], config.simulation.runId);
   } catch (const YAML::Exception& e) {
     // e.what() carries the line and column
     std::cerr << "Config: " << path << ": " << e.what() << "\n";
@@ -138,7 +141,33 @@ void applyEnvironment(AppConfig& config) {
   env("VA_MQTT_USER", config.mqtt.username);
   env("VA_MQTT_PASSWORD", config.mqtt.password);
   env("VA_MQTT_CA", config.mqtt.caFile);
+  env("VA_RUN_ID", config.simulation.runId);
   std::string port;
   env("VA_MQTT_PORT", port);
   if (!port.empty()) config.mqtt.port = std::atoi(port.c_str());
+}
+
+std::string checkSimulation(const AppConfig& config) {
+  if (!config.simulation.enabled) return "";
+  const std::string& id = config.simulation.runId;
+  // The run id becomes part of a ROS topic name
+  bool valid = !id.empty() && id.size() <= 64;
+  for (char c : id) {
+    valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+  }
+  if (!valid) {
+    return "simulation needs a run_id of letters, digits and '_' "
+           "(simulation.run_id or VA_RUN_ID)";
+  }
+#ifndef WITH_GSTREAMER
+  return "simulation needs a build with the native GStreamer capture";
+#else
+  for (const auto& source : config.sources) {
+    if (source.capture.gstPipeline.empty()) {
+      return "simulation source '" + source.capture.id +
+             "' needs a gst pipeline: only it delivers frame timestamps";
+    }
+  }
+  return "";
+#endif
 }

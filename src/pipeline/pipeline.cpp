@@ -168,6 +168,15 @@ void Pipeline::captureLoop(int streamId) {
         std::chrono::duration<double, std::milli>(now - readStart).count();
     fd.frame = std::move(frame);
     fd.device = capture.takeDeviceFrame();
+    fd.sourcePtsNs = capture.sourceTimestampNs();
+    if (config_.requireSourceTimestamp && !fd.sourcePtsNs) {
+      // A time made up here would be joined to the wrong simulator frame
+      std::cerr << "Pipeline: " << source.id
+                << " delivered a frame without a timestamp, stopping\n";
+      running_ = false;
+      frameQueue_.stop();
+      break;
+    }
     stats.framesCaptured++;
 
     frameQueue_.push(std::move(fd));
@@ -209,6 +218,10 @@ void Pipeline::inferenceWorker(int workerId) {
     result.inferenceDoneTime = now;
     result.frame = std::move(fd.frame);
     result.device = std::move(fd.device);
+    result.sourcePtsNs = fd.sourcePtsNs;
+    result.imageWidth = result.device ? result.device->width() : result.frame.cols;
+    result.imageHeight =
+        result.device ? result.device->height() : result.frame.rows;
     result.detections = std::move(detections);
     result.inferenceLatencyMs =
         std::chrono::duration<double, std::milli>(now - fd.captureTime).count();

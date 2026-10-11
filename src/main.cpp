@@ -510,6 +510,7 @@ int runLive(const AppConfig& app) {
   config.frameQueueSize = std::max<size_t>(
       1, static_cast<size_t>(app.workers) / app.sources.size());
   config.resultQueueSize = std::max<size_t>(16, app.sources.size() * 4);
+  config.requireSourceTimestamp = app.simulation.enabled;
 
   Pipeline pipeline(config);
   pipeline.start();
@@ -659,7 +660,9 @@ int runLive(const AppConfig& app) {
                   static_cast<int>(result.detections.size()), result.frameId);
     }
 
-    auto json = serializeResult(result, stream.fps.fps);
+    auto json = serializeResult(
+        result, stream.fps.fps,
+        app.simulation.enabled ? app.simulation.runId : std::string());
     json["stream"] = stream.id;
     if (!events.empty()) {
       // One snapshot per frame, shared by the events it raised
@@ -867,6 +870,10 @@ int main(int argc, char* argv[]) {
   // Validate
   if (app.port < 1 || app.port > 65535) {
     std::cerr << "Error: --port must be between 1 and 65535\n";
+    return -1;
+  }
+  if (std::string reason = checkSimulation(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
     return -1;
   }
   if (!isKnownBackend(app.backend)) {

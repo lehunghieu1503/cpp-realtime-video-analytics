@@ -410,6 +410,42 @@ void testLargeFrameIds() {
                     "Large frame ID preserved correctly");
 }
 
+void testSimulationIdentity() {
+  std::cout << "\n=== Simulation identity and image size ===\n";
+  AnalyticsResult result = createResult(7, 10.0, {});
+
+  auto plain = serializeResult(result, 30.0);
+  test::assert_true(!plain.contains("simulation") && !plain.contains("image"),
+                    "An ordinary source has neither simulation nor image");
+
+  result.imageWidth = 1280;
+  result.imageHeight = 720;
+  // Past 2^53: a double would round it
+  result.sourcePtsNs = 9007199254740993ULL;
+  auto json = serializeResult(result, 30.0, "r_20261011_ab12");
+  test::assert_true(json["image"]["width"] == 1280 &&
+                        json["image"]["height"] == 720,
+                    "Image size is that of the source frame");
+  test::assert_equal_string(json["simulation"]["run_id"], "r_20261011_ab12",
+                            "Run id");
+  test::assert_true(json["simulation"]["sim_ns"].is_number_unsigned() &&
+                        json["simulation"]["sim_ns"].get<uint64_t>() ==
+                            9007199254740993ULL,
+                    "sim_ns is the exact integer");
+  test::assert_true(json.dump().find("9007199254740993") != std::string::npos,
+                    "sim_ns is written without rounding");
+  test::assert_true(json["frame_id"] == 7, "The local frame id stays");
+
+  test::assert_true(!serializeResult(result, 30.0).contains("simulation"),
+                    "No run id, no simulation block");
+  result.sourcePtsNs.reset();
+  test::assert_true(!serializeResult(result, 30.0, "r1").contains("simulation"),
+                    "No timestamp, no simulation block: none is invented");
+  result.sourcePtsNs = 0;
+  test::assert_true(serializeResult(result, 30.0, "r1")["simulation"]["sim_ns"] == 0,
+                    "A timestamp of 0 is a timestamp");
+}
+
 int main() {
   std::cout << "==================================================\n";
   std::cout << "Result Serializer Test Suite\n";
@@ -429,6 +465,7 @@ int main() {
   testFpsRounding();
   testBboxIntegerCasting();
   testLargeFrameIds();
+  testSimulationIdentity();
 
   // Print summary
   std::cout << "\n==================================================\n";

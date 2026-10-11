@@ -24,6 +24,14 @@ struct MqttConfig {
   std::string caFile;
 };
 
+// Frames come from a simulator: each result carries the episode's run id and
+// the frame's own timestamp, which together identify the simulator's frame
+struct SimulationConfig {
+  bool enabled = false;
+  // New for every episode; set here or through VA_RUN_ID
+  std::string runId;
+};
+
 // Everything the application can be told. Loaded from a YAML file, then
 // overridden by command-line flags.
 struct AppConfig {
@@ -57,7 +65,13 @@ struct AppConfig {
   // PEM certificate and key; both set: the dashboard is served over HTTPS
   std::string tlsCert;
   std::string tlsKey;
+  SimulationConfig simulation;
 };
+
+// Empty when the simulation settings can be used; the reason otherwise.
+// A simulation needs a run id and, for every source, a GStreamer pipeline
+// read by the native capture: nothing else delivers the frame's timestamp.
+std::string checkSimulation(const AppConfig& config);
 
 // Fills `config` from a YAML file; keys that are absent keep their value.
 // Returns false after printing the reason when the file cannot be used.
@@ -67,4 +81,5 @@ bool loadConfig(const std::string& path, AppConfig& config);
 // not be written into the config file:
 //   VA_HTTP_USER, VA_HTTP_PASSWORD, VA_TLS_CERT, VA_TLS_KEY,
 //   VA_MQTT_HOST, VA_MQTT_PORT, VA_MQTT_USER, VA_MQTT_PASSWORD, VA_MQTT_CA
+// and the simulation run id from VA_RUN_ID
 void applyEnvironment(AppConfig& config);

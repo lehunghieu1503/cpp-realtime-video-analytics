@@ -47,6 +47,7 @@ jobs:
           build/tests/test_sse_server
           build/tests/test_rules
           build/tests/test_inference
+          build/tests/test_capture_timestamps
 
   sanitizers:
     runs-on: ubuntu-22.04

@@ -2,8 +2,10 @@
 
 #include "device-frame.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <optional>
 #include <string>
 
 struct CaptureConfig {
@@ -35,6 +37,12 @@ public:
   // empty; the frame is then fetched with takeDeviceFrame()
   virtual bool read(cv::Mat& frame) = 0;
   virtual std::shared_ptr<DeviceFrame> takeDeviceFrame() { return nullptr; }
+  // Presentation timestamp the source gave the frame of the last read(), in
+  // nanoseconds. Empty when the capture has none; it is never guessed from
+  // the time the frame arrived.
+  virtual std::optional<uint64_t> sourceTimestampNs() const {
+    return std::nullopt;
+  }
   virtual void release() = 0;
   virtual bool isOpened() const = 0;
   virtual double getActualFps() const = 0;
