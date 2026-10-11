@@ -1,0 +1,104 @@
+# CARLA stage 1: CARLA on a laptop, inference on the device, control on the
+# laptop. One file for both sides, so they cannot disagree:
+#
+#   the device (video_analytics --config) reads the top-level keys, `lane`,
+#   `calibration`, `simulation` and `sources`
+#   the laptop (ros2/video_analytics_simulation) reads `calibration`, `lane`,
+#   `carla`, `metric`, `control` and `routes`
+#
+# scripts/run-carla-simulation.sh copies it to the device for every run, with
+# SIM_HOST replaced by the laptop's address, and starts the device with the
+# run's id in VA_RUN_ID. See docs/SIMULATION.md.
+
+model: models/yolo11s.onnx
+backend: tensorrt-native
+precision: fp16
+workers: 1
+port: 9001
+bind: 0.0.0.0
+headless: true
+confidence: 0.25
+tracking: true
+# No `classes` key, on purpose: every class reaches the JSON, so a class the
+# controller does not brake for is still logged. The controller refuses to
+# arm when this key leaves out one of its six hazard classes.
+
+simulation:
+  enabled: true   # the run id comes from VA_RUN_ID
+
+# The camera, rigidly on the ego vehicle. Ego frame: x forward, y right, z
+# up, origin at the vehicle's origin (on the road, between the axles).
+# Source images are 1280x720; nothing is cropped or scaled before the device.
+calibration:
+  width: 1280
+  height: 720
+  fov_deg: 52.0
+  camera: {x: 0.6, y: 0.0, z: 1.5, pitch_deg: -2.0}
+  ground_z: 0.0
+  distortion: [0, 0, 0, 0, 0]
+
+lane:
+  model: models/ufld-tusimple18.onnx
+  backend: tensorrt-native
+  precision: fp16
+  roi_x_min_m: 5.0
+  roi_x_max_m: 30.0
+  reference_x_m: 8.0
+  min_points: 5
+  min_support_m: 5.0
+  max_residual_m: 0.25
+  width_min_m: 2.5
+  width_max_m: 4.6
+
+sources:
+  - id: carla-front
+    gst: "tcpclientsrc host=SIM_HOST port=5000 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+    lane: true
+
+# ── Laptop side ──────────────────────────────────────────────────────────────
+
+carla:
+  host: 127.0.0.1
+  port: 2000
+  map: Town04
+  fps: 30                  # fixed_delta_seconds = 1/30, synchronous
+  ego_blueprint: vehicle.tesla.model3
+  jpeg_quality: 75
+  sender: {bind: 0.0.0.0, port: 5000, max_queued: 2, client_max_buffers: 30}
+  callback_queue: 8
+  live_cache_entries: 90   # 3 s of frames a late result can be joined with
+  depth_artifact_frames: 900   # lossless depth kept per run, about 1 MB each
+  rgb_artifact_every: 0        # keep every Nth JPEG as sent; 0: none
+  settle_ticks: 30
+
+metric:
+  q_accel: 4.0
+  r_floor_m: 0.15
+  r_range_fraction: 0.01
+  max_gap_s: 0.5
+
+control:
+  target_speed_kmh: 10.0
+  # Perception older than this, in simulation time, is not driven on
+  age_limit_ms: 200
+  # No accepted command for this long, in wall time: the simulator brakes
+  wall_lease_ms: 300
+  # The ego state a command was computed for may be this old
+  pose_budget_ms: 100
+  hazard_classes: [person, bicycle, car, motorcycle, bus, truck]
+  # Brake when gap <= v * tau + v^2 / (2 * a_min) + margin
+  brake: {a_min_mps2: 2.5, tau_s: 0.3, margin_m: 2.0}
+  ttc_min_s: 2.0
+  corridor_margin_m: 0.3
+  unknown_closing_mps: 2.0
+  pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
+  steer: {gain: 1.0, rate_per_s: 2.0}
+  speed: {kp: 0.4, ki: 0.2, max_throttle: 0.6}
+  ready_frames: 3
+
+# Where the ego vehicle starts, snapped to the lane centre. Town04, all on
+# level ground (z = 0).
+routes:
+  straight: {x: 13.0, y: 219.9}      # road 46 lane -3: 400 m straight, lanes both sides
+  curve_right: {x: -39.4, y: -231.6} # road 23 lane -3: radius about 340 m
+  curve_left: {x: -122.6, y: -148.2} # road 23 lane -3

@@ -1,0 +1,21 @@
+# Scenarios of CARLA stage 1. Run one with
+#   scripts/run-carla-simulation.sh --scenario <name> [--arm]
+#
+# Other road users are scripted: placed on a lane relative to the ego
+# vehicle's start and moved without physics, so a scenario repeats exactly.
+#   ahead_m   distance along the lane from the ego vehicle's origin
+#   lane      0: the ego lane, 1: the lane to its right, -1: to its left
+# Their positions are written to truth.jsonl for the evaluation and are never
+# given to the controller.
+
+defaults:
+  map: Town04
+  weather: ClearNoon
+  route: straight
+  ticks: 600
+  rgb_artifact_every: 30   # keep one JPEG a second, as sent, to look at
+
+scenarios:
+  # Nothing but the road: transport, timestamps, throughput
+  baseline:
+    ticks: 600
