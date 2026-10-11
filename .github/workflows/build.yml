@@ -58,6 +58,7 @@ jobs:
           pip install numpy pyyaml
           python3 -m unittest discover -s ros2/video_analytics_simulation/test -p 'test_*.py'
           python3 -m unittest discover -s ros2/video_analytics_bridge/test -p 'test_*.py'
+          python3 tests/test-carla-evaluation.py
 
   sanitizers:
     runs-on: ubuntu-22.04
