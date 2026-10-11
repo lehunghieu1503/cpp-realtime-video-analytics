@@ -159,6 +159,9 @@ void testGdpJpegKeepsTimestamps() {
   capture.release();
   CHECK(!capture.sourceTimestampNs());
   std::remove(path.c_str());
+  // Frees what GStreamer keeps for the life of the process, so that a leak
+  // checker reports only real leaks
+  gst_deinit();
 }
 }  // namespace
 #endif

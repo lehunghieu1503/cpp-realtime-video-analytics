@@ -23,7 +23,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [ $# -eq 0 ] && set -- asan tsan
 export LSAN_OPTIONS="suppressions=$PWD/tests/lsan.supp:print_suppressions=0"
-export TSAN_OPTIONS="suppressions=$PWD/tests/tsan.supp:print_suppressions=0"
+# ignore_noninstrumented_modules: GStreamer and GLib hand buffers from their
+# streaming threads to the application under locks ThreadSanitizer cannot
+# see, since those libraries are not built with it; without this every frame
+# read through GstCapture is reported as a race
+export TSAN_OPTIONS="suppressions=$PWD/tests/tsan.supp:print_suppressions=0:ignore_noninstrumented_modules=1"
 [ -n "${ONNXRUNTIME_ROOT:-}" ] &&
   export LD_LIBRARY_PATH="$ONNXRUNTIME_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 run() { setarch "$(uname -m)" -R "$@"; }

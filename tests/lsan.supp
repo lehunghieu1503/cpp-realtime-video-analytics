@@ -1,2 +1,5 @@
 # ONNX Runtime allocates 384 bytes once at start-up and never frees them
 leak:libonnxruntime
+# GLib allocates 16 KB in its library constructor, before main(), and keeps
+# it for the life of the process (seen once a test uses GStreamer)
+leak:libglib-2.0.so

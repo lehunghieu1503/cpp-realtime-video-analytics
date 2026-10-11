@@ -797,8 +797,11 @@ builds with each sanitizer, runs the test binaries and then the whole
 pipeline (two sources, two workers, tracking and rules) on the video.
 Neither sanitizer reports anything in this code; CI runs both on every push.
 The suppression files in `tests/` cover what they report in code that is
-not instrumented: a 384-byte start-up leak in ONNX Runtime, its and TBB's
-thread pools, and a lock-order inversion inside GDAL. ThreadSanitizer needs
+not instrumented: a 384-byte start-up leak in ONNX Runtime, 16 KB that GLib
+allocates before `main()`, ONNX Runtime's and TBB's thread pools, and a
+lock-order inversion inside GDAL. ThreadSanitizer runs with
+`ignore_noninstrumented_modules=1`: GStreamer hands frames between threads
+under locks it cannot see. ThreadSanitizer needs
 GCC 12 or newer: GCC 11's runtime reports a double lock in any program that
 uses `condition_variable::wait_for`.
 
