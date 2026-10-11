@@ -5,9 +5,11 @@
 #   /data/videos     ← VIDEO_DIR in .env
 
 model: models/yolo11s.onnx
-# cpu | cuda | tensorrt | openvino:CPU | openvino:GPU | openvino:NPU
-backend: tensorrt
-# tensorrt only: fp32 | fp16 | int8 (int8 needs scripts/calibrate-int8.py)
+# cpu | cuda | tensorrt | tensorrt-native | openvino:CPU | openvino:GPU |
+# openvino:NPU. tensorrt-native pre-processes on the GPU and is about twice
+# as fast on a Jetson as tensorrt, which goes through ONNX Runtime.
+backend: tensorrt-native
+# tensorrt backends: fp32 | fp16 | int8 (int8 needs scripts/calibrate-int8.py)
 precision: fp16
 # Two workers let pre-processing and post-processing run in parallel; with
 # several cameras on one GPU that is worth the second copy of the model
