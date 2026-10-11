@@ -12,6 +12,7 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config)
   backendConfig.backend = config_.backend;
   backendConfig.precision = config_.precision;
   backendConfig.numThreads = config_.numThreads;
+  backendConfig.profileLayers = config_.profileLayers;
   backend_ = createBackend(backendConfig);
   if (!backend_) return;
 
@@ -26,6 +27,13 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config)
   std::cout << "Model loaded: " << config_.modelPath << " (backend "
             << config_.backend << ", input " << config_.inputWidth << "x"
             << config_.inputHeight << ")\n";
+  if (!backend_->describe().empty()) {
+    std::cout << "  " << backend_->describe() << "\n";
+  }
+}
+
+std::string InferenceEngine::layerProfile() const {
+  return backend_ ? backend_->layerProfile() : "";
 }
 
 bool InferenceEngine::isLoaded() const { return backend_ != nullptr; }
@@ -46,16 +54,25 @@ std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame,
   };
   auto start = Clock::now();
 
-  // Preprocess: resize + normalize + HWC→CHW
-  cv::Mat inputData =
-      preprocess(frame, config_.inputWidth, config_.inputHeight);
-  auto preDone = Clock::now();
-
-  std::vector<int64_t> inputDims = {1, 3, config_.inputHeight,
-                                    config_.inputWidth};
   std::vector<int64_t> outputShape;
-  const float* outputData =
-      backend_->run(inputData.ptr<float>(), inputDims, outputShape);
+  const float* outputData = nullptr;
+  Clock::time_point preDone;
+  if (config_.devicePreprocess && backend_->preprocessesFrames()) {
+    // The backend takes the frame as captured and prepares it on its device
+    double preMs = 0.0;
+    outputData = backend_->runFrame(frame, outputShape, &preMs);
+    preDone = start + std::chrono::duration_cast<Clock::duration>(
+                          std::chrono::duration<double, std::milli>(preMs));
+  } else {
+    // Preprocess: resize + normalize + HWC→CHW
+    cv::Mat inputData =
+        preprocess(frame, config_.inputWidth, config_.inputHeight);
+    preDone = Clock::now();
+
+    std::vector<int64_t> inputDims = {1, 3, config_.inputHeight,
+                                      config_.inputWidth};
+    outputData = backend_->run(inputData.ptr<float>(), inputDims, outputShape);
+  }
   auto inferDone = Clock::now();
 
   // Postprocess: parse detections + NMS

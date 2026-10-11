@@ -58,6 +58,11 @@ public:
   // False if the pipeline did not start, was stopped, or a worker failed
   bool isRunning() const { return running_; }
 
+  // Per-layer timing of the first worker's engine; call before stop()
+  std::string layerProfile() const {
+    return engines_.empty() ? "" : engines_[0]->layerProfile();
+  }
+
   size_t numStreams() const { return config_.sources.size(); }
   const StreamStats& streamStats(size_t stream) const {
     return stats_[stream];

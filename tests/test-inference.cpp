@@ -405,7 +405,8 @@ void testBackendParity() {
 
   // Backends the machine lacks print their reason and are skipped
   for (const char* name :
-       {"cuda", "tensorrt", "openvino:CPU", "openvino:GPU", "openvino:NPU"}) {
+       {"cuda", "tensorrt", "tensorrt-native", "openvino:CPU", "openvino:GPU",
+        "openvino:NPU"}) {
     config.backend = name;
     InferenceEngine engine(config);
     if (!engine.isLoaded()) {
@@ -423,6 +424,21 @@ void testBackendParity() {
              std::abs(actual[i].confidence - expected[i].confidence) < 0.05f;
     }
     test::assert_true(same, std::string(name) + " matches the CPU detections");
+  }
+
+  // tensorrt-native above pre-processed on the GPU; its CPU path must agree
+  config.backend = "tensorrt-native";
+  config.devicePreprocess = false;
+  InferenceEngine cpuPath(config);
+  if (cpuPath.isLoaded()) {
+    auto actual = cpuPath.detect(image);
+    bool same = actual.size() == expected.size();
+    for (size_t i = 0; same && i < actual.size(); i++) {
+      same = actual[i].classId == expected[i].classId &&
+             std::abs(actual[i].confidence - expected[i].confidence) < 0.05f;
+    }
+    test::assert_true(same,
+                      "tensorrt-native with CPU pre-processing matches too");
   }
 }
 

@@ -30,6 +30,10 @@ struct AppConfig {
   std::string model = "models/yolov8n.onnx";
   std::string backend = "cpu";
   std::string precision = "fp16";
+  // false: pre-process on the CPU even when the backend could do it on its
+  // device (to measure the difference)
+  bool devicePreprocess = true;
+  bool profileLayers = false;  // benchmark: time every layer
   int workers = 0;  // 0: 2 on CPU, 1 on an accelerator
   int port = 9001;
   std::string bind = "127.0.0.1";

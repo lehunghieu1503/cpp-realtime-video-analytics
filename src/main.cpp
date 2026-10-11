@@ -113,6 +113,8 @@ PipelineConfig makePipelineConfig(const AppConfig& app) {
   config.inferenceConfig.modelPath = app.model;
   config.inferenceConfig.backend = app.backend;
   config.inferenceConfig.precision = app.precision;
+  config.inferenceConfig.devicePreprocess = app.devicePreprocess;
+  config.inferenceConfig.profileLayers = app.profileLayers;
   config.inferenceConfig.confidenceThreshold = app.confidence;
   config.inferenceConfig.nmsThreshold = 0.45f;
   config.numWorkers = app.workers;
@@ -146,7 +148,8 @@ int runBenchmark(const AppConfig& app, const std::string& inputVideo,
     return -1;
   }
 
-  PowerMeter power(app.backend == "cuda" || app.backend == "tensorrt");
+  PowerMeter power(app.backend == "cuda" ||
+                   app.backend.rfind("tensorrt", 0) == 0);
   LatencyTracker latency;
   FpsTracker fpsTracker;
   BenchmarkResults results;
@@ -193,6 +196,7 @@ int runBenchmark(const AppConfig& app, const std::string& inputVideo,
 
   // False only if a worker gave up; a finished video keeps it
   bool pipelineFailed = !pipeline.isRunning();
+  std::string layerProfile = pipeline.layerProfile();
   pipeline.stop();
 
   // Mean over the whole run; FpsTracker only knows its last 1 s window
@@ -203,7 +207,8 @@ int runBenchmark(const AppConfig& app, const std::string& inputVideo,
   results.warmupFrames = std::min(seen, warmupFrames);
   results.latency = latency;
   results.device = app.backend;
-  results.precision = app.backend == "tensorrt" ? app.precision : "model";
+  bool isTensorRt = app.backend.rfind("tensorrt", 0) == 0;
+  results.precision = isTensorRt ? app.precision : "model";
   results.modelName = std::filesystem::path(app.model).stem().string();
   if (frameCount > 0) {
     results.decodeMs /= frameCount;
@@ -215,6 +220,11 @@ int runBenchmark(const AppConfig& app, const std::string& inputVideo,
   results.powerSource = power.source();
 
   std::cout << "\n" << generateReport(results);
+  if (!layerProfile.empty()) {
+    // Profiling makes every layer synchronous, so the numbers above are
+    // lower than a run without --profile-layers
+    std::cout << "\n## Time per Layer (top 15)\n" << layerProfile;
+  }
 
   if (!outputReport.empty()) writeReport(results, outputReport);
   if (!csvPath.empty()) appendCsv(results, csvPath);
@@ -516,7 +526,8 @@ int runLive(const AppConfig& app) {
     streams[i].rules = std::make_unique<Rules>(streams[i].id, rules);
   }
 
-  PowerMeter power(app.backend == "cuda" || app.backend == "tensorrt");
+  PowerMeter power(app.backend == "cuda" ||
+                   app.backend.rfind("tensorrt", 0) == 0);
   SnapshotWriter snapshots(app.snapshotDir, app.snapshotKeep);
   MqttPublisher mqtt;
   bool mqttOn = !app.mqtt.host.empty() &&
@@ -715,10 +726,13 @@ void printUsage(const char* prog) {
       << "  --streams N      Open the source given on the command line N\n"
       << "                   times, to measure how many cameras fit\n"
       << "  --model PATH     Model path (default: models/yolov8n.onnx)\n"
-      << "  --backend NAME   cpu, cuda, tensorrt, openvino:CPU,\n"
-      << "                   openvino:GPU or openvino:NPU (default: cpu)\n"
-      << "  --precision P    tensorrt only: fp32, fp16 or int8 (default:\n"
-      << "                   fp16)\n"
+      << "  --backend NAME   cpu, cuda, tensorrt, tensorrt-native,\n"
+      << "                   openvino:CPU, openvino:GPU or openvino:NPU\n"
+      << "                   (default: cpu)\n"
+      << "  --precision P    tensorrt backends: fp32, fp16 or int8\n"
+      << "                   (default: fp16)\n"
+      << "  --cpu-preprocess Pre-process on the CPU even when the backend\n"
+      << "                   can do it on the GPU (tensorrt-native)\n"
       << "  --conf X         Confidence threshold (default: 0.5)\n"
       << "  --port N         Dashboard port (default: 9001)\n"
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
@@ -730,7 +744,8 @@ void printUsage(const char* prog) {
       << "  --frames N       Number of frames to measure (default: 300)\n"
       << "  --warmup N       Frames to skip first (default: 30)\n"
       << "  --output FILE    Write the report to a Markdown file\n"
-      << "  --csv FILE       Append one line with the results\n\n"
+      << "  --csv FILE       Append one line with the results\n"
+      << "  --profile-layers Time every layer (tensorrt-native)\n\n"
       << "Evaluation options:\n"
       << "  --eval-coco DIR  Directory of .jpg images\n"
       << "  --eval-out FILE  Detections JSON (default: detections.json)\n";
@@ -824,6 +839,10 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: invalid value for --conf: " << argv[i] << "\n";
         return 1;
       }
+    } else if (is("--cpu-preprocess")) {
+      app.devicePreprocess = false;
+    } else if (is("--profile-layers")) {
+      app.profileLayers = true;
     } else if (is("--headless")) {
       app.headless = true;
     } else if (is("--help")) {
@@ -840,8 +859,8 @@ int main(int argc, char* argv[]) {
     return -1;
   }
   if (!isKnownBackend(app.backend)) {
-    std::cerr << "Error: --backend must be cpu, cuda, tensorrt or "
-                 "openvino:<DEVICE>\n";
+    std::cerr << "Error: --backend must be cpu, cuda, tensorrt, "
+                 "tensorrt-native or openvino:<DEVICE>\n";
     return -1;
   }
   if (app.precision != "fp32" && app.precision != "fp16" &&

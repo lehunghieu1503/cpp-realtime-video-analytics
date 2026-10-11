@@ -22,6 +22,11 @@ struct InferenceConfig {
   std::string backend = "cpu";
   // "fp32", "fp16" or "int8"; see BackendConfig
   std::string precision = "fp16";
+  // Let a backend that can pre-process on its own device do so; false keeps
+  // the CPU path, to compare the two
+  bool devicePreprocess = true;
+  // Time every layer (tensorrt-native); slows inference
+  bool profileLayers = false;
 };
 
 // Time spent in each stage of one detect() call, in milliseconds
@@ -48,6 +53,10 @@ public:
 
   // Check if model was loaded successfully
   bool isLoaded() const;
+
+  // Time per layer since the engine was created, as a Markdown table; empty
+  // unless InferenceConfig::profileLayers was set and the backend supports it
+  std::string layerProfile() const;
 
 private:
   InferenceConfig config_;
