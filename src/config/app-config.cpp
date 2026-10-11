@@ -4,6 +4,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cstdlib>
 #include <iostream>
 
 namespace {
@@ -107,6 +108,13 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     read(root["mqtt"]["host"], config.mqtt.host);
     read(root["mqtt"]["port"], config.mqtt.port);
     read(root["mqtt"]["topic"], config.mqtt.topic);
+    read(root["mqtt"]["username"], config.mqtt.username);
+    read(root["mqtt"]["password"], config.mqtt.password);
+    read(root["mqtt"]["ca_file"], config.mqtt.caFile);
+    read(root["auth"]["username"], config.httpUser);
+    read(root["auth"]["password"], config.httpPassword);
+    read(root["tls"]["cert"], config.tlsCert);
+    read(root["tls"]["key"], config.tlsKey);
     read(root["snapshots"]["dir"], config.snapshotDir);
     read(root["snapshots"]["keep"], config.snapshotKeep);
   } catch (const YAML::Exception& e) {
@@ -115,4 +123,22 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     return false;
   }
   return true;
+}
+
+void applyEnvironment(AppConfig& config) {
+  auto env = [](const char* name, std::string& out) {
+    const char* value = std::getenv(name);
+    if (value && *value) out = value;
+  };
+  env("VA_HTTP_USER", config.httpUser);
+  env("VA_HTTP_PASSWORD", config.httpPassword);
+  env("VA_TLS_CERT", config.tlsCert);
+  env("VA_TLS_KEY", config.tlsKey);
+  env("VA_MQTT_HOST", config.mqtt.host);
+  env("VA_MQTT_USER", config.mqtt.username);
+  env("VA_MQTT_PASSWORD", config.mqtt.password);
+  env("VA_MQTT_CA", config.mqtt.caFile);
+  std::string port;
+  env("VA_MQTT_PORT", port);
+  if (!port.empty()) config.mqtt.port = std::atoi(port.c_str());
 }

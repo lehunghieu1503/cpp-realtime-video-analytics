@@ -509,7 +509,8 @@ int runLive(const AppConfig& app) {
   SnapshotWriter snapshots(app.snapshotDir, app.snapshotKeep);
   MqttPublisher mqtt;
   bool mqttOn = !app.mqtt.host.empty() &&
-                mqtt.connect(app.mqtt.host, app.mqtt.port);
+                mqtt.connect(app.mqtt.host, app.mqtt.port, app.mqtt.username,
+                             app.mqtt.password, app.mqtt.caFile);
 
   // Steady-clock milliseconds of the latest result, read by /health
   using Clock = std::chrono::steady_clock;
@@ -532,6 +533,10 @@ int runLive(const AppConfig& app) {
   sseConfig.staticDir = "web/";
   sseConfig.numStreams = static_cast<int>(app.sources.size());
   sseConfig.streamsJson = streamsJson(app);
+  sseConfig.username = app.httpUser;
+  sseConfig.password = app.httpPassword;
+  sseConfig.tlsCertFile = app.tlsCert;
+  sseConfig.tlsKeyFile = app.tlsKey;
   sseConfig.metrics = [&] {
     return renderMetrics(metrics, pipeline, streams, power);
   };
@@ -550,7 +555,8 @@ int runLive(const AppConfig& app) {
 
   std::cout << "Pipeline running. Press "
             << (app.headless ? "Ctrl+C" : "'q' or Ctrl+C") << " to stop.\n";
-  std::cout << "Dashboard: http://localhost:" << app.port << "\n"
+  std::cout << "Dashboard: " << (app.tlsCert.empty() ? "http" : "https")
+            << "://localhost:" << app.port << "\n"
             << std::flush;
 
   // Create the windows up front so waitKey() can pump events before the
@@ -739,6 +745,8 @@ int main(int argc, char* argv[]) {
       return -1;
     }
   }
+
+  applyEnvironment(app);
 
   bool benchmarkMode = false;
   std::string inputVideo;

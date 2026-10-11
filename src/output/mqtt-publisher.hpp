@@ -17,7 +17,12 @@ public:
 
   // Returns false after printing the reason if the client cannot be set up.
   // An unreachable broker is not a failure: the client keeps retrying.
-  bool connect(const std::string& host, int port);
+  // username empty: no credentials. caFile set: TLS, with the broker's
+  // certificate verified against that CA.
+  bool connect(const std::string& host, int port,
+               const std::string& username = "",
+               const std::string& password = "",
+               const std::string& caFile = "");
 
   void publish(const std::string& topic, const std::string& payload);
 

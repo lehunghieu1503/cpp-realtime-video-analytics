@@ -16,11 +16,26 @@ MqttPublisher::~MqttPublisher() {
   mosquitto_lib_cleanup();
 }
 
-bool MqttPublisher::connect(const std::string& host, int port) {
+bool MqttPublisher::connect(const std::string& host, int port,
+                            const std::string& username,
+                            const std::string& password,
+                            const std::string& caFile) {
   client_ = mosquitto_new(nullptr, true, nullptr);
   if (!client_) {
     std::cerr << "MQTT: cannot create the client\n";
     return false;
+  }
+  if (!username.empty()) {
+    mosquitto_username_pw_set(client_, username.c_str(), password.c_str());
+  }
+  if (!caFile.empty()) {
+    int tlsRc = mosquitto_tls_set(client_, caFile.c_str(), nullptr, nullptr,
+                                  nullptr, nullptr);
+    if (tlsRc != MOSQ_ERR_SUCCESS) {
+      std::cerr << "MQTT: cannot use CA file " << caFile << ": "
+                << mosquitto_strerror(tlsRc) << "\n";
+      return false;
+    }
   }
   // Retry after 1 s, doubling up to 30 s
   mosquitto_reconnect_delay_set(client_, 1, 30, true);
@@ -49,7 +64,8 @@ bool MqttPublisher::connect(const std::string& host, int port) {
     std::cerr << "MQTT: " << mosquitto_strerror(rc) << "\n";
     return false;
   }
-  std::cout << "MQTT: publishing to " << host << ":" << port << "\n";
+  std::cout << "MQTT: publishing to " << host << ":" << port
+            << (caFile.empty() ? "" : " over TLS") << "\n";
   return true;
 }
 
@@ -66,7 +82,8 @@ void MqttPublisher::publish(const std::string& topic,
 MqttPublisher::MqttPublisher() = default;
 MqttPublisher::~MqttPublisher() = default;
 
-bool MqttPublisher::connect(const std::string&, int) {
+bool MqttPublisher::connect(const std::string&, int, const std::string&,
+                            const std::string&, const std::string&) {
   std::cerr << "MQTT: this build has no MQTT support (libmosquitto-dev was "
                "missing at build time)\n";
   return false;

@@ -17,6 +17,11 @@ struct MqttConfig {
   int port = 1883;
   // Events go to <topic>/<stream>/<event type>
   std::string topic = "video-analytics";
+  std::string username;  // empty: connect without credentials
+  std::string password;
+  // CA certificate that signed the broker's certificate; set: connect over
+  // TLS and verify the broker
+  std::string caFile;
 };
 
 // Everything the application can be told. Loaded from a YAML file, then
@@ -41,8 +46,21 @@ struct AppConfig {
   // Exit, so the supervisor restarts the process, when a connected source
   // has produced no result for this long. 0 disables the watchdog.
   int watchdogSeconds = 60;
+  // HTTP Basic credentials for the dashboard and its endpoints; an empty
+  // password leaves them open
+  std::string httpUser = "admin";
+  std::string httpPassword;
+  // PEM certificate and key; both set: the dashboard is served over HTTPS
+  std::string tlsCert;
+  std::string tlsKey;
 };
 
 // Fills `config` from a YAML file; keys that are absent keep their value.
 // Returns false after printing the reason when the file cannot be used.
 bool loadConfig(const std::string& path, AppConfig& config);
+
+// Overrides the security settings from the environment, so that secrets need
+// not be written into the config file:
+//   VA_HTTP_USER, VA_HTTP_PASSWORD, VA_TLS_CERT, VA_TLS_KEY,
+//   VA_MQTT_HOST, VA_MQTT_PORT, VA_MQTT_USER, VA_MQTT_PASSWORD, VA_MQTT_CA
+void applyEnvironment(AppConfig& config);
