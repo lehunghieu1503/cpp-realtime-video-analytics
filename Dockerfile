@@ -4,22 +4,22 @@ FROM ubuntu:22.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
-    build-essential cmake git wget \
-    libopencv-dev \
+    build-essential cmake git wget ca-certificates \
+    libopencv-dev libeigen3-dev libmosquitto-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ONNX Runtime
-RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz \
-    && tar xzf onnxruntime-linux-x64-1.17.0.tgz \
-    && cp onnxruntime-linux-x64-1.17.0/lib/* /usr/local/lib/ \
-    && cp -r onnxruntime-linux-x64-1.17.0/include/* /usr/local/include/ \
+RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz \
+    && tar xzf onnxruntime-linux-x64-1.20.1.tgz \
+    && cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/ \
+    && cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/ \
     && ldconfig \
-    && rm -rf onnxruntime-linux-x64-1.17.0*
+    && rm -rf onnxruntime-linux-x64-1.20.1*
 
 WORKDIR /app
 COPY . .
 
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
     && cmake --build build --parallel $(nproc)
 
 # Stage 2: Runtime
@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopencv-dnn4.5d \
     libopencv-videoio4.5d \
     libopencv-highgui4.5d \
+    libmosquitto1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy ONNX Runtime shared lib
