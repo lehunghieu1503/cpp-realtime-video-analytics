@@ -60,6 +60,10 @@ if(WITH_TENSORRT)
     target_include_directories(va_core PRIVATE ${TENSORRT_INCLUDE_DIR})
     target_link_libraries(va_core PRIVATE
         ${NVINFER_LIBRARY} ${NVONNXPARSER_LIBRARY} CUDA::cudart)
+    # On a Jetson, TensorRT and CUDA depend on driver libraries that the
+    # NVIDIA container runtime mounts when the container starts; they are
+    # absent while the image is built
+    target_link_options(va_core INTERFACE -Wl,--allow-shlib-undefined)
 endif()
 
 if(WITH_MQTT)

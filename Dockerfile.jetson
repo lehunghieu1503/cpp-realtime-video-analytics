@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 
+# CUDA architecture 87 is the Orin's GPU: the pre-processing kernel is
+# compiled for it ahead of time instead of at the first frame.
 # The build directory and the compiler cache persist between builds, so a
 # rebuild under QEMU compiles only what changed. The binary is copied out
 # because cache mounts are not part of the image.
@@ -28,6 +30,8 @@ RUN --mount=type=cache,target=/app/build \
     --mount=type=cache,target=/root/.ccache \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+        -DCMAKE_CUDA_ARCHITECTURES=87 \
     && cmake --build build --parallel $(nproc) \
     && cp build/src/video_analytics /app/video_analytics
 
