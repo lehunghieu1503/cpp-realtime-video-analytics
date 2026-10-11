@@ -1,0 +1,39 @@
+# Secured deployment, merged over docker-compose.yml:
+#   - dashboard and /metrics over HTTPS with a password
+#   - MQTT over TLS on 8883 with a password, no anonymous access
+#   - Grafana needs a login; Prometheus is reachable only from the board
+# Needs deploy/secrets/run from scripts/make-secrets.sh. With SECURE=1,
+# scripts/deploy-jetson.sh creates the secrets and enables this file.
+services:
+  app:
+    env_file:
+      - secrets/app.env
+    volumes:
+      - ./secrets:/app/secrets:ro
+
+  mosquitto:
+    # The secrets are readable only by the user who deployed them
+    user: "${DEPLOY_UID_GID:?set by scripts/deploy-jetson.sh}"
+    ports: !override
+      - "8883:8883"
+    volumes: !override
+      - ./mosquitto/mosquitto.secure.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./secrets:/mosquitto/secrets:ro
+
+  prometheus:
+    user: "${DEPLOY_UID_GID:?set by scripts/deploy-jetson.sh}"
+    # Prometheus has no login of its own, so it is not offered to the network
+    ports: !override
+      - "127.0.0.1:9090:9090"
+    volumes: !override
+      - ./prometheus/prometheus.secure.yml:/etc/prometheus/prometheus.yml:ro
+      - ./secrets:/etc/prometheus/secrets:ro
+      # A directory of the deploying user: the named volume belongs to the
+      # image's own user and could not be written
+      - ./prometheus-data:/prometheus
+
+  grafana:
+    env_file:
+      - secrets/grafana.env
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"

@@ -35,3 +35,5 @@ models/*.bin
 # Local run of the deploy stack
 deploy/snapshots/
 deploy/.env
+deploy/secrets/
+deploy/prometheus-data/

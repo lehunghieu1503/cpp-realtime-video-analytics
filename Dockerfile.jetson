@@ -15,7 +15,7 @@ FROM ${BASE_IMAGE} AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ca-certificates ccache \
-    libopencv-dev libeigen3-dev libmosquitto-dev \
+    libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

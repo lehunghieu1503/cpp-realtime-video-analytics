@@ -8,6 +8,9 @@
 #   VIDEO_DIR   directory on the board mounted at /data/videos (default:
 #               REMOTE_DIR/videos)
 #   SKIP_BUILD  set to 1 to ship the image already built
+#   SECURE      set to 1 for HTTPS and passwords on the dashboard, TLS and
+#               passwords on MQTT, and a Grafana login. Certificates and
+#               passwords are created in deploy/secrets/ on this PC.
 #
 # What it does:
 #   1. builds the arm64 image with docker buildx (QEMU)
@@ -20,7 +23,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 HOST="$1"
@@ -88,7 +91,18 @@ echo "== Copying configuration and model to $HOST:$REMOTE_DIR"
 # mount would belong to root and the container could not write to it
 ssh "$HOST" "mkdir -p '$REMOTE_DIR/models' '$REMOTE_DIR/snapshots' '$REMOTE_DIR/videos'"
 rsync -rtz --delete deploy/ "$HOST:$REMOTE_DIR/" \
-  --exclude models --exclude snapshots --exclude videos --exclude .env
+  --exclude models --exclude snapshots --exclude videos --exclude .env \
+  --exclude secrets --exclude prometheus-data
+
+COMPOSE_FILE=docker-compose.yml:docker-compose.jetson.yml
+if [ "${SECURE:-0}" = 1 ]; then
+  echo "== Creating and copying secrets"
+  scripts/make-secrets.sh "${HOST#*@}"
+  # Only secrets/run: the CA key stays on this PC
+  ssh "$HOST" "mkdir -p '$REMOTE_DIR/prometheus-data' && mkdir -p -m 700 '$REMOTE_DIR/secrets'"
+  rsync -rtz --delete --chmod=F600 deploy/secrets/run/ "$HOST:$REMOTE_DIR/secrets/"
+  COMPOSE_FILE=$COMPOSE_FILE:docker-compose.secure.yml
+fi
 rsync -tz --progress "$MODEL" "$HOST:$REMOTE_DIR/models/"
 # An INT8 calibration table, if one was generated for this model
 CALIBRATION="${MODEL%.onnx}.calibration"
@@ -100,13 +114,20 @@ fi
 # Read by docker compose on the board, so `docker compose ...` there needs
 # no flags
 ssh "$HOST" "cat > '$REMOTE_DIR/.env'" <<ENV
-COMPOSE_FILE=docker-compose.yml:docker-compose.jetson.yml
+COMPOSE_FILE=$COMPOSE_FILE
 VA_IMAGE=$APP_IMAGE
+DEPLOY_UID_GID=$(ssh "$HOST" 'echo $(id -u):$(id -g)')
 ${VIDEO_DIR:+VIDEO_DIR=$VIDEO_DIR}
 ENV
 
 echo "== Starting"
 ssh "$HOST" "cd '$REMOTE_DIR' && docker compose up -d --remove-orphans && docker compose ps"
+
+if [ "${SECURE:-0}" = 1 ]; then
+  # Grafana reads its admin password from the environment only when it
+  # creates its database; on a board deployed before, set it explicitly
+  ssh "$HOST" "cd '$REMOTE_DIR' && for i in \$(seq 30); do docker compose exec -T grafana grafana cli admin reset-admin-password \"\$(cat secrets/grafana.password)\" >/dev/null 2>&1 && break; sleep 2; done"
+fi
 
 BOARD="${HOST#*@}"
 cat <<DONE
@@ -115,8 +136,24 @@ Deployed. The first start with a new model builds its TensorRT engine, which
 takes several minutes; follow it with:
   ssh $HOST 'cd $REMOTE_DIR && docker compose logs -f app'
 
+DONE
+if [ "${SECURE:-0}" = 1 ]; then
+  R=deploy/secrets/run
+  cat <<DONE
+  Dashboard   https://$BOARD:9001   user admin, password in $R/http.password
+              (the browser will not know the CA: import $R/ca.crt, or accept the warning)
+  Grafana     http://$BOARD:3000    user admin, password in $R/grafana.password
+  Prometheus  only on the board, at 127.0.0.1:9090
+  MQTT        mosquitto_sub -h $BOARD -p 8883 --cafile $R/ca.crt \\
+                -u va -P "\$(cat $R/mqtt.password)" -t 'video-analytics/#' -v
+DONE
+else
+  cat <<DONE
   Dashboard   http://$BOARD:9001
   Grafana     http://$BOARD:3000
   Prometheus  http://$BOARD:9090
   MQTT        mosquitto_sub -h $BOARD -t 'video-analytics/#' -v
+
+Nothing above asks for a password. SECURE=1 adds TLS and logins.
 DONE
+fi
