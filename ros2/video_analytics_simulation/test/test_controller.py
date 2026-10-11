@@ -29,6 +29,9 @@ VEHICLE = {"wheelbase_m": 3.0, "max_steer_deg": 70.0, "width_m": 2.16,
            "front_bumper_m": 2.43}
 TICK = 33333333
 MS = 1000000
+AGE_MS = CONFIG["control"]["age_limit_ms"]
+# Ticks without a result until the last one is older than the age limit
+STALE_TICKS = int(AGE_MS * MS // TICK) + 1
 
 
 def lane_envelope(offset=0.0, curvature=0.0, heading=0.0, markings=(-1.75, 1.75)):
@@ -231,11 +234,11 @@ class Driving(unittest.TestCase):
         world.frame()
         c = world.last
         now = c["control_sim_ns"]
-        limits = {"age_limit_ns": 200 * MS, "pose_budget_ns": 100 * MS}
+        limits = {"age_limit_ns": AGE_MS * MS, "pose_budget_ns": 100 * MS}
         self.assertEqual(protocol.check_command(
             c, "r1", "carla-front", c["command_seq"] - 1, now, limits,
             lambda ns: True, lambda ns, frame: True), "")
-        self.assertEqual(c["valid_until_sim_ns"], c["basis_sim_ns"] + 200 * MS)
+        self.assertEqual(c["valid_until_sim_ns"], c["basis_sim_ns"] + AGE_MS * MS)
 
 
 class Stopping(unittest.TestCase):
@@ -243,11 +246,11 @@ class Stopping(unittest.TestCase):
         world = World().running()
         world.frame()
         ticks = 0
-        while world.core.state == RUNNING and ticks < 20:
+        while world.core.state == RUNNING and ticks < 40:
             world.frame(deliver=False)
             ticks += 1
-        # 200 ms at 30 Hz: the 7th tick without a result is too old
-        self.assertEqual(ticks, 7)
+        # The first tick at which the last result is older than the limit
+        self.assertEqual(ticks, STALE_TICKS)
         self.assertEqual(world.core.stop_reason, "stale_perception")
         self.assertEqual((world.last["throttle"], world.last["brake"]), (0.0, 1.0))
         for _ in range(5):  # fresh data again: still stopped
@@ -293,11 +296,11 @@ class Stopping(unittest.TestCase):
     def test_missing_depth_stops_by_the_deadline(self):
         world = World().running()
         ticks = 0
-        while world.core.state == RUNNING and ticks < 20:
+        while world.core.state == RUNNING and ticks < 40:
             world.frame(with_depth=False)
             ticks += 1
         self.assertEqual(world.core.stop_reason, "stale_perception")
-        self.assertLessEqual(ticks, 7)
+        self.assertLessEqual(ticks, STALE_TICKS)
 
 
 class Obstacles(unittest.TestCase):
@@ -453,7 +456,7 @@ class DelayedSource(unittest.TestCase):
         # The command still names the frame it rests on and when that expires
         self.assertEqual(command["basis_sim_ns"], self.basis_ns)
         self.assertEqual(command["control_sim_ns"], world.tick * TICK)
-        self.assertEqual(command["valid_until_sim_ns"], self.basis_ns + 200 * MS)
+        self.assertEqual(command["valid_until_sim_ns"], self.basis_ns + AGE_MS * MS)
 
     def test_brakes_when_the_vehicle_has_closed_the_gap(self):
         world = self.world

@@ -185,7 +185,7 @@ class ScriptedActor:
     """Another road user, moved along a lane by a script, without physics:
     the same run gives the same positions."""
 
-    def __init__(self, carla, world, base_waypoint, spec, dt):
+    def __init__(self, carla, world, base_waypoint, spec, dt, index=0):
         self.carla = carla
         self.spec = spec
         self.dt = dt
@@ -202,10 +202,16 @@ class ScriptedActor:
         self.speed = float(spec.get("speed_mps", 0.0))
         self.lane_offset = float(spec.get("lane", 0))
         self.visible = False
-        self.actor = world.spawn_actor(blueprint, self.transform_at(0)[0])
         # physics: true lets the actor hit things (the collision negative
         # control); it is then driven by a velocity, not placed
         self.physics = bool(spec.get("physics", False))
+        start = self.transform_at(0)[0]
+        if not self.physics:
+            # Scripted actors may start at the same place (one after another
+            # in a sweep): each is created at a height of its own and put in
+            # place by its first step
+            start.location.z += 50.0 + 10.0 * index
+        self.actor = world.spawn_actor(blueprint, start)
         self.actor.set_simulate_physics(self.physics)
         self.extent = self.actor.bounding_box.extent
         self.box_centre = self.actor.bounding_box.location
@@ -475,8 +481,9 @@ class Simulator:
             sensor.listen(lambda event, kind=kind: self.on_event(kind, event))
             self.sensors.append(sensor)
 
-        for spec in self.scenario.get("actors", []):
-            self.scripted.append(ScriptedActor(carla, self.world, waypoint, spec, self.dt))
+        for index, spec in enumerate(self.scenario.get("actors", [])):
+            self.scripted.append(ScriptedActor(carla, self.world, waypoint, spec,
+                                               self.dt, index))
 
         physics = self.ego.get_physics_control()
         wheels = physics.wheels
@@ -551,6 +558,24 @@ class Simulator:
                 "centre_yaw_deg": waypoint.transform.rotation.yaw,
                 "centre": [waypoint.transform.location.x, waypoint.transform.location.y],
                 "centre_ahead": points}
+
+    def draw_markers(self):
+        """Red points at known places in the ego frame of the start pose, for
+        the reprojection check: where they appear in the image must be where
+        the calibration projects them. Drawn every tick, for one tick."""
+        points = self.scenario.get("markers_ego_m")
+        if not points:
+            return
+        if not hasattr(self, "marker_world"):
+            start = self.ego.get_transform()
+            self.marker_world = [start.transform(self.carla.Location(*p)) for p in points]
+            protocol.write_json(os.path.join(self.run_dir, "markers.json"), {
+                "ego_pose": pose_dict(start), "points_ego_m": points,
+                "points_world_m": [[l.x, l.y, l.z] for l in self.marker_world]})
+        for location in self.marker_world:
+            self.world.debug.draw_point(location, size=0.06,
+                                        color=self.carla.Color(255, 0, 0),
+                                        life_time=2.0 * self.dt)
 
     def open_loop(self, tick):
         """A scripted command, for the scenarios that measure the vehicle
@@ -716,6 +741,7 @@ class Simulator:
             steer=float(applied["steer"])))
         for actor in self.scripted:
             actor.step(tick)
+        self.draw_markers()
         frame_before = last["frame"] if last else None
         apply_mono = mono_ns()
 

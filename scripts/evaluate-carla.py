@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate one CARLA run from the files in its run directory.
 
-Usage: scripts/evaluate-carla.py RUN_DIR [--replay]
+Usage: scripts/evaluate-carla.py RUN_DIR [--replay] [--lane-model MODEL.onnx]
 
 Reads what the simulator and the controller wrote (see
 ros2/video_analytics_simulation/video_analytics_simulation/simulator.py) and
@@ -35,6 +35,9 @@ How things are counted:
               that produced a frame to the arrival of its result, and to the
               tick at which a command resting on it was applied. The
               device's clock is never subtracted from this PC's.
+
+--lane-model MODEL.onnx runs the lane model on this PC's CPU on the JPEGs kept
+from the run and compares the lane pixels with those the device reported.
 
 --replay recomputes the metric tracking from the stored artifacts alone
 (results as received, lossless depth, ego states, calibration) and compares
@@ -75,7 +78,7 @@ def read_jsonl(path, required=True):
 
 
 def percentile_summary(values):
-    if not values:
+    if len(values) == 0:
         return {"count": 0}
     values = np.asarray(values, dtype=float)
     return {"count": int(len(values)), "p50": float(np.percentile(values, 50)),
@@ -84,7 +87,7 @@ def percentile_summary(values):
 
 
 def error_summary(errors):
-    if not errors:
+    if len(errors) == 0:
         return {"count": 0}
     errors = np.asarray(errors, dtype=float)
     return {"count": int(len(errors)), "rmse": float(np.sqrt(np.mean(errors ** 2))),
@@ -684,6 +687,122 @@ def depth_fixture_section(run_dir, generated, truth_by_ns, rig, every=15):
     }
 
 
+def lane_parity_section(run_dir, usable, model_path):
+    """The device's lane pixels against the same model on this PC's CPU.
+
+    For every JPEG kept from the run (rgb/, as it was sent): ONNX Runtime on
+    the CPU, FP32, with the device's pre-processing (area resize), and the
+    reference decoder; then the difference in pixels to what the device
+    reported for that frame, row by row. Rows only one side found count as
+    disagreements. A second pass uses the pre-processing of the model's
+    authors (PIL resize) to show what the choice of resize costs.
+    """
+    import cv2
+    import onnxruntime
+    from video_analytics_simulation import lane as lane_reference
+
+    session = onnxruntime.InferenceSession(model_path,
+                                           providers=["CPUExecutionProvider"])
+    mean = np.array([0.485, 0.456, 0.406], np.float32)
+    std = np.array([0.229, 0.224, 0.225], np.float32)
+
+    def run(rgb_resized):
+        x = (rgb_resized.astype(np.float32) / 255.0 - mean) / std
+        return session.run(None, {"image": x.transpose(2, 0, 1)[None]})[0][0]
+
+    def compare(a, b):
+        """Per-row differences in x of two decoded results; and how many rows
+        only one of them has."""
+        differences, only_one = [], 0
+        for lane_a, lane_b in zip(a, b):
+            rows_a = {y: x for x, y in lane_a}
+            rows_b = {y: x for x, y in lane_b}
+            for y in set(rows_a) | set(rows_b):
+                if y in rows_a and y in rows_b:
+                    differences.append(abs(rows_a[y] - rows_b[y]))
+                else:
+                    only_one += 1
+        return differences, only_one
+
+    directory = os.path.join(run_dir, "rgb")
+    device, authors, mask_device, mask_authors, images = [], [], 0, 0, 0
+    for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
+        if not name.endswith(".jpg"):
+            continue
+        record = usable.get(int(name[:-4]))
+        if record is None or "lane" not in record["envelope"]:
+            continue
+        bgr = cv2.imread(os.path.join(directory, name))
+        h, w = bgr.shape[:2]
+        reference = lane_reference.decode_ufld(
+            run(cv2.resize(bgr, (800, 288), interpolation=cv2.INTER_AREA)[:, :, ::-1]),
+            w, h)
+        reported = [[tuple(p) for p in l] for l in record["envelope"]["lane"]["pixels"]]
+        d, only = compare(reported, reference)
+        device += d
+        mask_device += only
+        try:
+            from PIL import Image
+            pil = Image.fromarray(bgr[:, :, ::-1]).resize((800, 288), Image.BILINEAR)
+            d, only = compare(reference, lane_reference.decode_ufld(run(np.asarray(pil)), w, h))
+            authors += d
+            mask_authors += only
+        except ImportError:
+            pass
+        images += 1
+    if not images:
+        return None
+    return {"images": images, "model": model_path,
+            "device_vs_cpu_fp32_px": percentile_summary(device),
+            "device_vs_cpu_rows_only_one_has": mask_device,
+            "area_resize_vs_authors_resize_px": percentile_summary(authors),
+            "area_resize_vs_authors_rows_only_one_has": mask_authors}
+
+
+def reprojection_section(run_dir, truth_by_ns, rig):
+    """Red markers drawn at known 3-D points against where the calibration
+    projects those points: an error in pixels that does not go through the
+    depth image or the detector.
+
+    Each marker is found in the kept JPEGs as the centroid of the red pixels
+    near its projection (within 12 px); a marker that cannot be found is
+    counted, not skipped.
+    """
+    import cv2
+    path = os.path.join(run_dir, "markers.json")
+    directory = os.path.join(run_dir, "rgb")
+    if not os.path.exists(path) or not os.path.isdir(directory):
+        return None
+    with open(path) as f:
+        world = np.array(json.load(f)["points_world_m"])
+    errors, missing, images = [], 0, 0
+    for name in sorted(os.listdir(directory)):
+        row = truth_by_ns.get(int(name[:-4])) if name.endswith(".jpg") else None
+        if row is None:
+            continue
+        bgr = cv2.imread(os.path.join(directory, name)).astype(np.int32)
+        # Red, and nothing else in this scene is: R high, G and B low
+        red = (bgr[:, :, 2] > 150) & (bgr[:, :, 1] < 90) & (bgr[:, :, 0] < 90)
+        ego = Pose.from_dict(row["ego"]["pose"]).from_parent(world)
+        uv, depth = rig.project(ego)
+        images += 1
+        for (u, v), d in zip(uv, depth):
+            if d <= 0 or not (12 <= u < rig.width - 12 and 12 <= v < rig.height - 12):
+                continue
+            u0, v0 = int(round(u)), int(round(v))
+            window = red[v0 - 12:v0 + 13, u0 - 12:u0 + 13]
+            ys, xs = np.nonzero(window)
+            if len(xs) < 3:
+                missing += 1
+                continue
+            # Pixel centres: pixel i covers [i, i + 1)
+            found_u = xs.mean() + u0 - 12 + 0.5
+            found_v = ys.mean() + v0 - 12 + 0.5
+            errors.append(math.hypot(found_u - u, found_v - v))
+    return {"images": images, "markers": int(len(world)),
+            "error_px": percentile_summary(errors), "not_found": missing}
+
+
 def replay(run_dir, manifest, perception, ego_rows, generated, metric_live):
     """Recomputes the metric tracking from the stored artifacts alone."""
     rig = Rig.from_config(manifest["calibration"])
@@ -767,6 +886,12 @@ def check_expectations(expect, metrics):
             reason = control["stop_reason"] or ""
             add("stop reason does not start with %s" % value,
                 not reason.startswith(value), reason or "none")
+        elif key == "max_gap_m":
+            gaps = control["min_bumper_gap_m"]
+            worst = min(gaps.values()) if gaps else None
+            add("stopped within %.0f m of the obstacle" % value,
+                worst is not None and worst <= value,
+                "gap %s" % (None if worst is None else round(worst, 2)))
         elif key == "min_gap_m":
             gaps = control["min_bumper_gap_m"]
             worst = min(gaps.values()) if gaps else None
@@ -792,6 +917,21 @@ def check_expectations(expect, metrics):
             add("results naming a frame that was not sent == %d" % value,
                 metrics["identity"]["unknown_frame"] == value,
                 str(metrics["identity"]["unknown_frame"]))
+        elif key == "fault_brake_by_deadline":
+            budget = metrics["control_budget"]
+            for fault in metrics["faults"]:
+                # Data stopped: the age limit, in simulation time. Controller
+                # gone: the wall-time lease. One tick for the tick itself.
+                wall = fault["kind"] == "kill_controller"
+                limit = (budget["wall_lease_ms"] if wall else budget["age_limit_ms"]) + 34
+                got = fault.get("wall_ms_to_brake" if wall else "sim_ms_to_brake")
+                add("%s: braked within %d ms of %s" % (
+                    fault["kind"], limit, "wall time" if wall else "simulation"),
+                    got is not None and got <= limit and fault.get("was_driving_before"),
+                    "%s ms, driving before: %s" % (
+                        None if got is None else round(got), fault.get("was_driving_before")))
+            if not metrics["faults"]:
+                add("fault injected", False, "no fault in this run")
         elif key == "fault_brake_within_sim_ms":
             for fault in metrics["faults"]:
                 ok = fault.get("sim_ms_to_brake") is not None \
@@ -807,7 +947,8 @@ def check_expectations(expect, metrics):
             for name, b in metrics["metric"].items():
                 e = b["range_error_m"]
                 if e["count"]:
-                    limit = max(value, 0.02 * float(name.split("-")[1]))
+                    # The larger of the limit and 2 % of the bin's near edge
+                    limit = max(value, 0.02 * float(name.split("-")[0]))
                     add("range error %s m <= %.2f m" % (name, limit),
                         e["max_abs"] <= limit, "max %.3f" % e["max_abs"])
         elif key == "speed_rmse_mps":
@@ -841,11 +982,13 @@ def check_expectations(expect, metrics):
                 "depth_along_optical_axis", {})
             add("road from depth within %.2f m RMSE of the calibrated plane" % value,
                 e.get("count", 0) > 0 and e["rmse"] <= value, str(e.get("rmse")))
-        elif key == "silhouette_p95_px":
-            fixture = metrics.get("depth_fixture") or {}
-            e = fixture.get("silhouette_edges_px") or {}
-            add("object edges within %d px of the projected box (P95)" % value,
-                e.get("count", 0) > 0 and e["p95"] <= value, str(e.get("p95")))
+        elif key == "reprojection_max_px":
+            r = metrics.get("reprojection") or {}
+            e = r.get("error_px") or {}
+            add("markers reproject within %.1f px" % value,
+                e.get("count", 0) > 0 and e["max"] <= value and r["not_found"] == 0,
+                "max %s px over %s, %s not found" % (
+                    e.get("max"), e.get("count", 0), r.get("not_found")))
         elif key == "evaluator_must_fail":
             pass  # handled by the caller: a negative control
         else:
@@ -853,7 +996,7 @@ def check_expectations(expect, metrics):
     return results
 
 
-def evaluate(run_dir, do_replay=False):
+def evaluate(run_dir, do_replay=False, lane_model=None):
     manifest_path = os.path.join(run_dir, "manifest.json")
     if not os.path.exists(manifest_path):
         raise MissingArtifact(manifest_path)
@@ -895,6 +1038,8 @@ def evaluate(run_dir, do_replay=False):
         "latency": latency_section(usable, generated, ticks, controls, commands),
         "control": control_section(controls, truth_rows, manifest),
         "faults": faults, "commands_rejected_by_simulator": rejected,
+        "control_budget": {k: manifest.get("control", {}).get(k) for k in (
+            "age_limit_ms", "wall_lease_ms", "pose_budget_ms")},
         "rates": {
             "simulated_fps": simulator.get("simulated_fps"),
             "wall_fps": simulator.get("wall_fps"),
@@ -905,14 +1050,20 @@ def evaluate(run_dir, do_replay=False):
         },
         "simulator": simulator,
     }
+    if lane_model:
+        metrics["lane_parity"] = lane_parity_section(run_dir, usable, lane_model)
     vehicle = vehicle_section(controls, ego_rows, manifest)
     if vehicle:
         metrics["vehicle"] = vehicle
     if manifest["scenario_config"].get("depth_fixture"):
         metrics["depth_fixture"] = depth_fixture_section(run_dir, generated,
                                                          truth_by_ns, rig)
+        metrics["reprojection"] = reprojection_section(run_dir, truth_by_ns, rig)
     if do_replay:
-        metrics["replay"] = replay(run_dir, manifest, perception, ego_rows, generated,
+        # Every frame of the ledger: the tracker's state at the first tick of
+        # the run comes from the frames before it
+        metrics["replay"] = replay(run_dir, manifest, perception, ego_rows,
+                                   {f: e for f, e in frames.items() if "sim_ns" in e},
                                    metric_rows)
 
     expect = manifest["scenario_config"].get("expect")
@@ -1072,6 +1223,27 @@ def summary_markdown(m):
                       d["silhouettes"], fmt(d["silhouette_edges_px"].get("p50"), 1),
                       fmt(d["silhouette_edges_px"].get("p95"), 1),
                       fmt(d["silhouette_edges_px"].get("max"), 1), d["note"])]
+        r = m.get("reprojection")
+        if r:
+            lines.append("- %d markers at known points in %d images: reprojection "
+                         "error P50 %s px, P95 %s px, max %s px; %d not found" % (
+                             r["markers"], r["images"], fmt(r["error_px"].get("p50")),
+                             fmt(r["error_px"].get("p95")), fmt(r["error_px"].get("max")),
+                             r["not_found"]))
+    if m.get("lane_parity"):
+        p = m["lane_parity"]
+        a, b = p["device_vs_cpu_fp32_px"], p["area_resize_vs_authors_resize_px"]
+        lines += ["", "## Lane model: device against CPU FP32", "",
+                  "- %d images, %d lane rows compared: median %s px, P95 %s px, "
+                  "max %s px; %d rows found by one side only" % (
+                      p["images"], a["count"], fmt(a.get("p50"), 1),
+                      fmt(a.get("p95"), 1), fmt(a.get("max"), 1),
+                      p["device_vs_cpu_rows_only_one_has"]),
+                  "- this pre-processing against the authors' (PIL resize), same "
+                  "CPU model: median %s px, P95 %s px, max %s px; %d rows by one "
+                  "side only" % (fmt(b.get("p50"), 1), fmt(b.get("p95"), 1),
+                                 fmt(b.get("max"), 1),
+                                 p["area_resize_vs_authors_rows_only_one_has"])]
     if "replay" in m:
         p = m["replay"]
         lines += ["", "## Replay from artifacts", "",
@@ -1087,9 +1259,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("run_dir")
     parser.add_argument("--replay", action="store_true")
+    parser.add_argument("--lane-model", help="ONNX lane model: compare the "
+                        "device's lane pixels with it on this PC's CPU")
     args = parser.parse_args()
     try:
-        metrics = evaluate(args.run_dir, args.replay)
+        metrics = evaluate(args.run_dir, args.replay, args.lane_model)
     except MissingArtifact as error:
         print("evaluation failed: %s is missing" % error, file=sys.stderr)
         return 2

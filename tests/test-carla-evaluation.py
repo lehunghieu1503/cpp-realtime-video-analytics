@@ -164,6 +164,8 @@ def write_run(directory, results=None, drops=(), expect=None, stop_at=None,
                 "commit": "0", "calibration": CALIBRATION,
                 "calibration_id": RIG.calibration_id, "fixed_delta_seconds": 1 / 30,
                 "vehicle": VEHICLE, "jpeg_quality": 75, "metric": {},
+                "control": {"age_limit_ms": 200, "wall_lease_ms": 300,
+                            "pose_budget_ms": 100},
                 "detector": {"model": "m.onnx"}}
     with open(os.path.join(directory, "manifest.json"), "w") as f:
         json.dump(manifest, f)
@@ -326,7 +328,8 @@ class WholeRun(unittest.TestCase):
 
     def test_expectations_pass_and_fail(self):
         good = {"collisions": 0, "stops": True, "stop_reason_prefix": "obstacle",
-                "min_gap_m": 2.0, "unknown_frames": 0, "lane_coverage": 0.95,
+                "min_gap_m": 2.0, "max_gap_m": 18.0, "unknown_frames": 0,
+                "lane_coverage": 0.95,
                 "lane_centre_rmse_m": 0.3, "range_error_max_m": 0.2}
         # Parked car with its near face 20 m ahead; ego stops after 1 m
         m = self.run_in(expect=good, stop_at=12, speed=2.5)
@@ -338,6 +341,9 @@ class WholeRun(unittest.TestCase):
                                20.0 - 2.5 * 29 / 30 - 2.4, places=3)
 
         m = self.run_in(expect=dict(good, min_gap_m=20.0), stop_at=12, speed=2.5)
+        self.assertEqual(m["verdict"], "fail")
+        # Stopped, but far before the obstacle: not a stop for it
+        m = self.run_in(expect=dict(good, max_gap_m=10.0), stop_at=12, speed=2.5)
         self.assertEqual(m["verdict"], "fail")
         m = self.run_in(expect={"stops": False}, stop_at=12)
         self.assertEqual(m["verdict"], "fail")
@@ -366,6 +372,21 @@ class WholeRun(unittest.TestCase):
         self.assertEqual(m["verdict"], "pass")
         m = self.run_in(faults=faults, stop_at=15,
                         expect={"fault_brake_within_sim_ms": 200})
+        self.assertEqual(m["verdict"], "fail")
+        # Against the budget of the run's own config: 200 ms + one tick
+        m = self.run_in(faults=faults, stop_at=15,
+                        expect={"fault_brake_by_deadline": True})
+        self.assertEqual(m["verdict"], "pass", m["expectations"])
+        m = self.run_in(faults=faults, stop_at=16,
+                        expect={"fault_brake_by_deadline": True})
+        self.assertEqual(m["verdict"], "fail")
+        # The controller gone: the wall-time lease, 300 ms + one tick
+        killed = [{"kind": "kill_controller", "from_tick": 8}]
+        m = self.run_in(faults=killed, stop_at=18,
+                        expect={"fault_brake_by_deadline": True})
+        self.assertEqual(m["verdict"], "pass", m["expectations"])
+        m = self.run_in(faults=killed, stop_at=19,
+                        expect={"fault_brake_by_deadline": True})
         self.assertEqual(m["verdict"], "fail")
 
     def test_replay_from_artifacts(self):

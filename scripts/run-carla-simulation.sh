@@ -117,7 +117,7 @@ cleanup() {
   for pid in "${PIDS[@]}"; do kill -KILL "$pid" 2>/dev/null || true; done
   if [ "$REMOTE_STARTED" = 1 ]; then
     # shellcheck disable=SC2029
-    ssh "$DEVICE" "cd '$REMOTE_DIR' && docker compose logs --no-color app > app.log 2>&1; VA_RUN_ID=$RUN_ID docker compose stop -t 5" >/dev/null 2>&1 || true
+    ssh "$DEVICE" "cd '$REMOTE_DIR' && export VA_RUN_ID=$RUN_ID && docker compose logs --no-color app > app.log 2>&1; docker compose stop -t 5" >/dev/null 2>&1 || true
     scp -q "$DEVICE:$REMOTE_DIR/app.log" "$RUN_DIR/device.log" 2>/dev/null || true
   fi
 }

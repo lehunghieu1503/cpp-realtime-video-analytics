@@ -63,7 +63,11 @@ carla:
   map: Town04
   fps: 30                  # fixed_delta_seconds = 1/30, synchronous
   ego_blueprint: vehicle.tesla.model3
-  jpeg_quality: 75
+  # 1280x720 at 30 FPS over the link between the two machines. Measured on
+  # the link used so far (a relayed VPN, 120 ms round trip, about 10 Mbit/s):
+  # quality 75 is 87 kB a frame, 20 Mbit/s, and only 69 % of the frames came
+  # back; quality 30 is 41 kB, 9.6 Mbit/s, and 99 % came back.
+  jpeg_quality: 30
   sender: {bind: 0.0.0.0, port: 5000, max_queued: 2, client_max_buffers: 30}
   callback_queue: 8
   live_cache_entries: 90   # 3 s of frames a late result can be joined with
@@ -79,15 +83,25 @@ metric:
 
 control:
   target_speed_kmh: 9.0    # the limit of this stage is 10; the rest is margin
+  # Budgets, version 2. Version 1 was 200 ms of simulation and 300 ms of wall
+  # time, the targets of the plan. They cannot be met on the link used so
+  # far: from a tick to its result takes 216 ms at the median, 235 ms at the
+  # 95th percentile and up to 432 ms (120 ms of it is the round trip). With
+  # both machines on one network the same chain takes 64 ms and version 1
+  # holds. tau below covers the larger budget.
+  #
   # Perception older than this, in simulation time, is not driven on
-  age_limit_ms: 200
+  age_limit_ms: 500
   # No accepted command for this long, in wall time: the simulator brakes
-  wall_lease_ms: 300
+  wall_lease_ms: 600
   # The ego state a command was computed for may be this old
   pose_budget_ms: 100
   hazard_classes: [person, bicycle, car, motorcycle, bus, truck]
   # Brake when gap <= v * tau + v^2 / (2 * a_min) + margin
-  brake: {a_min_mps2: 2.5, tau_s: 0.3, margin_m: 2.0}
+  # a_min: full brake from 2.6 m/s measured 10.3 m/s^2 (scenario
+  # vehicle_response); 2.5 is the conservative bound used. tau: the age limit
+  # plus the measured 0.1 s from brake command to first deceleration.
+  brake: {a_min_mps2: 2.5, tau_s: 0.6, margin_m: 2.0}
   ttc_min_s: 2.0
   corridor_margin_m: 0.3
   unknown_closing_mps: 2.0
