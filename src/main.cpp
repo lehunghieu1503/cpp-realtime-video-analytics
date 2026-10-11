@@ -422,6 +422,13 @@ std::string renderMetrics(LiveMetrics& metrics, const Pipeline& pipeline,
     gauge("va_power_watts", "Power drawn, see the benchmark report for scope");
     out << "va_power_watts " << power.lastWatts() << "\n";
   }
+  // Jetson: the GPU's load over the last sample period, in tenths of a
+  // percent. Other machines do not have the file and export nothing.
+  int gpuLoad = -1;
+  if (std::ifstream("/sys/devices/platform/gpu.0/load") >> gpuLoad) {
+    gauge("va_gpu_utilization_percent", "GPU load");
+    out << "va_gpu_utilization_percent " << gpuLoad / 10.0 << "\n";
+  }
   gauge("va_process_resident_memory_bytes", "Resident set size");
   out << "va_process_resident_memory_bytes " << residentBytes() << "\n";
   // Lets a report restrict itself to the current run: a rate computed
