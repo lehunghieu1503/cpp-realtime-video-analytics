@@ -31,33 +31,41 @@ static std::string readFile(const std::string& path) {
 }
 
 // ── SseServer implementation ────────────────────────────────────────────────
-SseServer::SseServer(const SseServerConfig& config) : config_(config) {}
+SseServer::SseServer(const SseServerConfig& config)
+    : config_(config),
+      events_(config.numStreams),
+      videos_(config.numStreams) {}
 
 SseServer::~SseServer() {
   if (running_) stop();
 }
 
-void SseServer::broadcast(const std::string& json) {
+void SseServer::broadcast(const std::string& json, size_t stream) {
   {
     std::lock_guard<std::mutex> lock(eventMutex_);
-    latestEvent_ = json;
-    eventSeq_++;
+    events_[stream].json = json;
+    events_[stream].seq = ++eventSeq_;
   }
   eventReady_.notify_all();
 }
 
-void SseServer::updateFrame(const cv::Mat& frame) {
-  if (videoClients_ == 0) return;
+bool SseServer::hasViewers(size_t stream) const {
+  return videos_[stream].clients > 0;
+}
+
+void SseServer::updateFrame(const cv::Mat& frame, size_t stream) {
+  VideoSlot& slot = videos_[stream];
+  if (slot.clients == 0) return;
 
   std::vector<unsigned char> buf;
   cv::imencode(".jpg", frame, buf, {cv::IMWRITE_JPEG_QUALITY, 70});
 
   {
-    std::lock_guard<std::mutex> lock(frameMutex_);
-    jpegBuffer_ = std::move(buf);
-    frameSeq_++;
+    std::lock_guard<std::mutex> lock(slot.mutex);
+    slot.jpeg = std::move(buf);
+    slot.seq++;
   }
-  frameReady_.notify_all();
+  slot.ready.notify_all();
 }
 
 void SseServer::start() {
@@ -83,10 +91,31 @@ void SseServer::start() {
   httpThread_ = std::thread([this]() {
     httplib::Server& svr = *server_;
 
-    // Health check
-    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-      res.set_content("{\"status\":\"ok\"}", "application/json");
+    // Health check: 503 lets a supervisor see a stalled pipeline
+    svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
+      bool ok = !config_.healthy || config_.healthy();
+      res.status = ok ? 200 : 503;
+      res.set_content(ok ? "{\"status\":\"ok\"}"
+                         : "{\"status\":\"unhealthy\"}",
+                      "application/json");
     });
+
+    // Prometheus scrape endpoint
+    svr.Get("/metrics",
+            [this](const httplib::Request&, httplib::Response& res) {
+              if (!config_.metrics) {
+                res.status = 404;
+                return;
+              }
+              res.set_content(config_.metrics(),
+                              "text/plain; version=0.0.4");
+            });
+
+    // Stream ids, zones and lines for the dashboard
+    svr.Get("/streams",
+            [this](const httplib::Request&, httplib::Response& res) {
+              res.set_content(config_.streamsJson, "application/json");
+            });
 
     // SSE endpoint. The provider waits briefly for a new event, writes it and
     // returns, so httplib re-checks the socket and frees the worker thread
@@ -106,41 +135,58 @@ void SseServer::start() {
                                    });
               if (!running_) return false;
               if (eventSeq_ == lastSeq) return true;
+              for (const auto& slot : events_) {
+                if (slot.seq > lastSeq) message += "data: " + slot.json + "\n\n";
+              }
               lastSeq = eventSeq_;
-              message = "data: " + latestEvent_ + "\n\n";
             }
             return sink.write(message.data(), message.size());
           });
     });
 
-    // MJPEG video stream endpoint
-    svr.Get("/video", [this](const httplib::Request&, httplib::Response& res) {
+    // MJPEG video stream endpoint: /video?stream=N (default 0)
+    svr.Get("/video", [this](const httplib::Request& req,
+                             httplib::Response& res) {
+      size_t stream = 0;
+      if (req.has_param("stream")) {
+        try {
+          stream = std::stoul(req.get_param_value("stream"));
+        } catch (const std::exception&) {
+          stream = videos_.size();  // rejected below
+        }
+      }
+      if (stream >= videos_.size()) {
+        res.status = 404;
+        res.set_content("No such stream", "text/plain");
+        return;
+      }
+      VideoSlot& slot = videos_[stream];
       res.set_header("Cache-Control", "no-cache");
-      videoClients_++;
+      slot.clients++;
       res.set_chunked_content_provider(
           "multipart/x-mixed-replace; boundary=frame",
-          [this](size_t, httplib::DataSink& sink) {
+          [this, &slot](size_t, httplib::DataSink& sink) {
             // Start after the buffered frame: with no viewer it is not
             // refreshed, so it can be arbitrarily old
             uint64_t lastSeq;
             {
-              std::lock_guard<std::mutex> lock(frameMutex_);
-              lastSeq = frameSeq_;
+              std::lock_guard<std::mutex> lock(slot.mutex);
+              lastSeq = slot.seq;
             }
             while (running_) {
               // Wait for new frame
-              std::unique_lock<std::mutex> lock(frameMutex_);
-              frameReady_.wait_for(lock, std::chrono::milliseconds(100),
-                                    [this, lastSeq] {
-                                      return frameSeq_ > lastSeq || !running_;
-                                    });
+              std::unique_lock<std::mutex> lock(slot.mutex);
+              slot.ready.wait_for(lock, std::chrono::milliseconds(100),
+                                  [this, &slot, lastSeq] {
+                                    return slot.seq > lastSeq || !running_;
+                                  });
 
               if (!running_) break;
-              if (frameSeq_ == lastSeq) continue;
+              if (slot.seq == lastSeq) continue;
 
-              lastSeq = frameSeq_;
+              lastSeq = slot.seq;
               // Copy JPEG buffer while holding lock
-              std::vector<unsigned char> jpeg = jpegBuffer_;
+              std::vector<unsigned char> jpeg = slot.jpeg;
               lock.unlock();
 
               // Write MJPEG frame boundary
@@ -157,7 +203,7 @@ void SseServer::start() {
             return false;
           },
           // Runs when the response is destroyed, however the stream ended
-          [this](bool) { videoClients_--; });
+          [&slot](bool) { slot.clients--; });
     });
 
     // Serve index.html at root
@@ -198,7 +244,7 @@ void SseServer::start() {
 void SseServer::stop() {
   if (!running_) return;
   running_ = false;
-  frameReady_.notify_all();
+  for (auto& slot : videos_) slot.ready.notify_all();
   eventReady_.notify_all();
 
   // Closes the listening socket; handlers see !running_ and return, so the

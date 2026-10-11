@@ -74,7 +74,7 @@ std::string OpenCvCapture::getInfo() const {
   std::memcpy(fmt, &fourcc, 4);
 
   std::ostringstream ss;
-  ss << "Camera " << config_.deviceIndex << ": "
+  ss << config_.id << ": "
      << static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH)) << "x"
      << static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)) << " @ "
      << cap_.get(cv::CAP_PROP_FPS) << " FPS"

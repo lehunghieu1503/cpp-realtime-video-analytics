@@ -3,14 +3,17 @@
 #include "inference/detection.hpp"
 
 #include <chrono>
-#include <opencv2/core.hpp>
+#include <cstdint>
+#include <opencv2/opencv.hpp>
 #include <vector>
 
-// Data passed from capture thread to inference workers
+// Data passed from a capture thread to the inference workers
 struct FrameData {
-  uint64_t frameId;
+  uint64_t frameId;  // counts per stream
   std::chrono::steady_clock::time_point captureTime;
   cv::Mat frame;
+  int streamId = 0;       // index into PipelineConfig::sources
+  double decodeMs = 0.0;  // time inside the capture read (decode included)
 };
 
 // Result from inference worker, consumed by output/display
@@ -22,4 +25,10 @@ struct AnalyticsResult {
   std::vector<Detection> detections;
   double inferenceLatencyMs;  // capture → inference done, includes queue wait
   double detectMs = 0.0;      // time inside detect() only
+  int streamId = 0;
+  // Per-stage times; detectMs = preMs + inferMs + postMs
+  double decodeMs = 0.0;
+  double preMs = 0.0;
+  double inferMs = 0.0;
+  double postMs = 0.0;
 };

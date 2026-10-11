@@ -4,16 +4,24 @@
 #include <string>
 
 struct CaptureConfig {
+  std::string id = "cam0";  // stream name in events, metrics and the dashboard
   int deviceIndex = 0;
   int width = 640;
   int height = 480;
   int fps = 30;
   std::string codec = "MJPG";
   int bufferSize = 1;
-  std::string videoPath;  // if set, open video file instead of camera
+  // if set, open this video file or network URL (rtsp://, http://) instead of
+  // the camera
+  std::string videoPath;
   // if set, open this GStreamer pipeline (ending in appsink) as the camera,
   // e.g. a Jetson CSI sensor through nvarguscamerasrc
   std::string gstPipeline;
+
+  // A live source is reopened when it fails; a video file just ends
+  bool isLive() const {
+    return videoPath.empty() || videoPath.find("://") != std::string::npos;
+  }
 };
 
 class IVideoCapture {

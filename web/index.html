@@ -8,22 +8,15 @@
 </head>
 <body>
   <div class="container">
-    <h1>Real-Time Video Analytics</h1>
-
-    <div class="stats-bar">
-      <span>FPS: <strong id="fps">--</strong></span>
-      <span>Latency: <strong id="latency">--</strong> ms</span>
-      <span>Detections: <strong id="det-count">0</strong></span>
-      <span>Frame: <strong id="frame-id">--</strong></span>
+    <h1>Real-Time Video Analytics
       <span id="status" class="status disconnected">Disconnected</span>
-    </div>
+    </h1>
 
-    <div class="video-wrapper">
-      <!-- MJPEG stream from server — shows same frames as OpenCV window -->
-      <img id="camera" src="/video" alt="Live Feed">
-    </div>
+    <!-- One card per stream, built by app.js from GET /streams -->
+    <div id="streams" class="streams"></div>
 
-    <div id="det-list" class="det-list"></div>
+    <h2>Events</h2>
+    <div id="event-log" class="event-log"></div>
   </div>
 
   <script src="/static/app.js"></script>

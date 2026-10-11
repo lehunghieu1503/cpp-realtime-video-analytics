@@ -2,110 +2,36 @@
 #include "post-process.hpp"
 #include "pre-process.hpp"
 
-#include <filesystem>
+#include <chrono>
 #include <iostream>
-#include <stdexcept>
 
 InferenceEngine::InferenceEngine(const InferenceConfig& config)
-    : config_(config),
-      env_(ORT_LOGGING_LEVEL_WARNING, "video-analytics") {
-  // Configure session options
-  Ort::SessionOptions sessionOptions;
-  sessionOptions.SetIntraOpNumThreads(config_.numThreads);
-  sessionOptions.SetGraphOptimizationLevel(
-      GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-  // No silent fallback to CPU: it would look like a working GPU setup that is
-  // several times slower
-  try {
-    if (config_.provider == "tensorrt") {
-      const OrtApi& api = Ort::GetApi();
-      OrtTensorRTProviderOptionsV2* raw = nullptr;
-      Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&raw));
-      std::unique_ptr<OrtTensorRTProviderOptionsV2,
-                      decltype(api.ReleaseTensorRTProviderOptions)>
-          trtOptions(raw, api.ReleaseTensorRTProviderOptions);
-
-      // Building the engine takes minutes, so keep it across runs
-      auto modelDir = std::filesystem::path(config_.modelPath).parent_path();
-      std::string cacheDir =
-          ((modelDir.empty() ? "." : modelDir) / "trt-cache").string();
-      const char* keys[] = {"trt_fp16_enable", "trt_engine_cache_enable",
-                            "trt_engine_cache_path"};
-      const char* values[] = {"1", "1", cacheDir.c_str()};
-      Ort::ThrowOnError(
-          api.UpdateTensorRTProviderOptions(trtOptions.get(), keys, values, 3));
-      sessionOptions.AppendExecutionProvider_TensorRT_V2(*trtOptions);
-    }
-    // After TensorRT, CUDA runs the nodes TensorRT does not support
-    if (config_.provider != "cpu") {
-      OrtCUDAProviderOptions cudaOptions;
-      cudaOptions.device_id = 0;
-      sessionOptions.AppendExecutionProvider_CUDA(cudaOptions);
-    }
-  } catch (const Ort::Exception& e) {
-    std::cerr << "Execution provider '" << config_.provider
-              << "' not available: " << e.what() << "\n";
-    return;
-  }
-
-  // Load model
-  try {
-    session_ =
-        std::make_unique<Ort::Session>(env_, config_.modelPath.c_str(),
-                                       sessionOptions);
-  } catch (const Ort::Exception& e) {
-    std::cerr << "Failed to load model: " << e.what() << "\n";
-    return;
-  }
-
-  Ort::AllocatorWithDefaultOptions allocator;
-
-  // Query input metadata
-  size_t numInputs = session_->GetInputCount();
-  for (size_t i = 0; i < numInputs; i++) {
-    auto name = session_->GetInputNameAllocated(i, allocator);
-    inputNames_.emplace_back(name.get());
-
-    auto typeInfo = session_->GetInputTypeInfo(i);
-    auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
-    inputShape_ = tensorInfo.GetShape();
-  }
+    : config_(config) {
+  BackendConfig backendConfig;
+  backendConfig.modelPath = config_.modelPath;
+  backendConfig.backend = config_.backend;
+  backendConfig.precision = config_.precision;
+  backendConfig.numThreads = config_.numThreads;
+  backend_ = createBackend(backendConfig);
+  if (!backend_) return;
 
   // Use the model's own input size when it is fixed (e.g. exported at 320 or
   // 1280). Dynamic dimensions come back as -1 and keep the configured size.
-  if (inputShape_.size() == 4 && inputShape_[2] > 0 && inputShape_[3] > 0) {
-    config_.inputHeight = static_cast<int>(inputShape_[2]);
-    config_.inputWidth = static_cast<int>(inputShape_[3]);
+  const auto& inputShape = backend_->inputShape();
+  if (inputShape.size() == 4 && inputShape[2] > 0 && inputShape[3] > 0) {
+    config_.inputHeight = static_cast<int>(inputShape[2]);
+    config_.inputWidth = static_cast<int>(inputShape[3]);
   }
 
-  // Query output metadata
-  size_t numOutputs = session_->GetOutputCount();
-  for (size_t i = 0; i < numOutputs; i++) {
-    auto name = session_->GetOutputNameAllocated(i, allocator);
-    outputNames_.emplace_back(name.get());
-
-    auto typeInfo = session_->GetOutputTypeInfo(i);
-    auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
-    outputShape_ = tensorInfo.GetShape();
-  }
-
-  std::cout << "Model loaded: " << config_.modelPath << "\n";
-  std::cout << "  Input shape: [";
-  for (size_t i = 0; i < inputShape_.size(); i++) {
-    std::cout << inputShape_[i] << (i + 1 < inputShape_.size() ? ", " : "");
-  }
-  std::cout << "]\n";
-  std::cout << "  Output shape: [";
-  for (size_t i = 0; i < outputShape_.size(); i++) {
-    std::cout << outputShape_[i] << (i + 1 < outputShape_.size() ? ", " : "");
-  }
-  std::cout << "]\n";
+  std::cout << "Model loaded: " << config_.modelPath << " (backend "
+            << config_.backend << ", input " << config_.inputWidth << "x"
+            << config_.inputHeight << ")\n";
 }
 
-bool InferenceEngine::isLoaded() const { return session_ != nullptr; }
+bool InferenceEngine::isLoaded() const { return backend_ != nullptr; }
 
-std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame) {
+std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame,
+                                               StageTimes* times) {
   if (!isLoaded()) return {};
 
   // Validate input frame
@@ -114,39 +40,33 @@ std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame) {
     return {};
   }
 
-  // Preprocess: resize + normalize + HWC→CHW
-  auto inputData = preprocess(frame, config_.inputWidth, config_.inputHeight);
+  using Clock = std::chrono::steady_clock;
+  auto ms = [](Clock::time_point from, Clock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  auto start = Clock::now();
 
-  // Create input tensor
-  auto memoryInfo =
-      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  // Preprocess: resize + normalize + HWC→CHW
+  cv::Mat inputData =
+      preprocess(frame, config_.inputWidth, config_.inputHeight);
+  auto preDone = Clock::now();
 
   std::vector<int64_t> inputDims = {1, 3, config_.inputHeight,
-                                     config_.inputWidth};
-  Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
-      memoryInfo, inputData.ptr<float>(), inputData.total(), inputDims.data(),
-      inputDims.size());
-
-  // Build name arrays for Run() — needs const char* pointers
-  std::vector<const char*> inputNamePtrs;
-  for (const auto& name : inputNames_) inputNamePtrs.push_back(name.c_str());
-
-  std::vector<const char*> outputNamePtrs;
-  for (const auto& name : outputNames_) outputNamePtrs.push_back(name.c_str());
-
-  // Run inference
-  auto outputTensors = session_->Run(
-      Ort::RunOptions{nullptr}, inputNamePtrs.data(), &inputTensor,
-      inputNamePtrs.size(), outputNamePtrs.data(), outputNamePtrs.size());
-
-  // Extract output tensor data
-  const float* outputData = outputTensors[0].GetTensorData<float>();
-  auto outputInfo =
-      outputTensors[0].GetTensorTypeAndShapeInfo();
-  auto outputShape = outputInfo.GetShape();
+                                    config_.inputWidth};
+  std::vector<int64_t> outputShape;
+  const float* outputData =
+      backend_->run(inputData.ptr<float>(), inputDims, outputShape);
+  auto inferDone = Clock::now();
 
   // Postprocess: parse detections + NMS
-  return postprocess(outputData, outputShape, config_.confidenceThreshold,
-                     config_.nmsThreshold, frame.cols, frame.rows,
-                     config_.inputWidth, config_.inputHeight);
+  auto detections =
+      postprocess(outputData, outputShape, config_.confidenceThreshold,
+                  config_.nmsThreshold, frame.cols, frame.rows,
+                  config_.inputWidth, config_.inputHeight);
+  if (times) {
+    times->preMs = ms(start, preDone);
+    times->inferMs = ms(preDone, inferDone);
+    times->postMs = ms(inferDone, Clock::now());
+  }
+  return detections;
 }

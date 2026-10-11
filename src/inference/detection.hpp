@@ -10,6 +10,7 @@ struct Detection {
   int classId;
   float confidence;
   cv::Rect2f bbox;  // x, y, width, height in pixel coordinates
+  int trackId = -1;  // set by the tracker; -1 while the object is untracked
 };
 
 // COCO dataset class names (80 classes) — matches YOLOv8 default training

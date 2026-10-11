@@ -43,6 +43,29 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(httplib)
 
+# yaml-cpp (config file parser), linked statically
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG        0.8.0
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
+# ByteTrack (multi-object tracker). Only downloaded here: its own CMake file
+# builds a shared library, and a static one built in src/ needs no install
+# step. SOURCE_SUBDIR points at a directory without a CMakeLists.txt.
+FetchContent_Declare(
+    bytetrack
+    GIT_REPOSITORY https://github.com/Vertical-Beach/ByteTrack-cpp.git
+    GIT_TAG        d43805d461a714f65da039981bd5f5d21cf5cf59
+    SOURCE_SUBDIR  data
+)
+FetchContent_MakeAvailable(bytetrack)
+find_package(Eigen3 REQUIRED)
+
 # OpenCV — installed via system package manager (apt install libopencv-dev)
 find_package(OpenCV REQUIRED)
 
@@ -50,6 +73,37 @@ find_package(OpenCV REQUIRED)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 find_package(ONNXRuntime REQUIRED)
 
+# OpenVINO backend (Intel CPU / iGPU / NPU). Off when OpenVINO is not
+# installed, so the ONNX Runtime backends still build without it.
+find_package(OpenVINO QUIET COMPONENTS Runtime)
+option(WITH_OPENVINO "Build the OpenVINO backend" ${OpenVINO_FOUND})
+if(WITH_OPENVINO AND NOT OpenVINO_FOUND)
+    message(FATAL_ERROR "WITH_OPENVINO=ON but OpenVINO was not found; "
+                        "set OpenVINO_DIR to <openvino>/runtime/cmake")
+endif()
+message(STATUS "OpenVINO backend: ${WITH_OPENVINO}")
+
+# MQTT event publishing (apt install libmosquitto-dev). Without it the
+# application builds and runs, and a configured broker is reported as an
+# error at startup.
+find_library(MOSQUITTO_LIBRARY NAMES mosquitto)
+find_path(MOSQUITTO_INCLUDE_DIR NAMES mosquitto.h)
+if(MOSQUITTO_LIBRARY AND MOSQUITTO_INCLUDE_DIR)
+    set(_mqtt_found ON)
+else()
+    set(_mqtt_found OFF)
+endif()
+option(WITH_MQTT "Publish events over MQTT" ${_mqtt_found})
+if(WITH_MQTT AND NOT _mqtt_found)
+    message(FATAL_ERROR "WITH_MQTT=ON but libmosquitto was not found")
+endif()
+message(STATUS "MQTT publishing: ${WITH_MQTT}")
+
 # --- Subdirectories ---
 add_subdirectory(src)
-add_subdirectory(tests)
+
+# Off in the Docker images: the tests are not shipped
+option(BUILD_TESTS "Build the test executables" ON)
+if(BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
