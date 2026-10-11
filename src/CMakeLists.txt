@@ -72,6 +72,16 @@ if(WITH_TENSORRT)
     target_link_options(va_core INTERFACE -Wl,--allow-shlib-undefined)
 endif()
 
+if(WITH_NVMM)
+    target_sources(va_core PRIVATE capture/nvmm-frame.cpp)
+    target_compile_definitions(va_core PUBLIC WITH_NVMM)
+    target_include_directories(va_core PRIVATE
+        ${NVBUFSURFACE_INCLUDE_DIR} ${EGL_INCLUDE_DIR})
+    # libcuda for the EGL interop calls, libdl for libnvbufsurface.so,
+    # which exists only on the board and is loaded at run time
+    target_link_libraries(va_core PRIVATE CUDA::cuda_driver ${CMAKE_DL_LIBS})
+endif()
+
 if(WITH_MQTT)
     target_compile_definitions(va_core PRIVATE WITH_MQTT)
     target_include_directories(va_core PRIVATE ${MOSQUITTO_INCLUDE_DIR})

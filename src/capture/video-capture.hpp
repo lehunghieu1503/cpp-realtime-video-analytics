@@ -1,5 +1,7 @@
 #pragma once
 
+#include "device-frame.hpp"
+
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <string>
@@ -29,7 +31,10 @@ class IVideoCapture {
 public:
   virtual ~IVideoCapture() = default;
   virtual bool open(const CaptureConfig& config) = 0;
+  // A capture that keeps frames in device memory returns true with `frame`
+  // empty; the frame is then fetched with takeDeviceFrame()
   virtual bool read(cv::Mat& frame) = 0;
+  virtual std::shared_ptr<DeviceFrame> takeDeviceFrame() { return nullptr; }
   virtual void release() = 0;
   virtual bool isOpened() const = 0;
   virtual double getActualFps() const = 0;

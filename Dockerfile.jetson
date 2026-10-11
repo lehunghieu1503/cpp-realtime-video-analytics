@@ -14,14 +14,34 @@ ARG BASE_IMAGE=dustynv/onnxruntime:1.20.2-r36.4.0
 FROM ${BASE_IMAGE} AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git ca-certificates ccache \
+    build-essential cmake git ca-certificates ccache wget \
     libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libegl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# nvbufsurface.h, the interface to the Jetson's hardware video buffers, for
+# the zero-copy path. It ships in NVIDIA's multimedia API package, which
+# cannot be installed here (it depends on the board's driver packages), so
+# the package is downloaded from NVIDIA's repository and only the header is
+# taken out. The library itself comes from the board at run time.
+RUN wget -qO /etc/apt/trusted.gpg.d/jetson-ota-public.asc \
+        https://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
+    && echo "deb https://repo.download.nvidia.com/jetson/common r36.4 main" \
+        > /etc/apt/sources.list.d/nvidia-l4t.list \
+    && apt-get update && cd /tmp \
+    && apt-get download nvidia-l4t-jetson-multimedia-api \
+    && dpkg -x nvidia-l4t-jetson-multimedia-api_*.deb mmapi \
+    && cp mmapi/usr/src/jetson_multimedia_api/include/nvbufsurface.h \
+          /usr/local/include/ \
+    && rm -rf mmapi ./*.deb /etc/apt/sources.list.d/nvidia-l4t.list \
+          /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
 
+# The optional parts are asked for by name: left to detection, a part whose
+# dependency is missing would silently drop out of the image, and the cached
+# build directory would keep it out even after the dependency is added.
 # CUDA architecture 87 is the Orin's GPU: the pre-processing kernel is
 # compiled for it ahead of time instead of at the first frame.
 # The build directory and the compiler cache persist between builds, so a
@@ -31,6 +51,7 @@ RUN --mount=type=cache,target=/app/build \
     --mount=type=cache,target=/root/.ccache \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -DWITH_GSTREAMER=ON -DWITH_TENSORRT=ON -DWITH_NVMM=ON \
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
         -DCMAKE_CUDA_ARCHITECTURES=87 \
     && cmake --build build --parallel $(nproc) \

@@ -1,9 +1,11 @@
 #pragma once
 
+#include "capture/device-frame.hpp"
 #include "inference/detection.hpp"
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <opencv2/opencv.hpp>
 #include <vector>
 
@@ -11,7 +13,9 @@
 struct FrameData {
   uint64_t frameId;  // counts per stream
   std::chrono::steady_clock::time_point captureTime;
-  cv::Mat frame;
+  cv::Mat frame;  // empty when the frame is in device memory
+  // Set instead of `frame` by a capture that keeps frames on the device
+  std::shared_ptr<DeviceFrame> device;
   int streamId = 0;       // index into PipelineConfig::sources
   double decodeMs = 0.0;  // time inside the capture read (decode included)
 };
@@ -21,7 +25,10 @@ struct AnalyticsResult {
   uint64_t frameId;
   std::chrono::steady_clock::time_point captureTime;
   std::chrono::steady_clock::time_point inferenceDoneTime;
-  cv::Mat frame;  // original frame for overlay drawing
+  // Original frame for overlay drawing; empty when the frame stayed in
+  // device memory, see cpuFrame()
+  cv::Mat frame;
+  std::shared_ptr<DeviceFrame> device;
   std::vector<Detection> detections;
   double inferenceLatencyMs;  // capture → inference done, includes queue wait
   double detectMs = 0.0;      // time inside detect() only
@@ -31,4 +38,11 @@ struct AnalyticsResult {
   double preMs = 0.0;
   double inferMs = 0.0;
   double postMs = 0.0;
+
+  // The frame in system memory, copied from the device the first time it is
+  // asked for. Most frames never are: nobody draws on them.
+  cv::Mat& cpuFrame() {
+    if (frame.empty() && device) frame = device->toBgr();
+    return frame;
+  }
 };

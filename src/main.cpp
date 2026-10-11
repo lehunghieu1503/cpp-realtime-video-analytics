@@ -643,6 +643,9 @@ int runLive(const AppConfig& app) {
     bool needFrame = !app.headless || sseServer.hasViewers(s) ||
                      (!events.empty() && !app.snapshotDir.empty());
     if (needFrame) {
+      // A frame that stayed in device memory is copied to the CPU only now,
+      // because somebody is going to look at it
+      result.cpuFrame();
       drawDetections(result.frame, result.detections);
       if (stream.rules) drawRules(result.frame, *stream.rules);
       drawOverlay(result.frame, stream.fps.fps, result.inferenceLatencyMs,
@@ -696,7 +699,8 @@ int runLive(const AppConfig& app) {
 
     if (!app.headless) cv::imshow(stream.id, result.frame);
     sseServer.broadcast(json.dump(), s);
-    sseServer.updateFrame(result.frame, s);
+    // Skipped by the server too when nobody watches this stream
+    if (needFrame) sseServer.updateFrame(result.frame, s);
   }
 
   // A worker that gave up clears isRunning(); sources that simply ended

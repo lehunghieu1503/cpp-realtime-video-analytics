@@ -126,6 +126,26 @@ if(WITH_TENSORRT)
 endif()
 message(STATUS "Native TensorRT backend: ${WITH_TENSORRT}")
 
+# Zero-copy frames on a Jetson: hardware buffers (NVMM) go from the decoder
+# to the CUDA kernel without passing through system memory. Needs the two
+# options above, nvbufsurface.h from NVIDIA's multimedia API and the EGL
+# headers (apt install libegl-dev).
+find_path(NVBUFSURFACE_INCLUDE_DIR NAMES nvbufsurface.h
+          PATHS /usr/src/jetson_multimedia_api/include)
+find_path(EGL_INCLUDE_DIR NAMES EGL/egl.h)
+if(WITH_GSTREAMER AND WITH_TENSORRT AND NVBUFSURFACE_INCLUDE_DIR
+   AND EGL_INCLUDE_DIR)
+    set(_nvmm_found ON)
+else()
+    set(_nvmm_found OFF)
+endif()
+option(WITH_NVMM "Read Jetson NVMM frames without copying" ${_nvmm_found})
+if(WITH_NVMM AND NOT _nvmm_found)
+    message(FATAL_ERROR "WITH_NVMM=ON needs WITH_GSTREAMER, WITH_TENSORRT, "
+                        "nvbufsurface.h and the EGL headers")
+endif()
+message(STATUS "Zero-copy NVMM frames: ${WITH_NVMM}")
+
 # MQTT event publishing (apt install libmosquitto-dev). Without it the
 # application builds and runs, and a configured broker is reported as an
 # error at startup.

@@ -38,15 +38,10 @@ std::string InferenceEngine::layerProfile() const {
 
 bool InferenceEngine::isLoaded() const { return backend_ != nullptr; }
 
-std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame,
-                                               StageTimes* times) {
+std::vector<Detection> InferenceEngine::detect(const cv::Mat& input,
+                                               StageTimes* times,
+                                               DeviceFrame* device) {
   if (!isLoaded()) return {};
-
-  // Validate input frame
-  if (frame.empty() || frame.channels() != 3) {
-    std::cerr << "detect(): invalid frame (empty or not 3-channel BGR)\n";
-    return {};
-  }
 
   using Clock = std::chrono::steady_clock;
   auto ms = [](Clock::time_point from, Clock::time_point to) {
@@ -57,7 +52,36 @@ std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame,
   std::vector<int64_t> outputShape;
   const float* outputData = nullptr;
   Clock::time_point preDone;
-  if (config_.devicePreprocess && backend_->preprocessesFrames()) {
+  int frameWidth = 0;
+  int frameHeight = 0;
+
+  // Best case: the frame is on the device and the backend reads it there
+  if (device && config_.devicePreprocess) {
+    double preMs = 0.0;
+    outputData = backend_->runDeviceFrame(*device, outputShape, &preMs);
+    if (outputData) {
+      preDone = start + std::chrono::duration_cast<Clock::duration>(
+                            std::chrono::duration<double, std::milli>(preMs));
+      frameWidth = device->width();
+      frameHeight = device->height();
+    }
+  }
+
+  cv::Mat frame = input;
+  if (!outputData) {
+    // The backend needs the pixels in system memory
+    if (frame.empty() && device) frame = device->toBgr();
+    if (frame.empty() || frame.channels() != 3) {
+      std::cerr << "detect(): invalid frame (empty or not 3-channel BGR)\n";
+      return {};
+    }
+    frameWidth = frame.cols;
+    frameHeight = frame.rows;
+  }
+
+  if (outputData) {
+    // Done above, on the device
+  } else if (config_.devicePreprocess && backend_->preprocessesFrames()) {
     // The backend takes the frame as captured and prepares it on its device
     double preMs = 0.0;
     outputData = backend_->runFrame(frame, outputShape, &preMs);
@@ -78,7 +102,7 @@ std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame,
   // Postprocess: parse detections + NMS
   auto detections =
       postprocess(outputData, outputShape, config_.confidenceThreshold,
-                  config_.nmsThreshold, frame.cols, frame.rows,
+                  config_.nmsThreshold, frameWidth, frameHeight,
                   config_.inputWidth, config_.inputHeight);
   if (times) {
     times->preMs = ms(start, preDone);

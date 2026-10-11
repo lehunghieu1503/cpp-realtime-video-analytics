@@ -167,6 +167,7 @@ void Pipeline::captureLoop(int streamId) {
     fd.decodeMs =
         std::chrono::duration<double, std::milli>(now - readStart).count();
     fd.frame = std::move(frame);
+    fd.device = capture.takeDeviceFrame();
     stats.framesCaptured++;
 
     frameQueue_.push(std::move(fd));
@@ -190,7 +191,7 @@ void Pipeline::inferenceWorker(int workerId) {
     std::vector<Detection> detections;
     StageTimes times;
     try {
-      detections = engine->detect(fd.frame, &times);
+      detections = engine->detect(fd.frame, &times, fd.device.get());
     } catch (const std::exception& e) {
       // An exception leaving a std::thread would terminate the process
       std::cerr << "Pipeline: inference failed, stopping: " << e.what()
@@ -207,6 +208,7 @@ void Pipeline::inferenceWorker(int workerId) {
     result.captureTime = fd.captureTime;
     result.inferenceDoneTime = now;
     result.frame = std::move(fd.frame);
+    result.device = std::move(fd.device);
     result.detections = std::move(detections);
     result.inferenceLatencyMs =
         std::chrono::duration<double, std::milli>(now - fd.captureTime).count();

@@ -6,7 +6,9 @@ typedef struct _GstElement GstElement;
 
 // Runs a GStreamer pipeline directly, through its appsink, instead of going
 // through OpenCV's wrapper. The pipeline description must contain an
-// appsink that delivers video/x-raw in BGR, BGRx, RGBA or RGBx.
+// appsink that delivers video/x-raw in BGR, BGRx, RGBA or RGBx. On a Jetson
+// it may instead deliver video/x-raw(memory:NVMM),format=RGBA: the frames
+// then stay in the hardware buffers (see NvmmFrame).
 //
 // Owning the pipeline gives what the wrapper hides: the reason a pipeline
 // failed (from its bus), end-of-stream as a distinct result, and access to
@@ -20,6 +22,9 @@ public:
 
   bool open(const CaptureConfig& config) override;
   bool read(cv::Mat& frame) override;
+  std::shared_ptr<DeviceFrame> takeDeviceFrame() override {
+    return std::move(deviceFrame_);
+  }
   void release() override;
   bool isOpened() const override { return pipeline_ != nullptr; }
   double getActualFps() const override { return fps_ > 0 ? fps_ : 30.0; }
@@ -36,4 +41,5 @@ private:
   int height_ = 0;
   double fps_ = 0.0;
   std::string format_;
+  std::shared_ptr<DeviceFrame> deviceFrame_;
 };

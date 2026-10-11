@@ -9,6 +9,7 @@
 namespace cv {
 class Mat;
 }
+class DeviceFrame;
 
 // What a backend needs to load a model. Pre-process, post-process and NMS are
 // shared by every backend (see InferenceEngine), so benchmarks compare only
@@ -50,6 +51,15 @@ public:
   virtual const float* runFrame(const cv::Mat& /*bgr*/,
                                 std::vector<int64_t>& /*outputShape*/,
                                 double* /*preprocessMs*/) {
+    return nullptr;
+  }
+
+  // Same, for a frame that is already in device memory. Returns nullptr
+  // when the backend cannot read that kind of frame in place; the caller
+  // then copies it to the CPU.
+  virtual const float* runDeviceFrame(DeviceFrame& /*frame*/,
+                                      std::vector<int64_t>& /*outputShape*/,
+                                      double* /*preprocessMs*/) {
     return nullptr;
   }
 

@@ -1,6 +1,13 @@
 #include "tensorrt-backend.hpp"
 #include "cuda-preprocess.hpp"
 
+#ifdef WITH_NVMM
+#include "capture/nvmm-frame.hpp"
+
+#include <cuda.h>
+#include <cudaEGL.h>
+#endif
+
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
 #include <cuda_runtime.h>
@@ -415,16 +422,7 @@ const float* TensorRtBackend::run(const float* input,
   check(cudaMemcpyAsync(impl_->inputDevice, input, impl_->inputBytes,
                         cudaMemcpyHostToDevice, impl_->stream),
         "upload input");
-  if (!impl_->context->enqueueV3(impl_->stream)) {
-    throw std::runtime_error("TensorRT inference failed");
-  }
-  check(cudaMemcpyAsync(impl_->outputHost, impl_->outputDevice,
-                        impl_->outputBytes, cudaMemcpyDeviceToHost,
-                        impl_->stream),
-        "download output");
-  check(cudaStreamSynchronize(impl_->stream), "inference");
-  outputShape = outputShape_;
-  return impl_->outputHost;
+  return infer(outputShape);
 }
 
 const float* TensorRtBackend::runFrame(const cv::Mat& bgr,
@@ -458,6 +456,10 @@ const float* TensorRtBackend::runFrame(const cv::Mat& bgr,
                         .count();
   }
 
+  return infer(outputShape);
+}
+
+const float* TensorRtBackend::infer(std::vector<int64_t>& outputShape) {
   if (!impl_->context->enqueueV3(impl_->stream)) {
     throw std::runtime_error("TensorRT inference failed");
   }
@@ -468,6 +470,62 @@ const float* TensorRtBackend::runFrame(const cv::Mat& bgr,
   check(cudaStreamSynchronize(impl_->stream), "inference");
   outputShape = outputShape_;
   return impl_->outputHost;
+}
+
+const float* TensorRtBackend::runDeviceFrame(
+    DeviceFrame& frame, std::vector<int64_t>& outputShape,
+    double* preprocessMs) {
+#ifdef WITH_NVMM
+  auto* nvmm = dynamic_cast<NvmmFrame*>(&frame);
+  if (!nvmm) return nullptr;
+
+  auto start = std::chrono::steady_clock::now();
+  // The driver API below needs this thread's CUDA context, which the
+  // runtime API sets up on its first call from a thread
+  check(cudaStreamSynchronize(impl_->stream), "stream");
+
+  // Hand the decoder's buffer to CUDA as it is: registering the EGLImage
+  // maps the same memory, it does not copy it
+  CUgraphicsResource resource = nullptr;
+  if (cuGraphicsEGLRegisterImage(&resource, nvmm->mapEglImage(),
+                                 CU_GRAPHICS_MAP_RESOURCE_FLAGS_READ_ONLY) !=
+      CUDA_SUCCESS) {
+    nvmm->unmapEglImage();
+    throw std::runtime_error("CUDA cannot register the NVMM buffer");
+  }
+  CUeglFrame mapped;
+  bool usable =
+      cuGraphicsResourceGetMappedEglFrame(&mapped, resource, 0, 0) ==
+          CUDA_SUCCESS &&
+      mapped.frameType == CU_EGL_FRAME_TYPE_PITCH;
+  if (usable) {
+    GpuImage image{static_cast<const unsigned char*>(mapped.frame.pPitch[0]),
+                   static_cast<int>(mapped.width),
+                   static_cast<int>(mapped.height),
+                   static_cast<int>(mapped.pitch), /*channels=*/4,
+                   /*redIndex=*/0};
+    cudaPreprocess(image, impl_->inputDevice, static_cast<int>(inputShape_[3]),
+                   static_cast<int>(inputShape_[2]), impl_->stream);
+    // The kernel must be done reading before the buffer is released
+    check(cudaStreamSynchronize(impl_->stream), "pre-process");
+  }
+  cuGraphicsUnregisterResource(resource);
+  nvmm->unmapEglImage();
+  if (!usable) {
+    throw std::runtime_error("the NVMM buffer is not a pitch-linear image");
+  }
+  if (preprocessMs) {
+    *preprocessMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+  }
+  return infer(outputShape);
+#else
+  (void)frame;
+  (void)outputShape;
+  (void)preprocessMs;
+  return nullptr;
+#endif
 }
 
 std::string TensorRtBackend::layerProfile() const {

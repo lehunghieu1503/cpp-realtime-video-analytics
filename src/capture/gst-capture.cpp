@@ -1,4 +1,7 @@
 #include "gst-capture.hpp"
+#ifdef WITH_NVMM
+#include "nvmm-frame.hpp"
+#endif
 
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
@@ -96,10 +99,35 @@ bool GstCapture::read(cv::Mat& frame) {
     return false;
   }
 
+  GstCaps* caps = gst_sample_get_caps(sample);
+  if (gst_caps_features_contains(gst_caps_get_features(caps, 0),
+                                 "memory:NVMM")) {
+#ifdef WITH_NVMM
+    try {
+      // The frame keeps the sample, and with it the hardware buffer
+      auto nvmm = std::make_shared<NvmmFrame>(sample);
+      width_ = nvmm->width();
+      height_ = nvmm->height();
+      format_ = "RGBA (NVMM)";
+      deviceFrame_ = std::move(nvmm);
+      frame.release();
+      return true;
+    } catch (const std::exception& e) {
+      std::cerr << "GStreamer: " << e.what() << "\n";
+      return false;
+    }
+#else
+    std::cerr << "GStreamer: this build cannot read NVMM memory; add "
+                 "\"nvvidconv ! video/x-raw,format=BGRx\" before the appsink\n";
+    gst_sample_unref(sample);
+    return false;
+#endif
+  }
+
   GstVideoInfo info;
   GstBuffer* buffer = gst_sample_get_buffer(sample);
   GstMapInfo map;
-  bool ok = gst_video_info_from_caps(&info, gst_sample_get_caps(sample)) &&
+  bool ok = gst_video_info_from_caps(&info, caps) &&
             gst_buffer_map(buffer, &map, GST_MAP_READ);
   if (!ok) {
     std::cerr << "GStreamer: cannot read the sample\n";

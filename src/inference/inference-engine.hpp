@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backends/inference-backend.hpp"
+#include "capture/device-frame.hpp"
 #include "detection.hpp"
 
 #include <memory>
@@ -48,8 +49,12 @@ public:
   explicit InferenceEngine(const InferenceConfig& config);
 
   // Run object detection on a BGR frame, returns detected objects
+  // `device`, when given, is the same frame in device memory; `frame` may
+  // then be empty, and is filled from it only if the backend needs the CPU
+  // copy
   std::vector<Detection> detect(const cv::Mat& frame,
-                                StageTimes* times = nullptr);
+                                StageTimes* times = nullptr,
+                                DeviceFrame* device = nullptr);
 
   // Check if model was loaded successfully
   bool isLoaded() const;
