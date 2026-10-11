@@ -1,6 +1,27 @@
+# ByteTrack-cpp appends every track it removes to a list it never clears and
+# searches on every frame: memory grows without bound and each update gets
+# slower (60 000 frames of short-lived tracks: 6 s for the first third, 31 s
+# for the last). Only the tracks removed in the current frame can still be
+# in the lost list that this list is subtracted from, so keeping just those
+# is equivalent. The patched copy is regenerated at every configure, so a
+# cached download cannot bring the original back.
+file(READ ${bytetrack_SOURCE_DIR}/src/BYTETracker.cpp _bytetracker_source)
+set(_bytetracker_leak
+    "removed_stracks_ = jointStracks(removed_stracks_, current_removed_stracks);")
+string(FIND "${_bytetracker_source}" "${_bytetracker_leak}" _bytetracker_at)
+if(_bytetracker_at EQUAL -1)
+    message(FATAL_ERROR "ByteTrack changed: the removed-tracks fix no longer "
+                        "applies, check src/BYTETracker.cpp")
+endif()
+string(REPLACE "${_bytetracker_leak}"
+       "removed_stracks_ = current_removed_stracks;"
+       _bytetracker_source "${_bytetracker_source}")
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bytetrack-patched/BYTETracker.cpp
+     "${_bytetracker_source}")
+
 # Third-party tracker, built without our warning flags
 add_library(bytetrack STATIC
-    ${bytetrack_SOURCE_DIR}/src/BYTETracker.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/bytetrack-patched/BYTETracker.cpp
     ${bytetrack_SOURCE_DIR}/src/KalmanFilter.cpp
     ${bytetrack_SOURCE_DIR}/src/lapjv.cpp
     ${bytetrack_SOURCE_DIR}/src/Object.cpp
