@@ -49,6 +49,13 @@ jobs:
           build/tests/test_inference
           build/tests/test_capture_timestamps
 
+      # Geometry, filter and protocol code of the simulation; no simulator,
+      # ROS or device is involved
+      - name: Run the Python tests
+        run: |
+          pip install numpy pyyaml
+          python3 -m unittest discover -s ros2/video_analytics_simulation/test -p 'test_*.py'
+
   sanitizers:
     runs-on: ubuntu-22.04
     strategy:
