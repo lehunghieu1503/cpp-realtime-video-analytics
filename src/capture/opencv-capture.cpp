@@ -1,4 +1,7 @@
 #include "opencv-capture.hpp"
+#ifdef WITH_GSTREAMER
+#include "gst-capture.hpp"
+#endif
 
 #include <cstring>
 #include <iostream>
@@ -15,6 +18,16 @@ bool OpenCvCapture::open(const CaptureConfig& config) {
       return false;
     }
     return true;  // skip codec/resolution settings for video files
+  }
+
+  if (!config.gstPipeline.empty()) {
+    cap_.open(config.gstPipeline, cv::CAP_GSTREAMER);
+    if (!cap_.isOpened()) {
+      std::cerr << "Failed to open GStreamer pipeline: " << config.gstPipeline
+                << "\n";
+      return false;
+    }
+    return true;  // size, rate and format are set inside the pipeline
   }
 
   cap_.open(config.deviceIndex);
@@ -64,10 +77,19 @@ std::string OpenCvCapture::getInfo() const {
   std::memcpy(fmt, &fourcc, 4);
 
   std::ostringstream ss;
-  ss << "Camera " << config_.deviceIndex << ": "
+  ss << config_.id << ": "
      << static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH)) << "x"
      << static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)) << " @ "
      << cap_.get(cv::CAP_PROP_FPS) << " FPS"
      << " format=" << fmt;
   return ss.str();
+}
+
+std::unique_ptr<IVideoCapture> createCapture(const CaptureConfig& config) {
+#ifdef WITH_GSTREAMER
+  if (!config.gstPipeline.empty()) return std::make_unique<GstCapture>();
+#else
+  (void)config;
+#endif
+  return std::make_unique<OpenCvCapture>();
 }

@@ -362,6 +362,84 @@ void testPostprocess() {
     test::assert_equal(dets[0].bbox.height, 30.0f, 0.001f,
                        "Clipped bbox height is the visible 30 px");
   }
+
+  // Three candidates, shape [1, 84, 3]: each keeps its own best class, and
+  // the one below the threshold is dropped
+  std::vector<float> multi(84 * 3, 0.0f);
+  auto at = [&multi](int feature, int candidate) -> float& {
+    return multi[feature * 3 + candidate];
+  };
+  at(0, 0) = 100.0f; at(1, 0) = 100.0f; at(2, 0) = 50.0f; at(3, 0) = 50.0f;
+  at(4 + 2, 0) = 0.6f;
+  at(4 + 5, 0) = 0.9f;
+  at(0, 1) = 400.0f; at(1, 1) = 300.0f; at(2, 1) = 60.0f; at(3, 1) = 60.0f;
+  at(4 + 17, 1) = 0.8f;
+  at(0, 2) = 250.0f; at(1, 2) = 500.0f; at(2, 2) = 40.0f; at(3, 2) = 40.0f;
+  at(4 + 79, 2) = 0.3f;
+  auto multiDets =
+      postprocess(multi.data(), {1, 84, 3}, 0.5f, 0.45f, 640, 640, 640, 640);
+  test::assert_true(multiDets.size() == 2, "Two of three candidates pass");
+  if (multiDets.size() == 2) {
+    // NMS returns the highest confidence first
+    test::assert_true(multiDets[0].classId == 5, "Best class of candidate 0");
+    test::assert_equal(multiDets[0].confidence, 0.9f, 0.001f,
+                       "Best score of candidate 0");
+    test::assert_true(multiDets[1].classId == 17, "Best class of candidate 1");
+  }
+}
+
+// Test 8: every backend available in this build agrees with the CPU baseline
+void testBackendParity() {
+  std::cout << "\n=== Test 8: Backend Parity ===\n";
+
+  cv::Mat image = cv::imread("tests/test-image.jpg");
+  InferenceConfig config;
+  config.modelPath = "models/yolov8n.onnx";
+  InferenceEngine baseline(config);
+  if (image.empty() || !baseline.isLoaded()) {
+    std::cout << "  [SKIP] Model or tests/test-image.jpg missing\n";
+    return;
+  }
+  auto expected = baseline.detect(image);
+  test::assert_true(!expected.empty(), "CPU baseline detects something");
+
+  // Backends the machine lacks print their reason and are skipped
+  for (const char* name :
+       {"cuda", "tensorrt", "tensorrt-native", "openvino:CPU", "openvino:GPU",
+        "openvino:NPU"}) {
+    config.backend = name;
+    InferenceEngine engine(config);
+    if (!engine.isLoaded()) {
+      std::cout << "  [SKIP] " << name << " not available\n";
+      continue;
+    }
+    auto actual = engine.detect(image);
+    // Accelerators run FP16, so allow small differences in score and box
+    bool same = actual.size() == expected.size();
+    for (size_t i = 0; same && i < actual.size(); i++) {
+      cv::Rect2f overlap = actual[i].bbox & expected[i].bbox;
+      float iou = overlap.area() / (actual[i].bbox.area() +
+                                    expected[i].bbox.area() - overlap.area());
+      same = actual[i].classId == expected[i].classId && iou > 0.9f &&
+             std::abs(actual[i].confidence - expected[i].confidence) < 0.05f;
+    }
+    test::assert_true(same, std::string(name) + " matches the CPU detections");
+  }
+
+  // tensorrt-native above pre-processed on the GPU; its CPU path must agree
+  config.backend = "tensorrt-native";
+  config.devicePreprocess = false;
+  InferenceEngine cpuPath(config);
+  if (cpuPath.isLoaded()) {
+    auto actual = cpuPath.detect(image);
+    bool same = actual.size() == expected.size();
+    for (size_t i = 0; same && i < actual.size(); i++) {
+      same = actual[i].classId == expected[i].classId &&
+             std::abs(actual[i].confidence - expected[i].confidence) < 0.05f;
+    }
+    test::assert_true(same,
+                      "tensorrt-native with CPU pre-processing matches too");
+  }
 }
 
 int main() {
@@ -380,6 +458,7 @@ int main() {
   testMultipleInferences();
   testCocoClassNames();
   testPostprocess();
+  testBackendParity();
 
   // Print summary
   std::cout << "\n==================================================\n";

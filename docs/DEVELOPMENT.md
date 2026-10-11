@@ -6,30 +6,34 @@
 - **Compiler:** GCC 11+ or Clang 14+ with C++17 support
 - **CMake:** 3.20+
 - **OpenCV:** 4.6+ (`sudo apt install libopencv-dev`)
-- **ONNX Runtime:** 1.17.0 (see installation below)
+- **ONNX Runtime:** 1.20.1 (see installation below)
+- **Eigen:** 3.3+ (`sudo apt install libeigen3-dev`), needed by the tracker
+- **libmosquitto:** optional (`sudo apt install libmosquitto-dev`); without it
+  the build has no MQTT
+- **OpenVINO:** optional; pass `-DOpenVINO_DIR=<openvino>/runtime/cmake` to
+  build the `openvino:*` backends
 - **USB Camera:** V4L2 compatible (check with `v4l2-ctl --list-devices`)
 
 ## Install ONNX Runtime
 
 ```bash
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
-tar xzf onnxruntime-linux-x64-1.17.0.tgz
-sudo cp onnxruntime-linux-x64-1.17.0/lib/* /usr/local/lib/
-sudo cp -r onnxruntime-linux-x64-1.17.0/include/* /usr/local/include/
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+tar xzf onnxruntime-linux-x64-1.20.1.tgz
+sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
 sudo ldconfig
 ```
 
 For GPU support (FP16 inference), install `onnxruntime-gpu` instead:
 ```bash
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-gpu-1.20.1.tgz
 ```
 
 ## Get YOLOv8 Model
 
 ```bash
 pip install ultralytics
-yolo export model=yolov8n.pt format=onnx
-mkdir -p models && mv yolov8n.onnx models/
+scripts/download-model.sh
 ```
 
 ## Build
@@ -80,12 +84,14 @@ build/tests/test_pipeline
 build/tests/test_serializer
 build/tests/test_latency_tracker
 build/tests/test_sse_server
+build/tests/test_rules
 build/tests/test_inference
 ```
 
 Test structure:
-- `test_pipeline` — BoundedQueue operations, thread safety, FrameData structs
-- `test_inference` — ONNX model load, tensor shapes, detection output, latency
+- `test_pipeline` — BoundedQueue and StreamQueue operations, fairness, thread safety, FrameData structs
+- `test_inference` — model load, tensor shapes, detection output, latency, backend parity
+- `test_rules` — line crossing, zones, dwell time, tracker ids, YAML config
 - `test_serializer` — JSON serialization, rounding, class name mapping
 - `test_latency_tracker` — Percentile math, report generation
 - `test_sse_server` — SSE event delivery, worker thread release on disconnect
@@ -117,8 +123,51 @@ in the `video` group; if the host's `video` group has a different GID, add
 **Production Dockerfile**
 - Multi-stage build reduces image size
 - Non-root user (`appuser`) for security
-- ONNX Runtime 1.17.0 with CPU support
+- ONNX Runtime 1.20.1 with CPU support
 - Ubuntu 22.04 base with minimal OpenCV runtime dependencies
+
+### Jetson (JetPack 6, aarch64)
+
+`Dockerfile` is x86-64 and CPU only. On a Jetson Orin use `Dockerfile.jetson`,
+built on the board itself:
+
+```bash
+docker build -f Dockerfile.jetson -t video-analytics:jetson .
+
+docker run --rm --runtime nvidia --device /dev/video0 \
+  -v "$(pwd)/models:/app/models:ro" -p 9001:9001 video-analytics:jetson
+```
+
+- Base `dustynv/onnxruntime:1.20.2-r36.4.0` (~6 GB download): CUDA 12.6,
+  TensorRT 10, ONNX Runtime 1.20.2 with the CUDA and TensorRT providers
+- `--runtime nvidia` mounts the host GPU driver into the container
+- Inference runs on the CPU unless `--backend cuda` or `--backend tensorrt`
+  is passed
+
+TensorRT (FP16) is the fastest option on a Jetson. The first start builds the
+engine, which takes a few minutes, and caches it in `models/trt-cache/`, so
+mount `models` writable (the container user has UID 1000):
+
+```bash
+docker run --rm --runtime nvidia --device /dev/video0 \
+  -v "$(pwd)/models:/app/models" -p 9001:9001 video-analytics:jetson \
+  --backend tensorrt
+```
+
+The engine is built from the FP32 model; `scripts/quantize-fp16.py` is not
+needed with `--backend tensorrt`.
+
+`--device` opens USB (UVC) cameras. A CSI camera needs a GStreamer pipeline:
+
+```bash
+build/src/video_analytics --headless --backend tensorrt --gst \
+  "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 \
+   ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR \
+   ! appsink drop=true max-buffers=1"
+```
+
+In Docker, `nvarguscamerasrc` also needs `-v /tmp/argus_socket:/tmp/argus_socket`
+(not tested).
 
 ## Profiling
 

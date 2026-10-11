@@ -7,3 +7,9 @@ plans/
 docs/
 *.md
 src/main_bck.cpp
+
+# Not needed to build, and large
+models/
+deploy/
+tests/
+*.tar

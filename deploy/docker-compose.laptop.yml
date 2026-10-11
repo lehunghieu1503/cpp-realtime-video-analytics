@@ -1,0 +1,31 @@
+# Additions for an x86 laptop with an Intel NPU, merged over
+# docker-compose.yml. Started by scripts/run-laptop.sh.
+services:
+  app:
+    command: ["--config", "/app/config/laptop.yaml"]
+    # Only this machine can reach the services
+    ports: !override
+      - "127.0.0.1:9001:9001"
+    volumes:
+      # Models and test videos stay where the repository keeps them
+      - ../models:/app/models
+      - ../data/videos:/data/videos:ro
+    devices:
+      - /dev/accel/accel0   # Intel NPU
+    # The NPU node belongs to the host's render group, whose id differs
+    # between machines; run-laptop.sh looks it up
+    group_add:
+      - "${RENDER_GID:?run scripts/run-laptop.sh, or set RENDER_GID}"
+
+  mosquitto:
+    # 1884: a broker installed on the laptop usually owns 1883
+    ports: !override
+      - "127.0.0.1:1884:1883"
+
+  prometheus:
+    ports: !override
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    ports: !override
+      - "127.0.0.1:3000:3000"

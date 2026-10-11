@@ -7,6 +7,7 @@
 
 #include "pipeline/bounded-queue.hpp"
 #include "pipeline/frame-data.hpp"
+#include "pipeline/stream-queue.hpp"
 
 // Test utilities
 namespace test {
@@ -419,6 +420,61 @@ void test_bounded_queue_with_analytics_result() {
 // Main Test Runner
 // ============================================================================
 
+// ============================================================================
+// TEST SUITE 6: StreamQueue (per-stream slots, round-robin)
+// ============================================================================
+
+FrameData makeFrame(int streamId, uint64_t frameId) {
+  FrameData frame;
+  frame.streamId = streamId;
+  frame.frameId = frameId;
+  return frame;
+}
+
+void test_stream_queue_is_fair() {
+  std::cout << "\n[TEST SUITE 6] StreamQueue\n";
+
+  // Stream 0 floods the queue, stream 1 pushes once
+  StreamQueue q(2, 2);
+  for (uint64_t i = 0; i < 10; i++) q.push(makeFrame(0, i));
+  q.push(makeFrame(1, 100));
+  test::assert_eq(q.size(0), 2UL, "StreamQueue: a stream keeps `depth` frames");
+  test::assert_eq(q.size(1), 1UL,
+                  "StreamQueue: a busy stream does not evict another's frame");
+
+  auto a = q.pop();
+  auto b = q.pop();
+  auto c = q.pop();
+  test::assert_true(a && a->streamId == 0 && a->frameId == 8,
+                    "StreamQueue: the oldest frames of a full stream are dropped");
+  test::assert_true(b && b->streamId == 1,
+                    "StreamQueue: streams are served in turn");
+  test::assert_true(c && c->streamId == 0 && c->frameId == 9,
+                    "StreamQueue: back to the first stream");
+}
+
+void test_stream_queue_stop() {
+  StreamQueue q(2, 1);
+  q.push(makeFrame(1, 7));
+  q.stop();
+  auto left = q.pop();
+  test::assert_true(left && left->frameId == 7,
+                    "StreamQueue: frames queued before stop() are drained");
+  test::assert_true(!q.pop().has_value(),
+                    "StreamQueue: pop() returns nullopt once stopped and empty");
+
+  StreamQueue blocked(1, 1);
+  std::atomic<bool> returned{false};
+  std::thread consumer([&] {
+    blocked.pop();
+    returned = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  blocked.stop();
+  consumer.join();
+  test::assert_true(returned, "StreamQueue: stop() unblocks a waiting pop()");
+}
+
 int main() {
   std::cout << "========================================\n";
   std::cout << "  Real-Time Video Analytics Pipeline Tests\n";
@@ -449,6 +505,10 @@ int main() {
   test_analytics_result_creation();
   test_bounded_queue_with_frame_data();
   test_bounded_queue_with_analytics_result();
+
+  // Suite 6: StreamQueue
+  test_stream_queue_is_fair();
+  test_stream_queue_stop();
 
   // Summary
   std::cout << "\n========================================\n";

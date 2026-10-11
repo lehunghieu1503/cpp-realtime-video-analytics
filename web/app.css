@@ -8,17 +8,68 @@ body {
 }
 
 .container {
-  max-width: 960px;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 16px;
 }
 
 h1 {
+  display: flex;
+  align-items: center;
   font-size: 1.4rem;
   font-weight: 600;
   margin-bottom: 12px;
   color: #00ff88;
 }
+
+h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 16px 0 8px;
+  color: #9a9a9a;
+}
+
+/* One column per stream until they get narrower than 420px */
+.streams {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  background: #141414;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.card-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 2px 4px 8px;
+}
+
+.card .stats-bar {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+}
+
+.det-item.zone strong { color: #ffc800; }
+.det-item.line strong { color: #4d9dff; }
+
+.event-log {
+  background: #141414;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  max-height: 260px;
+  overflow-y: auto;
+  white-space: pre;
+}
+
+.event-log:empty::before { content: "No events yet"; color: #666; }
+.event.dwell_time { color: #ffc800; }
+.event.line_cross { color: #4d9dff; }
 
 .stats-bar {
   display: flex;
@@ -48,10 +99,10 @@ h1 {
   background: #111;
   border-radius: 8px;
   overflow: hidden;
-  aspect-ratio: 4/3;
+  aspect-ratio: 16/9;
 }
 
-#camera {
+.video-wrapper img {
   width: 100%;
   height: 100%;
   object-fit: contain;

@@ -1,0 +1,8 @@
+# Jetson additions, merged over docker-compose.yml
+services:
+  app:
+    # Brings the board's GPU driver and libraries into the container
+    runtime: nvidia
+    # For a USB camera add:
+    # devices:
+    #   - /dev/video0

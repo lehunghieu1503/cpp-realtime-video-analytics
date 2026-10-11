@@ -1,0 +1,37 @@
+# Two RTSP cameras decoded by the Jetson's hardware decoder, with the frames
+# kept in its buffers all the way to the network input (zero-copy). Used by
+# docker-compose.sim.yml, whose rtsp-sim service plays the cameras.
+# Same keys as config.yaml, which documents them.
+
+model: models/yolo11s.onnx
+# The native backend is the one that can read the decoder's buffers
+backend: tensorrt-native
+precision: fp16
+confidence: 0.4
+classes: [person]
+dwell_seconds: 5
+
+sources:
+  # rtspsrc → depay → parse → nvv4l2decoder leaves each frame in NVMM
+  # memory; nvvidconv converts it to RGBA there. Ending the pipeline in
+  # video/x-raw(memory:NVMM) hands that buffer to the application as it is.
+  - id: h264
+    gst: "rtspsrc location=rtsp://rtsp-sim:8554/cam-h264 protocols=tcp latency=100 ! rtph264depay ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw(memory:NVMM),format=RGBA ! appsink max-buffers=2 drop=true"
+    lines:
+      - name: crossing
+        a: [0, 540]
+        b: [1920, 540]
+  - id: h265
+    gst: "rtspsrc location=rtsp://rtsp-sim:8554/cam-h265 protocols=tcp latency=100 ! rtph265depay ! h265parse ! nvv4l2decoder ! nvvidconv ! video/x-raw(memory:NVMM),format=RGBA ! appsink max-buffers=2 drop=true"
+    zones:
+      - name: centre
+        points: [[600, 300], [1320, 300], [1320, 780], [600, 780]]
+
+mqtt:
+  host: mosquitto
+  port: 1883
+  topic: video-analytics
+
+snapshots:
+  dir: snapshots
+  keep: 200

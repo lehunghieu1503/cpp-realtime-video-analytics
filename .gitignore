@@ -1,5 +1,6 @@
 # Build
 build/
+build-*/
 cmake-build-*/
 
 # IDE
@@ -25,3 +26,16 @@ plans/
 
 # Documentation records
 docs/journals/
+
+# Datasets and benchmark output
+data/
+models/*.calibration
+models/*.xml
+models/*.bin
+
+# Local run of the deploy stack
+deploy/snapshots/
+deploy/.env
+deploy/secrets/
+deploy/prometheus-data/
+models/trt-cache/

@@ -29,27 +29,33 @@ std::vector<Detection> postprocess(const float* outputData,
   std::vector<cv::Rect2f> bboxes;  // float precision for accurate NMS
   std::vector<cv::Rect> nmsBoxes;  // int version required by cv::dnn::NMSBoxes
 
+  // YOLOv8 output is [1, 84, 8400] — data layout is feature-major:
+  //   outputData[feature * 8400 + candidate]
+  // First 4 features = bbox (cx, cy, w, h), remaining = class scores
+
+  // Find best class score for every candidate, one class row at a time so
+  // the tensor is read in memory order
+  std::vector<float> bestScores(numCandidates, 0.0f);
+  std::vector<int> bestClassIds(numCandidates, 0);
+  for (int c = 0; c < numClasses; c++) {
+    const float* scores = outputData + (4 + c) * numCandidates;
+    for (int i = 0; i < numCandidates; i++) {
+      if (scores[i] > bestScores[i]) {
+        bestScores[i] = scores[i];
+        bestClassIds[i] = c;
+      }
+    }
+  }
+
   for (int i = 0; i < numCandidates; i++) {
-    // YOLOv8 output is [1, 84, 8400] — data layout is feature-major:
-    //   outputData[feature * 8400 + candidate]
-    // First 4 features = bbox (cx, cy, w, h), remaining = class scores
+    float bestScore = bestScores[i];
+    int bestClassId = bestClassIds[i];
+    if (bestScore < confThreshold) continue;
+
     float cx = outputData[0 * numCandidates + i];
     float cy = outputData[1 * numCandidates + i];
     float w = outputData[2 * numCandidates + i];
     float h = outputData[3 * numCandidates + i];
-
-    // Find best class score for this candidate
-    int bestClassId = 0;
-    float bestScore = 0.0f;
-    for (int c = 0; c < numClasses; c++) {
-      float score = outputData[(4 + c) * numCandidates + i];
-      if (score > bestScore) {
-        bestScore = score;
-        bestClassId = c;
-      }
-    }
-
-    if (bestScore < confThreshold) continue;
 
     // Convert center-format to corners, scale to original image, and clamp
     // each edge to the image so a clipped box shrinks instead of shifting

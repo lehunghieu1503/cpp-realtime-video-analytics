@@ -13,20 +13,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libunwind-dev is named because the runner image ships
+      # libunwind-14-dev, which conflicts with the one libgstreamer1.0-dev
+      # needs; apt resolves that only when asked for the package by name
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake \
-            libopencv-dev \
+            libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             wget
 
       - name: Install ONNX Runtime
         run: |
-          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
-          tar xzf onnxruntime-linux-x64-1.17.0.tgz
-          sudo cp onnxruntime-linux-x64-1.17.0/lib/* /usr/local/lib/
-          sudo cp -r onnxruntime-linux-x64-1.17.0/include/* /usr/local/include/
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar xzf onnxruntime-linux-x64-1.20.1.tgz
+          sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+          sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
           sudo ldconfig
 
       - name: Configure CMake
@@ -41,36 +45,39 @@ jobs:
           build/tests/test_serializer
           build/tests/test_latency_tracker
           build/tests/test_sse_server
+          build/tests/test_rules
           build/tests/test_inference
 
-  build-tsan:
+  sanitizers:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan]
 
     steps:
       - uses: actions/checkout@v4
 
+      # libunwind-dev is named because the runner image ships
+      # libunwind-14-dev, which conflicts with the one libgstreamer1.0-dev
+      # needs; apt resolves that only when asked for the package by name
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake \
-            libopencv-dev \
+            build-essential g++-12 cmake \
+            libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             wget
 
       - name: Install ONNX Runtime
         run: |
-          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
-          tar xzf onnxruntime-linux-x64-1.17.0.tgz
-          sudo cp onnxruntime-linux-x64-1.17.0/lib/* /usr/local/lib/
-          sudo cp -r onnxruntime-linux-x64-1.17.0/include/* /usr/local/include/
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar xzf onnxruntime-linux-x64-1.20.1.tgz
+          sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+          sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
           sudo ldconfig
 
-      - name: Configure CMake with ThreadSanitizer
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
-
-      - name: Build
-        run: cmake --build build --parallel $(nproc)
-
-      - name: Run tests with TSAN
-        run: |
-          build/tests/test_pipeline
+      # Builds with the sanitizer and runs every test under it
+      - name: Run tests with ${{ matrix.sanitizer }}
+        run: scripts/sanitize.sh ${{ matrix.sanitizer }}

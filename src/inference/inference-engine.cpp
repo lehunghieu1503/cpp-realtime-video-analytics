@@ -2,129 +2,112 @@
 #include "post-process.hpp"
 #include "pre-process.hpp"
 
+#include <chrono>
 #include <iostream>
-#include <stdexcept>
 
 InferenceEngine::InferenceEngine(const InferenceConfig& config)
-    : config_(config),
-      env_(ORT_LOGGING_LEVEL_WARNING, "video-analytics") {
-  // Configure session options
-  Ort::SessionOptions sessionOptions;
-  sessionOptions.SetIntraOpNumThreads(config_.numThreads);
-  sessionOptions.SetGraphOptimizationLevel(
-      GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-  // CUDA execution provider (optional)
-  if (config_.useCuda) {
-    try {
-      OrtCUDAProviderOptions cudaOptions;
-      cudaOptions.device_id = 0;
-      sessionOptions.AppendExecutionProvider_CUDA(cudaOptions);
-      std::cout << "CUDA execution provider enabled\n";
-    } catch (const Ort::Exception& e) {
-      std::cerr << "CUDA not available, falling back to CPU: " << e.what()
-                << "\n";
-    }
-  }
-
-  // Load model
-  try {
-    session_ =
-        std::make_unique<Ort::Session>(env_, config_.modelPath.c_str(),
-                                       sessionOptions);
-  } catch (const Ort::Exception& e) {
-    std::cerr << "Failed to load model: " << e.what() << "\n";
-    return;
-  }
-
-  Ort::AllocatorWithDefaultOptions allocator;
-
-  // Query input metadata
-  size_t numInputs = session_->GetInputCount();
-  for (size_t i = 0; i < numInputs; i++) {
-    auto name = session_->GetInputNameAllocated(i, allocator);
-    inputNames_.emplace_back(name.get());
-
-    auto typeInfo = session_->GetInputTypeInfo(i);
-    auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
-    inputShape_ = tensorInfo.GetShape();
-  }
+    : config_(config) {
+  BackendConfig backendConfig;
+  backendConfig.modelPath = config_.modelPath;
+  backendConfig.backend = config_.backend;
+  backendConfig.precision = config_.precision;
+  backendConfig.numThreads = config_.numThreads;
+  backendConfig.profileLayers = config_.profileLayers;
+  backend_ = createBackend(backendConfig);
+  if (!backend_) return;
 
   // Use the model's own input size when it is fixed (e.g. exported at 320 or
   // 1280). Dynamic dimensions come back as -1 and keep the configured size.
-  if (inputShape_.size() == 4 && inputShape_[2] > 0 && inputShape_[3] > 0) {
-    config_.inputHeight = static_cast<int>(inputShape_[2]);
-    config_.inputWidth = static_cast<int>(inputShape_[3]);
+  const auto& inputShape = backend_->inputShape();
+  if (inputShape.size() == 4 && inputShape[2] > 0 && inputShape[3] > 0) {
+    config_.inputHeight = static_cast<int>(inputShape[2]);
+    config_.inputWidth = static_cast<int>(inputShape[3]);
   }
 
-  // Query output metadata
-  size_t numOutputs = session_->GetOutputCount();
-  for (size_t i = 0; i < numOutputs; i++) {
-    auto name = session_->GetOutputNameAllocated(i, allocator);
-    outputNames_.emplace_back(name.get());
-
-    auto typeInfo = session_->GetOutputTypeInfo(i);
-    auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
-    outputShape_ = tensorInfo.GetShape();
+  std::cout << "Model loaded: " << config_.modelPath << " (backend "
+            << config_.backend << ", input " << config_.inputWidth << "x"
+            << config_.inputHeight << ")\n";
+  if (!backend_->describe().empty()) {
+    std::cout << "  " << backend_->describe() << "\n";
   }
-
-  std::cout << "Model loaded: " << config_.modelPath << "\n";
-  std::cout << "  Input shape: [";
-  for (size_t i = 0; i < inputShape_.size(); i++) {
-    std::cout << inputShape_[i] << (i + 1 < inputShape_.size() ? ", " : "");
-  }
-  std::cout << "]\n";
-  std::cout << "  Output shape: [";
-  for (size_t i = 0; i < outputShape_.size(); i++) {
-    std::cout << outputShape_[i] << (i + 1 < outputShape_.size() ? ", " : "");
-  }
-  std::cout << "]\n";
 }
 
-bool InferenceEngine::isLoaded() const { return session_ != nullptr; }
+std::string InferenceEngine::layerProfile() const {
+  return backend_ ? backend_->layerProfile() : "";
+}
 
-std::vector<Detection> InferenceEngine::detect(const cv::Mat& frame) {
+bool InferenceEngine::isLoaded() const { return backend_ != nullptr; }
+
+std::vector<Detection> InferenceEngine::detect(const cv::Mat& input,
+                                               StageTimes* times,
+                                               DeviceFrame* device) {
   if (!isLoaded()) return {};
 
-  // Validate input frame
-  if (frame.empty() || frame.channels() != 3) {
-    std::cerr << "detect(): invalid frame (empty or not 3-channel BGR)\n";
-    return {};
+  using Clock = std::chrono::steady_clock;
+  auto ms = [](Clock::time_point from, Clock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  auto start = Clock::now();
+
+  std::vector<int64_t> outputShape;
+  const float* outputData = nullptr;
+  Clock::time_point preDone;
+  int frameWidth = 0;
+  int frameHeight = 0;
+
+  // Best case: the frame is on the device and the backend reads it there
+  if (device && config_.devicePreprocess) {
+    double preMs = 0.0;
+    outputData = backend_->runDeviceFrame(*device, outputShape, &preMs);
+    if (outputData) {
+      preDone = start + std::chrono::duration_cast<Clock::duration>(
+                            std::chrono::duration<double, std::milli>(preMs));
+      frameWidth = device->width();
+      frameHeight = device->height();
+    }
   }
 
-  // Preprocess: resize + normalize + HWC→CHW
-  auto inputData = preprocess(frame, config_.inputWidth, config_.inputHeight);
+  cv::Mat frame = input;
+  if (!outputData) {
+    // The backend needs the pixels in system memory
+    if (frame.empty() && device) frame = device->toBgr();
+    if (frame.empty() || frame.channels() != 3) {
+      std::cerr << "detect(): invalid frame (empty or not 3-channel BGR)\n";
+      return {};
+    }
+    frameWidth = frame.cols;
+    frameHeight = frame.rows;
+  }
 
-  // Create input tensor
-  auto memoryInfo =
-      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  if (outputData) {
+    // Done above, on the device
+  } else if (config_.devicePreprocess && backend_->preprocessesFrames()) {
+    // The backend takes the frame as captured and prepares it on its device
+    double preMs = 0.0;
+    outputData = backend_->runFrame(frame, outputShape, &preMs);
+    preDone = start + std::chrono::duration_cast<Clock::duration>(
+                          std::chrono::duration<double, std::milli>(preMs));
+  } else {
+    // Preprocess: resize + normalize + HWC→CHW
+    cv::Mat inputData =
+        preprocess(frame, config_.inputWidth, config_.inputHeight);
+    preDone = Clock::now();
 
-  std::vector<int64_t> inputDims = {1, 3, config_.inputHeight,
-                                     config_.inputWidth};
-  Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
-      memoryInfo, inputData.data(), inputData.size(), inputDims.data(),
-      inputDims.size());
-
-  // Build name arrays for Run() — needs const char* pointers
-  std::vector<const char*> inputNamePtrs;
-  for (const auto& name : inputNames_) inputNamePtrs.push_back(name.c_str());
-
-  std::vector<const char*> outputNamePtrs;
-  for (const auto& name : outputNames_) outputNamePtrs.push_back(name.c_str());
-
-  // Run inference
-  auto outputTensors = session_->Run(
-      Ort::RunOptions{nullptr}, inputNamePtrs.data(), &inputTensor,
-      inputNamePtrs.size(), outputNamePtrs.data(), outputNamePtrs.size());
-
-  // Extract output tensor data
-  const float* outputData = outputTensors[0].GetTensorData<float>();
-  auto outputInfo =
-      outputTensors[0].GetTensorTypeAndShapeInfo();
-  auto outputShape = outputInfo.GetShape();
+    std::vector<int64_t> inputDims = {1, 3, config_.inputHeight,
+                                      config_.inputWidth};
+    outputData = backend_->run(inputData.ptr<float>(), inputDims, outputShape);
+  }
+  auto inferDone = Clock::now();
 
   // Postprocess: parse detections + NMS
-  return postprocess(outputData, outputShape, config_.confidenceThreshold,
-                     config_.nmsThreshold, frame.cols, frame.rows,
-                     config_.inputWidth, config_.inputHeight);
+  auto detections =
+      postprocess(outputData, outputShape, config_.confidenceThreshold,
+                  config_.nmsThreshold, frameWidth, frameHeight,
+                  config_.inputWidth, config_.inputHeight);
+  if (times) {
+    times->preMs = ms(start, preDone);
+    times->inferMs = ms(preDone, inferDone);
+    times->postMs = ms(inferDone, Clock::now());
+  }
+  return detections;
 }

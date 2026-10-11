@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analytics/event.hpp"
 #include "pipeline/frame-data.hpp"
 
 #include <nlohmann/json.hpp>
@@ -15,7 +16,7 @@ inline nlohmann::json serializeResult(const AnalyticsResult& result,
                                        double currentFps) {
   nlohmann::json detections = nlohmann::json::array();
   for (const auto& det : result.detections) {
-    detections.push_back({
+    nlohmann::json item = {
         {"class", getClassName(det.classId)},
         // 2 decimals; divided as double so the JSON reads 0.94, not
         // 0.9399999976158142
@@ -25,7 +26,9 @@ inline nlohmann::json serializeResult(const AnalyticsResult& result,
           {"y", static_cast<int>(det.bbox.y)},
           {"w", static_cast<int>(det.bbox.width)},
           {"h", static_cast<int>(det.bbox.height)}}}
-    });
+    };
+    if (det.trackId >= 0) item["track_id"] = det.trackId;
+    detections.push_back(std::move(item));
   }
 
   return {
@@ -34,4 +37,25 @@ inline nlohmann::json serializeResult(const AnalyticsResult& result,
       {"latency_ms", std::round(result.inferenceLatencyMs * 10) / 10},
       {"fps", std::round(currentFps * 10) / 10}
   };
+}
+
+// Serialize an event for MQTT and SSE
+// Example output:
+// {"type":"line_cross","stream":"cam0","name":"gate","track_id":7,
+//   "class":"person","direction":"in","timestamp":1760000000.25}
+inline nlohmann::json serializeEvent(const Event& event) {
+  nlohmann::json json = {
+      {"type", event.type},
+      {"stream", event.stream},
+      {"name", event.name},
+      {"track_id", event.trackId},
+      {"class", getClassName(event.classId)},
+      {"timestamp", std::round(event.timestamp * 1000) / 1000}
+  };
+  if (!event.direction.empty()) json["direction"] = event.direction;
+  if (event.type == "zone_exit" || event.type == "dwell_time") {
+    json["dwell_s"] = std::round(event.dwellSec * 10) / 10;
+  }
+  if (!event.snapshot.empty()) json["snapshot"] = event.snapshot;
+  return json;
 }
