@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -168,6 +169,89 @@ void testVideoStreamDeliversFrames() {
   server.stop();
 }
 
+// Test 5: with a password set, every route but /health needs credentials
+void testBasicAuth() {
+  std::cout << "\n=== Test 5: Basic Auth ===\n";
+
+  SseServerConfig config;
+  config.port = kPort + 4;
+  config.username = "operator";
+  config.password = "s3cret";
+  config.metrics = [] { return std::string("va_test 1\n"); };
+  SseServer server(config);
+  server.start();
+
+  httplib::Client anonymous("127.0.0.1", config.port);
+  auto denied = anonymous.Get("/metrics");
+  test::assert_true(denied && denied->status == 401,
+                    "request without credentials gets 401");
+  test::assert_true(denied && denied->has_header("WWW-Authenticate"),
+                    "401 asks the browser for Basic credentials");
+  auto health = anonymous.Get("/health");
+  test::assert_true(health && health->status == 200,
+                    "/health stays open for probes");
+
+  httplib::Client wrong("127.0.0.1", config.port);
+  wrong.set_basic_auth("operator", "guess");
+  auto rejected = wrong.Get("/streams");
+  test::assert_true(rejected && rejected->status == 401,
+                    "wrong password gets 401");
+
+  httplib::Client allowed("127.0.0.1", config.port);
+  allowed.set_basic_auth("operator", "s3cret");
+  auto ok = allowed.Get("/metrics");
+  test::assert_true(ok && ok->status == 200 && ok->body == "va_test 1\n",
+                    "right credentials reach the route");
+
+  server.stop();
+}
+
+// Test 6: with a certificate and key the server speaks HTTPS only
+void testTls() {
+  std::cout << "\n=== Test 6: TLS ===\n";
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  const std::string cert = "/tmp/va-test-cert.pem";
+  const std::string key = "/tmp/va-test-key.pem";
+  std::string command =
+      "openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost "
+      "-keyout " + key + " -out " + cert + " >/dev/null 2>&1";
+  if (std::system(command.c_str()) != 0) {
+    std::cout << "  [SKIP] openssl command not available\n";
+    return;
+  }
+
+  SseServerConfig config;
+  config.port = kPort + 5;
+  config.tlsCertFile = cert;
+  config.tlsKeyFile = key;
+  SseServer server(config);
+  server.start();
+  test::assert_true(server.isRunning(), "server starts with a certificate");
+
+  httplib::SSLClient secure("127.0.0.1", config.port);
+  secure.enable_server_certificate_verification(false);  // self-signed
+  auto ok = secure.Get("/health");
+  test::assert_true(ok && ok->status == 200, "HTTPS request succeeds");
+
+  httplib::Client plain("127.0.0.1", config.port);
+  plain.set_read_timeout(2);
+  test::assert_true(!plain.Get("/health"), "plain HTTP request is refused");
+  server.stop();
+
+  SseServerConfig broken;
+  broken.port = kPort + 6;
+  broken.tlsCertFile = "/nonexistent/cert.pem";
+  broken.tlsKeyFile = "/nonexistent/key.pem";
+  SseServer unusable(broken);
+  unusable.start();
+  test::assert_true(!unusable.isRunning(),
+                    "a certificate that cannot be read stops the start");
+#else
+  std::cout << "  [SKIP] built without OpenSSL\n";
+#endif
+}
+
 int main() {
   std::cout << "==================================================\n";
   std::cout << "SSE Server Test Suite\n";
@@ -177,6 +261,8 @@ int main() {
   testAbandonedClientsReleaseThreads();
   testBindFailureAndStop();
   testVideoStreamDeliversFrames();
+  testBasicAuth();
+  testTls();
 
   std::cout << "\n==================================================\n";
   std::cout << "Test Summary\n";

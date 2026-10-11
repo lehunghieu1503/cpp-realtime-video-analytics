@@ -28,7 +28,13 @@ struct SseServerConfig {
   std::function<std::string()> metrics;
   // GET /health answers 200 while this returns true, 503 otherwise;
   // unset: always 200
-  std::function<bool()> healthy;
+  std::function<bool()> healthy;  // HTTP Basic credentials required on every route except /health; an empty
+  // password leaves the server open
+  std::string username = "admin";
+  std::string password;
+  // PEM certificate and private key; both set: serve HTTPS instead of HTTP
+  std::string tlsCertFile;
+  std::string tlsKeyFile;
 };
 
 class SseServer {
@@ -37,7 +43,8 @@ public:
   ~SseServer();
 
   // Start HTTP server (SSE + MJPEG + static files) in background thread.
-  // isRunning() stays false if the address cannot be bound.
+  // isRunning() stays false if the address cannot be bound, or if TLS is
+  // configured and the certificate cannot be used.
   void start();
   // Close the port and wait for the HTTP thread and its handlers to finish
   void stop();

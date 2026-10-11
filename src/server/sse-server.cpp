@@ -71,7 +71,57 @@ void SseServer::updateFrame(const cv::Mat& frame, size_t stream) {
 void SseServer::start() {
   if (running_) return;
 
-  server_ = std::make_unique<httplib::Server>();
+  if (config_.tlsCertFile.empty() != config_.tlsKeyFile.empty()) {
+    std::cerr << "SSE server: TLS needs both a certificate and a key\n";
+    return;
+  }
+  bool tls = !config_.tlsCertFile.empty();
+  if (tls) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    server_ = std::make_unique<httplib::SSLServer>(
+        config_.tlsCertFile.c_str(), config_.tlsKeyFile.c_str());
+    if (!server_->is_valid()) {
+      std::cerr << "SSE server: cannot load TLS certificate "
+                << config_.tlsCertFile << " or key " << config_.tlsKeyFile
+                << "\n";
+      server_.reset();
+      return;
+    }
+#else
+    std::cerr << "SSE server: this build has no TLS support (libssl-dev was "
+                 "missing at build time)\n";
+    return;
+#endif
+  } else {
+    server_ = std::make_unique<httplib::Server>();
+  }
+
+  if (!config_.password.empty()) {
+    // /health stays open: a supervisor's probe carries no credentials and
+    // the answer reveals nothing
+    std::string expected =
+        "Basic " + httplib::detail::base64_encode(config_.username + ":" +
+                                                  config_.password);
+    server_->set_pre_routing_handler(
+        [expected](const httplib::Request& req, httplib::Response& res) {
+          if (req.path == "/health") {
+            return httplib::Server::HandlerResponse::Unhandled;
+          }
+          // Compare every byte, so the time taken does not tell an attacker
+          // how much of a guess was right
+          const std::string given = req.get_header_value("Authorization");
+          unsigned char diff = given.size() == expected.size() ? 0 : 1;
+          for (size_t i = 0; i < given.size() && i < expected.size(); i++) {
+            diff |= static_cast<unsigned char>(given[i] ^ expected[i]);
+          }
+          if (diff == 0) return httplib::Server::HandlerResponse::Unhandled;
+          res.status = 401;
+          res.set_header("WWW-Authenticate",
+                         "Basic realm=\"video-analytics\"");
+          res.set_content("Unauthorized", "text/plain");
+          return httplib::Server::HandlerResponse::Handled;
+        });
+  }
   // httplib defaults to SO_REUSEPORT, which lets a second instance bind the
   // same port silently. SO_REUSEADDR still allows a quick restart.
   server_->set_socket_options([](socket_t sock) {
@@ -84,8 +134,10 @@ void SseServer::start() {
     server_.reset();
     return;
   }
-  std::cout << "SSE server listening on http://" << config_.bindAddress << ":"
-            << config_.port << "\n";
+  std::cout << "SSE server listening on " << (tls ? "https" : "http") << "://"
+            << config_.bindAddress << ":" << config_.port
+            << (config_.password.empty() ? "" : " (password required)")
+            << "\n";
 
   running_ = true;
   httpThread_ = std::thread([this]() {
