@@ -42,7 +42,20 @@ dụ Jetson trong mạng nội bộ), export trên máy khác rồi chép file `
 docker build -t video-analytics .
 ```
 
-Image này chỉ chạy CPU. Xong thì sang phần 3, dùng các lệnh `docker run`.
+Image có ONNX Runtime (CPU) và OpenVINO (CPU, NPU của Intel). Xong thì sang
+phần 3, dùng các lệnh `docker run`.
+
+Muốn chạy cả stack (ứng dụng trên NPU, Mosquitto, Prometheus, Grafana) trên
+laptop bằng một lệnh:
+
+```bash
+scripts/download-model.sh yolo11s
+scripts/run-laptop.sh          # build rồi docker compose up
+scripts/run-laptop.sh down     # dừng
+```
+
+Mọi cổng chỉ mở cho `127.0.0.1`; MQTT ở cổng 1884. Nguồn video và backend
+khai báo trong `deploy/config/laptop.yaml`.
 
 ### 2B. PC x86-64 build từ source
 

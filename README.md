@@ -272,6 +272,26 @@ docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
 </details>
 
 <details>
+<summary><b>Whole stack in Docker on an x86 laptop (Intel NPU)</b></summary>
+
+<br/>
+
+```bash
+scripts/download-model.sh yolo11s
+scripts/run-laptop.sh            # build, then docker compose up
+scripts/run-laptop.sh down
+```
+
+Runs the analytics on the NPU together with Mosquitto, Prometheus and
+Grafana, all bound to `127.0.0.1` (MQTT on port 1884). Sources and backend
+are set in [deploy/config/laptop.yaml](deploy/config/laptop.yaml); it expects
+test frames under `data/videos/`. In the container YOLO11s ran at 49.8 FPS on
+the NPU. `openvino:GPU` does not work in the image on Core Ultra: the
+Ubuntu 22.04 OpenCL driver does not detect Arc graphics.
+
+</details>
+
+<details>
 <summary><b>Jetson Orin</b></summary>
 
 <br/>
@@ -512,7 +532,7 @@ web/                  Dashboard (plain HTML, CSS, JS)
 deploy/               docker compose stack, configuration, Grafana board
 tests/                Six test binaries, no framework needed
 scripts/              Deploy, benchmark, mAP, INT8, model export
-Dockerfile            x86-64, CPU
+Dockerfile            x86-64: CPU and OpenVINO (Intel NPU)
 Dockerfile.jetson     JetPack 6, CUDA + TensorRT
 ```
 

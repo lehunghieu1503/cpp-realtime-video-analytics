@@ -31,3 +31,7 @@ data/
 models/*.calibration
 models/*.xml
 models/*.bin
+
+# Local run of the deploy stack
+deploy/snapshots/
+deploy/.env
