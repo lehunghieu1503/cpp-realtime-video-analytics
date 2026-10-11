@@ -52,6 +52,16 @@ if(WITH_OPENVINO)
     target_link_libraries(va_core PUBLIC openvino::runtime)
 endif()
 
+if(WITH_TENSORRT)
+    target_sources(va_core PRIVATE
+        inference/backends/tensorrt-backend.cpp
+        inference/backends/cuda-preprocess.cu)
+    target_compile_definitions(va_core PUBLIC WITH_TENSORRT)
+    target_include_directories(va_core PRIVATE ${TENSORRT_INCLUDE_DIR})
+    target_link_libraries(va_core PRIVATE
+        ${NVINFER_LIBRARY} ${NVONNXPARSER_LIBRARY} CUDA::cudart)
+endif()
+
 if(WITH_MQTT)
     target_compile_definitions(va_core PRIVATE WITH_MQTT)
     target_include_directories(va_core PRIVATE ${MOSQUITTO_INCLUDE_DIR})

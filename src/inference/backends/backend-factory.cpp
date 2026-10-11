@@ -3,6 +3,9 @@
 #ifdef WITH_OPENVINO
 #include "openvino-backend.hpp"
 #endif
+#ifdef WITH_TENSORRT
+#include "tensorrt-backend.hpp"
+#endif
 
 #include <iostream>
 
@@ -17,7 +20,7 @@ bool isOpenVino(const std::string& backend) {
 
 bool isKnownBackend(const std::string& backend) {
   return backend == "cpu" || backend == "cuda" || backend == "tensorrt" ||
-         isOpenVino(backend);
+         backend == "tensorrt-native" || isOpenVino(backend);
 }
 
 std::unique_ptr<IInferenceBackend> createBackend(const BackendConfig& config) {
@@ -29,6 +32,15 @@ std::unique_ptr<IInferenceBackend> createBackend(const BackendConfig& config) {
 #else
       std::cerr << "Backend '" << config.backend
                 << "' needs a build with -DWITH_OPENVINO=ON\n";
+      return nullptr;
+#endif
+    }
+    if (config.backend == "tensorrt-native") {
+#ifdef WITH_TENSORRT
+      return std::make_unique<TensorRtBackend>(config);
+#else
+      std::cerr << "Backend 'tensorrt-native' needs a build with the "
+                   "TensorRT and CUDA development files (WITH_TENSORRT)\n";
       return nullptr;
 #endif
     }

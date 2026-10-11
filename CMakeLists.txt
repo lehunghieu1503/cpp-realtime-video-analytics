@@ -7,7 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Compiler warnings — catch bugs early
-add_compile_options(-Wall -Wextra -Wpedantic)
+# Only for C++: nvcc hands the host compiler generated code that -Wpedantic
+# rejects line by line
+add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
 
 # Optional sanitizers for debugging
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -82,6 +84,32 @@ if(WITH_OPENVINO AND NOT OpenVINO_FOUND)
                         "set OpenVINO_DIR to <openvino>/runtime/cmake")
 endif()
 message(STATUS "OpenVINO backend: ${WITH_OPENVINO}")
+
+# Native TensorRT backend with GPU pre-processing. Needs the TensorRT
+# headers and libraries and the CUDA toolkit, as on a Jetson or an NVIDIA
+# workstation; without them the other backends still build.
+find_path(TENSORRT_INCLUDE_DIR NAMES NvInfer.h
+          PATH_SUFFIXES aarch64-linux-gnu x86_64-linux-gnu)
+find_library(NVINFER_LIBRARY NAMES nvinfer)
+find_library(NVONNXPARSER_LIBRARY NAMES nvonnxparser)
+include(CheckLanguage)
+check_language(CUDA)
+if(TENSORRT_INCLUDE_DIR AND NVINFER_LIBRARY AND NVONNXPARSER_LIBRARY
+   AND CMAKE_CUDA_COMPILER)
+    set(_tensorrt_found ON)
+else()
+    set(_tensorrt_found OFF)
+endif()
+option(WITH_TENSORRT "Build the native TensorRT backend" ${_tensorrt_found})
+if(WITH_TENSORRT)
+    if(NOT _tensorrt_found)
+        message(FATAL_ERROR "WITH_TENSORRT=ON but TensorRT or the CUDA "
+                            "compiler was not found")
+    endif()
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
+message(STATUS "Native TensorRT backend: ${WITH_TENSORRT}")
 
 # MQTT event publishing (apt install libmosquitto-dev). Without it the
 # application builds and runs, and a configured broker is reported as an
