@@ -1,0 +1,50 @@
+# Configuration of the deployed application. Command-line flags override it.
+# Paths are those inside the container (see docker-compose.yml):
+#   /app/models      ← models/        (writable: TensorRT engine cache)
+#   /app/snapshots   ← snapshots/
+#   /data/videos     ← VIDEO_DIR in .env
+
+model: models/yolo11s.onnx
+# cpu | cuda | tensorrt | openvino:CPU | openvino:GPU | openvino:NPU
+backend: tensorrt
+# tensorrt only: fp32 | fp16 | int8 (int8 needs scripts/calibrate-int8.py)
+precision: fp16
+confidence: 0.4
+# Objects to keep; remove the key to keep all 80 COCO classes
+classes: [person]
+# Seconds inside a zone before one dwell_time event is raised
+dwell_seconds: 5
+
+# One entry per camera. Give exactly one of:
+#   device: 0                      USB camera /dev/video0
+#   rtsp: rtsp://host:8554/cam     network camera, decoded by FFmpeg
+#   file: /data/videos/clip.mp4    video file, played once
+#   gst: "<pipeline> ! appsink"    any GStreamer pipeline
+# Zone and line coordinates are pixels of that camera's frames.
+sources:
+  # Looped JPEG frames stand in for cameras while none is attached
+  - id: square
+    gst: "multifilesrc location=/data/videos/long/f%05d.jpg start-index=1 loop=true caps=image/jpeg,framerate=30/1 ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink"
+    zones:
+      - name: centre
+        points: [[300, 200], [660, 200], [660, 440], [300, 440]]
+    lines:
+      - name: midline
+        a: [0, 300]
+        b: [960, 300]
+  - id: walkway
+    gst: "multifilesrc location=/data/videos/people/f%05d.jpg start-index=1 loop=true caps=image/jpeg,framerate=25/1 ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink"
+    lines:
+      - name: crossing
+        a: [0, 540]
+        b: [1920, 540]
+
+mqtt:
+  host: mosquitto
+  port: 1883
+  # Events are published to <topic>/<source id>/<event type>
+  topic: video-analytics
+
+snapshots:
+  dir: snapshots
+  keep: 200

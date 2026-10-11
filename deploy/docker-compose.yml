@@ -1,0 +1,60 @@
+# The whole system: analytics, MQTT broker, metrics and dashboards.
+# Run from this directory:  docker compose up -d
+#
+# On a Jetson, scripts/deploy-jetson.sh copies this directory to the board and
+# writes a .env there that also loads docker-compose.jetson.yml.
+services:
+  app:
+    image: ${VA_IMAGE:-video-analytics:latest}
+    restart: unless-stopped
+    command: ["--config", "/app/config/config.yaml"]
+    ports:
+      - "9001:9001"   # dashboard, /events, /video, /metrics, /health
+    volumes:
+      - ./config:/app/config:ro
+      # Writable: the TensorRT engine is cached in models/trt-cache/
+      - ./models:/app/models
+      - ./snapshots:/app/snapshots
+      - ${VIDEO_DIR:-./videos}:/data/videos:ro
+    depends_on:
+      - mosquitto
+    # SIGTERM stops the pipeline cleanly; give it time to join its threads
+    stop_grace_period: 15s
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Read-only dashboards without a login; admin/admin still edits
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/video-analytics.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
