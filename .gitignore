@@ -25,3 +25,9 @@ plans/
 
 # Documentation records
 docs/journals/
+
+# Datasets and benchmark output
+data/
+models/*.calibration
+models/*.xml
+models/*.bin
