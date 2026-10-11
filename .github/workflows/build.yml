@@ -19,6 +19,7 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             wget
 
       - name: Install ONNX Runtime
@@ -60,6 +61,7 @@ jobs:
           sudo apt-get install -y \
             build-essential g++-12 cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             wget
 
       - name: Install ONNX Runtime

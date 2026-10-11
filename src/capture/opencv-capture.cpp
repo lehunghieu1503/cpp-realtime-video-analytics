@@ -1,4 +1,7 @@
 #include "opencv-capture.hpp"
+#ifdef WITH_GSTREAMER
+#include "gst-capture.hpp"
+#endif
 
 #include <cstring>
 #include <iostream>
@@ -80,4 +83,13 @@ std::string OpenCvCapture::getInfo() const {
      << cap_.get(cv::CAP_PROP_FPS) << " FPS"
      << " format=" << fmt;
   return ss.str();
+}
+
+std::unique_ptr<IVideoCapture> createCapture(const CaptureConfig& config) {
+#ifdef WITH_GSTREAMER
+  if (!config.gstPipeline.empty()) return std::make_unique<GstCapture>();
+#else
+  (void)config;
+#endif
+  return std::make_unique<OpenCvCapture>();
 }

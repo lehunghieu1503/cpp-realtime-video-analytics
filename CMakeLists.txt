@@ -85,6 +85,21 @@ if(WITH_OPENVINO AND NOT OpenVINO_FOUND)
 endif()
 message(STATUS "OpenVINO backend: ${WITH_OPENVINO}")
 
+# Native GStreamer capture (apt install libgstreamer1.0-dev
+# libgstreamer-plugins-base1.0-dev). Without it GStreamer pipelines still run
+# through OpenCV's wrapper.
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(GST IMPORTED_TARGET
+        gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+endif()
+option(WITH_GSTREAMER "Build the native GStreamer capture" ${GST_FOUND})
+if(WITH_GSTREAMER AND NOT GST_FOUND)
+    message(FATAL_ERROR "WITH_GSTREAMER=ON but the GStreamer development "
+                        "files were not found")
+endif()
+message(STATUS "Native GStreamer capture: ${WITH_GSTREAMER}")
+
 # Native TensorRT backend with GPU pre-processing. Needs the TensorRT
 # headers and libraries and the CUDA toolkit, as on a Jetson or an NVIDIA
 # workstation; without them the other backends still build.

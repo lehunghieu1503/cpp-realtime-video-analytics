@@ -1,5 +1,4 @@
 #include "pipeline.hpp"
-#include "capture/opencv-capture.hpp"
 
 #include <sched.h>
 
@@ -22,8 +21,7 @@ void Pipeline::start() {
   // thread keeps retrying.
   for (const auto& source : config_.sources) {
     if (source.isLive()) continue;
-    OpenCvCapture probe;
-    if (!probe.open(source)) {
+    if (!createCapture(source)->open(source)) {
       std::cerr << "Pipeline: failed to open " << source.id << "\n";
       return;
     }
@@ -99,7 +97,8 @@ void Pipeline::stop() {
 void Pipeline::captureLoop(int streamId) {
   const CaptureConfig& source = config_.sources[streamId];
   StreamStats& stats = stats_[streamId];
-  OpenCvCapture capture;
+  std::unique_ptr<IVideoCapture> capturePtr = createCapture(source);
+  IVideoCapture& capture = *capturePtr;
   uint64_t frameId = 0;
   // Reopen delay after a failure: doubles from 1 s up to 30 s, and resets
   // once a frame arrives

@@ -6,6 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     build-essential cmake git wget ca-certificates \
     libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ONNX Runtime

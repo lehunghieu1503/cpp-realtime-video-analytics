@@ -52,6 +52,12 @@ if(WITH_OPENVINO)
     target_link_libraries(va_core PUBLIC openvino::runtime)
 endif()
 
+if(WITH_GSTREAMER)
+    target_sources(va_core PRIVATE capture/gst-capture.cpp)
+    target_compile_definitions(va_core PUBLIC WITH_GSTREAMER)
+    target_link_libraries(va_core PRIVATE PkgConfig::GST)
+endif()
+
 if(WITH_TENSORRT)
     target_sources(va_core PRIVATE
         inference/backends/tensorrt-backend.cpp

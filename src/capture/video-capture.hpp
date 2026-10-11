@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <opencv2/opencv.hpp>
 #include <string>
 
@@ -34,3 +35,8 @@ public:
   virtual double getActualFps() const = 0;
   virtual std::string getInfo() const = 0;
 };
+
+// The capture for a source: the native GStreamer one for a GStreamer
+// pipeline when the build has it, OpenCV's otherwise (cameras, files, RTSP
+// through FFmpeg)
+std::unique_ptr<IVideoCapture> createCapture(const CaptureConfig& config);
