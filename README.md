@@ -112,6 +112,11 @@ A [bridge node](#ros-2) publishes each source's detections as
 `vision_msgs/Detection2DArray` and the events as a topic, so the core stays
 free of ROS.
 
+### Drives a simulated car
+With [CARLA](#carla-simulation) on a PC and inference on the Jetson, a second
+model finds the lane and a ROS 2 controller keeps the car in it and brakes
+for what is in its way, every frame joined by the simulator's own timestamp.
+
 </td>
 </tr>
 </table>
@@ -439,7 +444,7 @@ the right of `a → b` to its left counts as `in`, the other way as `out`.
 |:---------|:--------|
 | `/` | The dashboard: one card per source, live counters, event log |
 | `/video?stream=N` | MJPEG of source N with boxes, track ids, zones and lines drawn in |
-| `/events` | Server-Sent Events, one JSON object per frame per source |
+| `/events` | Server-Sent Events: the latest JSON object of each source whenever it changes. A reader slower than the source misses frames; a reader that reconnects gets the latest one again |
 | `/streams` | Source ids with their zone and line names |
 | `/metrics` | Prometheus metrics: FPS, latency, events, occupancy, power, memory |
 | `/health` | `200 {"status":"ok"}` while results flow, `503` otherwise |
@@ -459,6 +464,18 @@ the right of `a → b` to its left counts as `in`, the other way as `out`.
   ]
 }
 ```
+
+Every result also carries `"image": {"width": W, "height": H}`, the size of
+the source frame the boxes are in. Two more blocks appear only when asked
+for in the configuration:
+
+- `simulation: {enabled: true}`: `"simulation": {"run_id": ..., "sim_ns": ...}`,
+  the run and the frame's own timestamp in nanoseconds, exactly as the
+  source sent it. A frame without a timestamp stops the pipeline.
+- `lane: true` on a source: `"lane"` with the lane boundaries either side
+  of the vehicle and its centreline in metres, the lateral error, heading
+  and curvature, and `valid: false` with a reason and `null` values when
+  there is no usable lane. See [CARLA simulation](#carla-simulation).
 
 The objects under `events` are what MQTT subscribers receive, one message
 each, at QoS 1:
@@ -642,17 +659,90 @@ ros2 run video_analytics_bridge bridge --ros-args -p url:=https://BOARD:9001 \
 Checked on ROS 2 Humble: 25 Hz per source. The core has no ROS dependency;
 the bridge runs wherever ROS 2 does and reconnects when the device restarts.
 
+A frame of a simulation is stamped with its own time (`sim_ns`), not with
+the time it was received, and is also published whole:
+
+| Topic | Type | Content |
+|:------|:-----|:--------|
+| `/simulation/<run_id>/<source>/perception` | `std_msgs/String` | The device's JSON for the frame, unchanged |
+| `/simulation/<run_id>/<source>/lane` | `std_msgs/String` | The same identity and image size, with the lane only |
+
+The device keeps only its latest result per source, so these are not every
+frame: a consumer joins them with other data by `(run_id, source, sim_ns)`
+and treats a missing frame as missing.
+
+[ros2/video_analytics_simulation](ros2/video_analytics_simulation) holds the
+CARLA adapter and the controller that use them.
+
+## CARLA simulation
+
+CARLA 0.9.16 runs on a PC; the device runs the detector, the tracker and a
+lane model; a ROS 2 controller on the PC steers and brakes the simulated
+car. [docs/SIMULATION.md](docs/SIMULATION.md) has the design, the run book
+and every measurement (Vietnamese).
+
+```mermaid
+flowchart LR
+    carla["CARLA, 30 ticks/s<br/>RGB + depth camera"] -->|"one JPEG per frame,<br/>timestamp = sim_ns (GDP/TCP)"| device["Device<br/>YOLO + ByteTrack + lane model"]
+    device -->|"/events: boxes, lane,<br/>run_id, sim_ns"| bridge["ROS 2 bridge"]
+    bridge --> controller["Controller<br/>depth + ego pose of the same frame<br/>objects in metres, pure pursuit, brake"]
+    carla -->|"depth, ego state"| controller
+    controller -->|"command with a lease"| carla
+    carla -.->|"actors, map: truth"| eval["Evaluation"]
+    controller -.-> eval
+```
+
+```bash
+# once: the lane model (the authors publish a PyTorch checkpoint)
+scripts/export-lane-model.py --repo ufld --checkpoint tusimple_18.pth
+# once: the image on the board
+IMAGE_ONLY=1 scripts/deploy-jetson.sh user@board
+
+# one scenario; --arm lets the car drive
+scripts/run-carla-simulation.sh --scenario brake_person --arm \
+    --device user@board --remote-dir video-analytics-carla
+```
+
+Each run gets a new run id and a directory with everything it produced;
+`scripts/evaluate-carla.py` turns that into `summary.md` and a verdict.
+Measured with the Jetson Orin Nano Super over a relayed VPN link (120 ms
+round trip, about 10 Mbit/s), 1280x720 source, YOLO11s and the lane model
+both FP16:
+
+| What | Measured |
+|:-----|:---------|
+| Frame identity | 0 results naming a frame that was not sent, in every run |
+| Device, both models | detector 8.0 ms from capture to result, lane 3.5 + 3.9 + 0.3 ms; 29.6 results/s; 11.3 W |
+| Tick to result / to command applied | 216 / 237 ms median, 235 / 273 ms at P95 (64 / 100 ms with both on one PC) |
+| Car recall by distance, 0-30 / 30-60 / 60-90 / 90-120 m | 1.00 / 0.99 / 0.99 / 0.00 |
+| Person recall, same bins | 0.35 / 0.34 / 0.00 / 0.00 |
+| Range from depth at 5 to 20 m | within 0.04 m |
+| Velocity of a car at 3 m/s; accelerating at 1.5 m/s² | RMSE 0.07 m/s; 0.31 m/s and 0.28 m/s² |
+| Lane centre against the map | RMSE 0.02 to 0.05 m, valid in 100 % of frames |
+| Lane keeping at 9 km/h, straight and gentle curves | 0.01 to 0.05 m RMSE from the lane centre |
+| Braking for a car, a truck, a person, a cut-in | stopped 3.9 to 11.3 m short in 12 runs, no collision |
+| Data lost or controller killed | braked within the budget: 500 ms, 303 ms |
+
+Targets that were not met: 200 ms end to end needs a better link than this
+one (the budgets in `deploy/config/carla.yaml` are set for it, and say so);
+the simulation ran at 29.7 ticks a second, not 30; nothing is detected
+beyond 90 m at this resolution; and in 5 of the 12 braking runs the lane
+model lost the lane behind the obstacle before the obstacle rule fired,
+which stops the car too. See the document for these and the other limits.
+
 ## Project layout
 
 ```text
 src/
 ├── main.cpp          CLI, live loop, benchmark and evaluation modes
 ├── capture/          OpenCV capture, native GStreamer capture, NVMM frames
-├── inference/        Shared pre-process and post-process + NMS
+├── inference/        Shared pre-process and post-process + NMS; the lane
+│                     model's own engine
 │   └── backends/     ONNX Runtime (CPU/CUDA/TensorRT), native TensorRT with
 │                     a CUDA pre-processing kernel, OpenVINO
 ├── pipeline/         Capture threads, per-stream queue, inference workers
-├── analytics/        ByteTrack wrapper, zone and line rules, events
+├── analytics/        ByteTrack wrapper, zone and line rules, events, lane
+│                     geometry
 ├── config/           YAML configuration
 ├── output/           MQTT publisher
 ├── server/           HTTP server: SSE, MJPEG, metrics, JSON serializer
@@ -661,9 +751,12 @@ src/
 web/                  Dashboard (plain HTML, CSS, JS)
 deploy/               docker compose stack and overlays (Jetson, laptop,
                       secured, RTSP simulator), configuration, Grafana board
-ros2/                 ROS 2 bridge package
-tests/                Six test binaries, no framework needed
-scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak
+ros2/                 ROS 2 packages: the bridge, and the CARLA adapter with
+                      its controller
+tests/                Eight test binaries, no framework needed; the CARLA
+                      evaluation's tests
+scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak,
+                      CARLA runs and their evaluation
 Dockerfile            x86-64: CPU and OpenVINO (Intel NPU)
 Dockerfile.jetson     JetPack 6: TensorRT, CUDA, hardware decode, zero-copy
 ```
@@ -677,12 +770,22 @@ build/tests/test_rules            # line crossing, zones, dwell, tracker ids, YA
 build/tests/test_serializer       # JSON payload and rounding
 build/tests/test_latency_tracker  # p50 / p95 / p99 math
 build/tests/test_sse_server       # SSE delivery, MJPEG stream, shutdown, auth, TLS
+build/tests/test_capture_timestamps  # a frame's timestamp through GDP and the JPEG decoder
+build/tests/test_lane             # lane decoder and geometry against the Python reference
+
+# the simulation's Python code; no simulator, ROS or device needed
+python3 -m unittest discover -s ros2/video_analytics_simulation/test -p 'test_*.py'
+python3 -m unittest discover -s ros2/video_analytics_bridge/test -p 'test_*.py'
+python3 tests/test-carla-evaluation.py
 ```
 
 Each exits non-zero on a failure. `test_inference` checks that every backend
 available on the machine returns the same detections as the CPU on
 `tests/test-image.jpg`, on the GPU pre-processing path and on the CPU one.
-CI builds and runs all six on every push.
+`test_capture_timestamps` skips, saying so, when the GStreamer GDP or JPEG
+elements are not installed, and `test_lane` skips its model check without
+`models/ufld-tusimple18.onnx`. CI builds and runs all of these on every
+push.
 
 ### Sanitizers
 
@@ -690,7 +793,7 @@ CI builds and runs all six on every push.
 VIDEO=clip.avi scripts/sanitize.sh        # ASAN, then TSAN
 ```
 
-builds with each sanitizer, runs the six test binaries and then the whole
+builds with each sanitizer, runs the test binaries and then the whole
 pipeline (two sources, two workers, tracking and rules) on the video.
 Neither sanitizer reports anything in this code; CI runs both on every push.
 The suppression files in `tests/` cover what they report in code that is
@@ -728,6 +831,7 @@ More cases, including offline builds, are in the step-by-step guide below.
 | [docs/GUIDE.md](docs/GUIDE.md) | Step-by-step build and usage guide (Vietnamese) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Threading model, data lifecycle, queue mechanics |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Tooling, Docker details, profiling, sanitizers |
+| [docs/SIMULATION.md](docs/SIMULATION.md) | CARLA: design, run book, scenarios and measurements (Vietnamese) |
 
 ## Dependencies
 
