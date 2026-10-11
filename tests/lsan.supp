@@ -1,0 +1,2 @@
+# ONNX Runtime allocates 384 bytes once at start-up and never frees them
+leak:libonnxruntime

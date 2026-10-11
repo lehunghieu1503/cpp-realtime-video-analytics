@@ -1,5 +1,6 @@
 # Build
 build/
+build-*/
 cmake-build-*/
 
 # IDE
@@ -37,3 +38,4 @@ deploy/snapshots/
 deploy/.env
 deploy/secrets/
 deploy/prometheus-data/
+models/trt-cache/

@@ -1,0 +1,13 @@
+# GDAL, loaded by OpenCV's image codecs, takes two of its own mutexes in
+# both orders
+deadlock:libgdal
+# ONNX Runtime is not built with ThreadSanitizer, so the synchronisation of
+# its thread pool is invisible and its threads look like they race
+called_from_lib:libonnxruntime.so
+race:libonnxruntime.so
+# The same holds for the TBB that OpenCV runs its parallel loops on
+# (a called_from_lib pattern may match only one library, and two versions
+# of TBB are loaded)
+called_from_lib:libtbb.so.2
+called_from_lib:libtbb.so.12
+race:libtbb.so
