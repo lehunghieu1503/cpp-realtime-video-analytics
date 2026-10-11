@@ -168,6 +168,23 @@ class Arming(unittest.TestCase):
         world.core.on_ego(world.ego(world.tick - 1))
         self.assertEqual(world.arm(), "gates:moving")
 
+    def test_perception_close_to_its_limit_does_not_arm(self):
+        world = World()
+        for _ in range(3):
+            world.frame()
+        # No newer result for a while: older than 60 % of the limit, still
+        # inside it. Armed now, the next tick could already be too late.
+        ticks = int(0.8 * AGE_MS * MS // TICK)
+        world.tick += ticks - 1
+        ego = world.ego()
+        world.core.on_ego(ego)
+        age_ms = (ego["sim_ns"] - world.core.basis["sim_ns"]) / MS
+        self.assertTrue(0.6 * AGE_MS < age_ms <= AGE_MS)
+        refused = world.core.on_arm({"run_id": "r1", "enable": True}, ego)
+        self.assertIn("stale_perception", refused)
+        self.assertEqual(world.core.state, WAIT_DATA)
+        self.assertFalse(world.core.status(ego)["ready"])
+
     def test_class_filter_that_drops_a_hazard_class_blocks_arming(self):
         only_car = dict(CONFIG, classes=["car"])
         world = World(only_car)

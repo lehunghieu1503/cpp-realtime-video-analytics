@@ -231,7 +231,9 @@ class ScriptedActor:
     def transform_at(self, tick):
         spec = self.spec
         if self.placements:
-            index = min(tick // self.hold, len(self.placements) - 1)
+            # Placements are counted from the tick the actor appears
+            since = max(0, tick - self.spec.get("from_tick", 0))
+            index = min(since // self.hold, len(self.placements) - 1)
             s = float(self.placements[index])
             speed = 0.0
         else:
@@ -264,22 +266,23 @@ class ScriptedActor:
         return self.carla.Transform(location, rotation), speed
 
     def step(self, tick):
+        """The command that puts the actor where it is at this tick."""
         tick = max(0, tick)  # before the run starts: the first placement
         spec = self.spec
         present = spec.get("from_tick", 0) <= tick < spec.get("until_tick", 10 ** 9)
         transform, speed = self.transform_at(tick)
         self.visible = present
         self.speed = speed
+        command = self.carla.command
         if self.physics:
             yaw = math.radians(self.actor.get_transform().rotation.yaw)
             v = float(spec.get("speed_mps", 0.0)) if tick >= spec.get("move_from_tick", 0) else 0.0
-            self.actor.set_target_velocity(self.carla.Vector3D(
+            return command.ApplyTargetVelocity(self.actor, self.carla.Vector3D(
                 v * math.cos(yaw), v * math.sin(yaw), 0.0))
-            return
         if not present:
             # Parked far below the road instead of destroyed: ids stay stable
             transform.location.z -= 500.0
-        self.actor.set_transform(transform)
+        return command.ApplyTransform(self.actor, transform)
 
     def truth(self, snapshot_actor):
         """State at the tick just simulated, from the simulator's snapshot."""
@@ -308,6 +311,9 @@ class Simulator:
         os.makedirs(self.run_dir, exist_ok=True)
         self.rig = Rig.from_config(self.config["calibration"])
         self.dt = 1.0 / float(self.c.get("fps", 30))
+        # A scenario may lower it: a scene with more detail makes larger frames
+        self.jpeg_quality = int(self.scenario.get("jpeg_quality",
+                                                  self.c.get("jpeg_quality", 75)))
         self.stop_requested = False
         self.actors = []
         self.sensors = []
@@ -347,7 +353,7 @@ class Simulator:
         self.pending_arm = []
         self.controller_ready = False
         self.controller_frames = 0
-        self.arm_sent = False
+        self.arm_sent = 0.0  # when ARM was last sent
         self.stats = {"ticks": 0, "sent": 0, "dropped": 0, "jpeg_bytes": 0,
                       "encode_ms": 0.0, "tick_ms": 0.0, "wait_images_ms": 0.0}
 
@@ -562,7 +568,9 @@ class Simulator:
     def draw_markers(self):
         """Red points at known places in the ego frame of the start pose, for
         the reprojection check: where they appear in the image must be where
-        the calibration projects them. Drawn every tick, for one tick."""
+        the calibration projects them. Drawn twice a second and kept for a
+        second: drawn for one tick at a time, a point was now and then missing
+        from a frame."""
         points = self.scenario.get("markers_ego_m")
         if not points:
             return
@@ -572,10 +580,13 @@ class Simulator:
             protocol.write_json(os.path.join(self.run_dir, "markers.json"), {
                 "ego_pose": pose_dict(start), "points_ego_m": points,
                 "points_world_m": [[l.x, l.y, l.z] for l in self.marker_world]})
+        self.marker_ticks = getattr(self, "marker_ticks", -1) + 1
+        if self.marker_ticks % 15:
+            return
         for location in self.marker_world:
             self.world.debug.draw_point(location, size=0.06,
                                         color=self.carla.Color(255, 0, 0),
-                                        life_time=2.0 * self.dt)
+                                        life_time=1.0)
 
     def open_loop(self, tick):
         """A scripted command, for the scenarios that measure the vehicle
@@ -680,7 +691,10 @@ class Simulator:
         Depth first, so that it is on the host before the device's result
         for the same frame can come back."""
         import cv2
-        quality = [cv2.IMWRITE_JPEG_QUALITY, int(self.c.get("jpeg_quality", 75))]
+        # Optimised Huffman tables: the same pixels in 14 % fewer bytes, for
+        # 2 ms more per frame
+        quality = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality,
+                   cv2.IMWRITE_JPEG_OPTIMIZE, 1]
         keep_every = int(self.scenario.get("rgb_artifact_every",
                                            self.c.get("rgb_artifact_every", 0)))
         while True:
@@ -722,12 +736,15 @@ class Simulator:
 
         # 1. What the vehicle does during this tick
         self.take_commands(last["sim_ns"] if last else 0)
-        if self.args.arm and tick >= 0 and self.controller_ready and not self.arm_sent:
+        if self.args.arm and tick >= 0 and self.controller_ready \
+                and time.monotonic() - self.arm_sent > 1.0:
             # The operator's explicit action, taken once the controller says
-            # its gates pass; without --arm nobody arms
+            # its gates pass; without --arm nobody arms. The controller may
+            # still refuse (a gate closed on the way): asked again, at most
+            # once a second, while it reports ready.
             self.pub_arm.publish(self.String(data=json.dumps(
                 {"run_id": self.run_id, "enable": True})))
-            self.arm_sent = True
+            self.arm_sent = time.monotonic()
         forged = self.fault("forge_commands", tick)
         if forged:
             for bad in forged["commands"]:
@@ -736,11 +753,15 @@ class Simulator:
         open_loop = self.open_loop(tick)
         if open_loop is not None:
             applied = open_loop
-        self.ego.apply_control(self.carla.VehicleControl(
-            throttle=float(applied["throttle"]), brake=float(applied["brake"]),
-            steer=float(applied["steer"])))
-        for actor in self.scripted:
-            actor.step(tick)
+        # One synchronous batch: every command is in the simulator before the
+        # tick. Sent one by one they are not waited for, and now and then an
+        # actor was still at its old place in the tick that followed.
+        commands = [self.carla.command.ApplyVehicleControl(
+            self.ego, self.carla.VehicleControl(
+                throttle=float(applied["throttle"]), brake=float(applied["brake"]),
+                steer=float(applied["steer"])))]
+        commands += [actor.step(tick) for actor in self.scripted]
+        self.client.apply_batch_sync(commands, False)
         self.draw_markers()
         frame_before = last["frame"] if last else None
         apply_mono = mono_ns()
@@ -838,7 +859,7 @@ class Simulator:
             "lane": self.config.get("lane"),
             "metric": self.config.get("metric", {}),
             "control": self.config["control"],
-            "jpeg_quality": int(self.c.get("jpeg_quality", 75)),
+            "jpeg_quality": self.jpeg_quality,
             "sender": sender_description,
             "gstreamer": version(["gst-inspect-1.0", "--version"]),
             "depth_encoding": "carla_bgr24_zlib",

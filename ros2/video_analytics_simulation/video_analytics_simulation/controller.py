@@ -88,6 +88,9 @@ class ControlCore:
         delivered = config.get("classes") or []
         self.missing_classes = sorted(self.hazards - set(delivered)) if delivered else []
         self.age_limit_ns = int(self.c["age_limit_ms"] * 1e6)
+        # To arm, perception must be well inside the limit, not at its edge:
+        # a run armed with 467 ms of 500 was stopped as stale one tick later
+        self.arm_age_ns = int(self.age_limit_ns * self.c.get("arm_age_fraction", 0.6))
         self.tracker = MetricTracker(self.rig, config.get("metric"))
         self.depth = protocol.LiveCache(int(self.c.get("depth_cache_entries", 45)))
         self.ego = protocol.LiveCache(int(self.c.get("ego_cache_entries", 120)))
@@ -156,7 +159,7 @@ class ControlCore:
             return self.reject("bad_envelope")
         if metric is None:
             return self.reject("not_newer")
-        age_ok = now_sim_ns is None or now_sim_ns - sim_ns <= self.age_limit_ns
+        age_ok = now_sim_ns is None or now_sim_ns - sim_ns <= self.arm_age_ns
         self.fresh_frames = self.fresh_frames + 1 if (lane.get("valid") and age_ok) else 0
         self.accepted += 1
         self.basis = {"sim_ns": sim_ns, "lane": lane, "metric": metric,
@@ -171,7 +174,7 @@ class ControlCore:
         if self.basis is None:
             reasons.append("no_perception")
         else:
-            if ego_now["sim_ns"] - self.basis["sim_ns"] > self.age_limit_ns:
+            if ego_now["sim_ns"] - self.basis["sim_ns"] > self.arm_age_ns:
                 reasons.append("stale_perception")
             if not self.basis["lane"].get("valid"):
                 reasons.append("lane_invalid")

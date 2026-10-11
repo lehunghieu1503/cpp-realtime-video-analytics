@@ -778,7 +778,8 @@ def reprojection_section(run_dir, truth_by_ns, rig):
     errors, missing, images = [], 0, 0
     for name in sorted(os.listdir(directory)):
         row = truth_by_ns.get(int(name[:-4])) if name.endswith(".jpg") else None
-        if row is None:
+        # Only frames of the empty road: a car would hide some of the markers
+        if row is None or any(a.get("present") for a in row["actors"]):
             continue
         bgr = cv2.imread(os.path.join(directory, name)).astype(np.int32)
         # Red, and nothing else in this scene is: R high, G and B low
@@ -1046,7 +1047,8 @@ def evaluate(run_dir, do_replay=False, lane_model=None):
             "results_per_wall_second": (identity["matched"] / simulator["wall_seconds"])
             if simulator.get("wall_seconds") else None,
             "jpeg_mbit_per_s": simulator.get("jpeg_mbit_per_s"),
-            "real_time_30_fps": bool(simulator.get("wall_fps", 0) >= 29.5),
+            # Paced at 30: anything short of it is the host not keeping up
+            "real_time_30_fps": bool(simulator.get("wall_fps", 0) >= 29.95),
         },
         "simulator": simulator,
     }

@@ -48,22 +48,24 @@ scenarios:
   # the camera, on and off the optical axis. With a device it also checks
   # the range the metric tracking gives for them.
   calibration:
-    ticks: 270
+    ticks: 360
     depth_fixture: true
     rgb_artifact_every: 10
-    # Red points on the road and above it, in the ego frame: centre and off
-    # axis, 5 to 20 m from the camera
-    markers_ego_m: [[5.6, 0.0, 0.02], [5.6, -1.2, 0.02], [5.6, 1.2, 0.02],
-                    [10.6, -2.5, 0.02], [10.6, 2.5, 0.02], [10.6, 0.0, 1.0],
-                    [20.6, -4.0, 0.02], [20.6, 4.0, 0.02], [20.6, -4.0, 2.0],
-                    [20.6, 4.0, 2.0], [16.0, -1.75, 0.02], [16.0, 1.75, 0.02]]
+    # Red points at known places in the ego frame, centre and off axis, 5 to
+    # 20 m from the camera, 0.3 to 2 m above the road (on the road itself the
+    # lower half of a point is under the surface and its centre reads high).
+    # Checked on the first 90 ticks, before the cars appear.
+    markers_ego_m: [[5.6, 0.0, 0.3], [5.6, -1.2, 0.3], [5.6, 1.2, 0.3],
+                    [10.6, -2.5, 0.3], [10.6, 2.5, 0.3], [10.6, 0.0, 1.0],
+                    [20.6, -4.0, 0.3], [20.6, 4.0, 0.3], [20.6, -4.0, 2.0],
+                    [20.6, 4.0, 2.0], [16.0, -1.75, 0.5], [16.0, 1.75, 0.5]]
     actors:
-      - {name: centre, class: car, blueprint: vehicle.tesla.model3,
+      - {name: centre, class: car, blueprint: vehicle.tesla.model3, from_tick: 90,
          sweep: {distances_m: [8.0, 13.0, 23.0], hold_ticks: 90}}
       - {name: right, class: car, blueprint: vehicle.tesla.model3, lane: 1,
-         sweep: {distances_m: [14.0, 14.0, 24.0], hold_ticks: 90}}
+         from_tick: 90, sweep: {distances_m: [14.0, 14.0, 24.0], hold_ticks: 90}}
       - {name: left, class: car, blueprint: vehicle.tesla.model3, lane: -1,
-         sweep: {distances_m: [15.0, 25.0, 25.0], hold_ticks: 90}}
+         from_tick: 90, sweep: {distances_m: [15.0, 25.0, 25.0], hold_ticks: 90}}
     expect: {depth_is: along_optical_axis, road_height_rmse_m: 0.03,
              reprojection_max_px: 2, range_error_max_m: 0.2, unknown_frames: 0}
 
@@ -100,13 +102,13 @@ scenarios:
          from_tick: 0, until_tick: 120, sweep: {distances_m: [22, 42], hold_ticks: 60}}
       - {name: bus, class: bus, blueprint: vehicle.mitsubishi.fusorosa,
          from_tick: 120, until_tick: 240,
-         sweep: {distances_m: [22, 22, 22, 42], hold_ticks: 60}}
+         sweep: {distances_m: [22, 42], hold_ticks: 60}}
       - {name: motorcycle, class: motorcycle, blueprint: vehicle.yamaha.yzf,
          from_tick: 240, until_tick: 360,
-         sweep: {distances_m: [20, 20, 20, 20, 20, 40], hold_ticks: 60}}
+         sweep: {distances_m: [20, 40], hold_ticks: 60}}
       - {name: bicycle, class: bicycle, blueprint: vehicle.diamondback.century,
          from_tick: 360, until_tick: 480,
-         sweep: {distances_m: [20, 20, 20, 20, 20, 20, 20, 40], hold_ticks: 60}}
+         sweep: {distances_m: [20, 40], hold_ticks: 60}}
     expect: {unknown_frames: 0}
 
   # ── Metric tracking: position, velocity, acceleration ─────────────────────
@@ -146,8 +148,11 @@ scenarios:
        max_lateral_deviation_m: 0.6, lane_coverage: 0.95, lane_centre_rmse_m: 0.3,
        unknown_frames: 0}
 
+  # This stretch has more in view: at quality 30 its frames are 45 kB,
+  # 10.7 Mbit/s, more than the link carried; at 25 they fit.
   lane_curve_right:
     route: curve_right
+    jpeg_quality: 25
     ticks: 900
     expect: *lane_expectations
 
@@ -191,6 +196,7 @@ scenarios:
   brake_static_car_curve:
     <<: *brake_static_car
     route: curve_right
+    jpeg_quality: 25
     actors:
       - {name: lead, class: car, blueprint: vehicle.audi.tt, ahead_m: 45.0}
 

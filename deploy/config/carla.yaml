@@ -66,12 +66,15 @@ carla:
   # 1280x720 at 30 FPS over the link between the two machines. Measured on
   # the link used so far (a relayed VPN, 120 ms round trip, about 10 Mbit/s):
   # quality 75 is 87 kB a frame, 20 Mbit/s, and only 69 % of the frames came
-  # back; quality 30 is 41 kB, 9.6 Mbit/s, and 99 % came back.
+  # back; quality 30 is 36 to 40 kB, under 10 Mbit/s, and 99 % came back.
+  # Quality 20 fits with more room but the detector then misses cars beyond
+  # 60 m that it finds at 30.
   jpeg_quality: 30
   sender: {bind: 0.0.0.0, port: 5000, max_queued: 2, client_max_buffers: 30}
   callback_queue: 8
   live_cache_entries: 90   # 3 s of frames a late result can be joined with
-  depth_artifact_frames: 900   # lossless depth kept per run, about 1 MB each
+  depth_artifact_frames: 1000  # lossless depth kept per run, about 1 MB each;
+                               # a 900-tick run and its lead-in fit
   rgb_artifact_every: 0        # keep every Nth JPEG as sent; 0: none
   settle_ticks: 30
 
@@ -109,6 +112,7 @@ control:
   steer: {gain: 1.0, rate_per_s: 2.0}
   speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
   ready_frames: 3
+  arm_age_fraction: 0.6   # to arm, perception must be younger than 60 % of the limit
 
 # Where the ego vehicle starts, snapped to the lane centre. Town04, all on
 # level ground (z = 0).
