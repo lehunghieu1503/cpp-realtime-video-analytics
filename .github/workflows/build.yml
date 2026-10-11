@@ -13,13 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libunwind-dev is named because the runner image ships
+      # libunwind-14-dev, which conflicts with the one libgstreamer1.0-dev
+      # needs; apt resolves that only when asked for the package by name
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             wget
 
       - name: Install ONNX Runtime
@@ -55,13 +58,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libunwind-dev is named because the runner image ships
+      # libunwind-14-dev, which conflicts with the one libgstreamer1.0-dev
+      # needs; apt resolves that only when asked for the package by name
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential g++-12 cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             wget
 
       - name: Install ONNX Runtime
