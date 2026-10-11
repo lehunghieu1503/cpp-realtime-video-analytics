@@ -22,6 +22,9 @@
 #include <mutex>
 #include <opencv2/opencv.hpp>
 
+// Taken during static initialisation, before main()
+static const auto gProcessStart = std::chrono::steady_clock::now();
+
 // Global shutdown flag for SIGINT handling
 static std::atomic<bool> gShutdown{false};
 
@@ -411,6 +414,14 @@ std::string renderMetrics(LiveMetrics& metrics, const Pipeline& pipeline,
   }
   gauge("va_process_resident_memory_bytes", "Resident set size");
   out << "va_process_resident_memory_bytes " << residentBytes() << "\n";
+  // Lets a report restrict itself to the current run: a rate computed
+  // across a restart mixes two processes
+  gauge("va_process_uptime_seconds", "Time since the process started");
+  out << "va_process_uptime_seconds "
+      << std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                       gProcessStart)
+             .count()
+      << "\n";
   return out.str();
 }
 
