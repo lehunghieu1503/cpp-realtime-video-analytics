@@ -230,6 +230,13 @@ class ScriptedActor:
 
     def transform_at(self, tick):
         spec = self.spec
+        if "at" in spec:
+            # A place in the world, not along the ego vehicle's lane
+            at = spec["at"]
+            return self.carla.Transform(
+                self.carla.Location(float(at["x"]), float(at["y"]),
+                                    float(at.get("z", 0.0)) + float(spec.get("z_m", 0.3))),
+                self.carla.Rotation(yaw=float(at.get("yaw_deg", 0.0)))), 0.0
         if self.placements:
             # Placements are counted from the tick the actor appears
             since = max(0, tick - self.spec.get("from_tick", 0))
@@ -456,9 +463,17 @@ class Simulator:
             carla.Location(route["x"], route["y"], 0.0), project_to_road=True)
         self.base_waypoint = waypoint
         transform = waypoint.transform
+        # A route with a heading is a pose of its own (a car park has no
+        # lane to snap to); its z is the ground there
+        self.route_ground_z = None
+        if "yaw_deg" in route:
+            self.route_ground_z = float(route.get("z", 0.0))
+            transform = carla.Transform(
+                carla.Location(float(route["x"]), float(route["y"]), self.route_ground_z),
+                carla.Rotation(yaw=float(route["yaw_deg"])))
         transform.location.z += 0.3
         transform.rotation.yaw += float(self.scenario.get("ego_yaw_offset_deg", 0.0))
-        yaw = math.radians(waypoint.transform.rotation.yaw)
+        yaw = math.radians(transform.rotation.yaw)
         lateral = float(self.scenario.get("ego_lateral_m", 0.0))
         transform.location.x -= math.sin(yaw) * lateral
         transform.location.y += math.cos(yaw) * lateral
@@ -617,6 +632,7 @@ class Simulator:
         for step in steps:
             if tick >= step["from_tick"]:
                 current = {k: float(step.get(k, 0.0)) for k in ("throttle", "brake", "steer")}
+                current["reverse"] = bool(step.get("reverse", False))
         return dict(current, reason="open_loop", command_seq=None)
 
     def fault(self, kind, tick):
@@ -777,7 +793,11 @@ class Simulator:
         commands = [self.carla.command.ApplyVehicleControl(
             self.ego, self.carla.VehicleControl(
                 throttle=float(applied["throttle"]), brake=float(applied["brake"]),
-                steer=float(applied["steer"])))]
+                steer=float(applied["steer"]),
+                # Changing `reverse` puts the gearbox in -1 or 1 by itself;
+                # manual_gear_shift stays off
+                reverse=bool(applied.get("reverse", False)),
+                hand_brake=bool(applied.get("hand_brake", False))))]
         commands += [actor.step(tick) for actor in self.scripted]
         self.client.apply_batch_sync(commands, False)
         self.draw_markers()
@@ -917,7 +937,8 @@ class Simulator:
                     break
             location = self.ego.get_transform().location
             road = self.map.get_waypoint(location, project_to_road=True)
-            ground = road.transform.location.z - location.z
+            ground = (road.transform.location.z if self.route_ground_z is None
+                      else self.route_ground_z) - location.z
             protocol.write_json(os.path.join(self.run_dir, "manifest.json"),
                                 self.manifest(s, ground))
             if abs(ground - self.rig.ground_z) > 0.05:

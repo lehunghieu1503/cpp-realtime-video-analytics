@@ -28,9 +28,11 @@ defaults:
 scenarios:
   # ── No device needed: the vehicle and the sensors themselves ──────────────
 
-  # Steering sign and gain, then braking from about 10 km/h. Open loop.
+  # Steering sign and gain, then braking from about 10 km/h, then backwards
+  # with the wheel at 0.45 to the right: which way the vehicle turns in
+  # reverse and on what radius. Open loop.
   vehicle_response:
-    ticks: 520
+    ticks: 700
     depth_artifact_frames: 0
     open_loop:
       - {from_tick: 0, throttle: 0.4}
@@ -42,6 +44,8 @@ scenarios:
       - {from_tick: 350, throttle: 0.4}
       - {from_tick: 400, throttle: 0.15}
       - {from_tick: 430, brake: 1.0}
+      - {from_tick: 520, throttle: 0.3, steer: 0.45, reverse: true}
+      - {from_tick: 640, brake: 1.0}
     expect: {steer_sign: true, brake_deceleration_min_mps2: 2.5, collisions: 0}
 
   # Depth and calibration on the road plane and on cars 5, 10 and 20 m from

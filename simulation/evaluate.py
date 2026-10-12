@@ -562,20 +562,30 @@ def vehicle_section(controls, ego_rows, manifest):
     out = {"steer": [], "brake": None}
     segments = {}
     for ego, command in rows:
-        if command["steer"] != 0.0 and ego["speed_mps"] > 1.0:
-            segments.setdefault(command["steer"], []).append(
-                ego["yaw_rate_radps"] / ego["speed_mps"])
-    for steer, curvatures in sorted(segments.items()):
+        # Backwards at this throttle the vehicle stays under 1 m/s
+        if command["steer"] != 0.0 and ego["speed_mps"] > (
+                0.5 if command.get("reverse") else 1.0):
+            # Speed is unsigned: in reverse the yaw rate over it has the
+            # sign of the turn, not of the path's curvature
+            segments.setdefault((bool(command.get("reverse")), command["steer"]),
+                                []).append(ego["yaw_rate_radps"] / ego["speed_mps"])
+    for (reverse, steer), curvatures in sorted(segments.items()):
         # The first second is the vehicle turning in
         settled = curvatures[len(curvatures) // 2:]
         curvature = float(np.mean(settled))
-        wheel = math.atan(wheelbase * curvature)
+        # The yaw rate over the speed is the curvature of the origin's path;
+        # the wheel angle follows from the rear axle's, half a wheelbase back
+        rear = math.sqrt(max(1e-9, 1.0 / curvature ** 2 - (wheelbase / 2.0) ** 2)) \
+            if curvature else float("inf")
+        wheel = math.atan(wheelbase / rear) * (1 if curvature > 0 else -1)
         out["steer"].append({
-            "steer": steer, "curvature_inv_m": curvature, "wheel_angle_rad": wheel,
-            "turns_right": curvature > 0,
-            "sign_ok": (curvature > 0) == (steer > 0),
+            "steer": steer, "reverse": reverse, "curvature_inv_m": curvature,
+            "wheel_angle_rad": wheel, "turns_right": curvature > 0,
+            # Backwards, the same wheel angle turns the vehicle the other way
+            "sign_ok": (curvature > 0) == ((steer > 0) != reverse),
+            "rear_axle_radius_m": rear if curvature else None,
             # 1.0 would be: steer 1 turns the wheels by max_steer_deg
-            "gain": wheel / (steer * max_steer)})
+            "gain": abs(wheel) / (abs(steer) * max_steer)})
     braking = [(ego, c) for ego, c in rows if c["brake"] >= 1.0]
     moving = [i for i, (ego, c) in enumerate(rows) if c["brake"] >= 1.0
               and i > 0 and rows[i - 1][1]["brake"] < 1.0 and ego["speed_mps"] > 1.0]
@@ -961,8 +971,10 @@ def check_expectations(expect, metrics):
                 e["count"] > 0 and e["rmse"] <= value, str(e.get("rmse")))
         elif key == "steer_sign":
             for item in (metrics.get("vehicle") or {}).get("steer", []):
-                add("steer %+.2f turns %s" % (item["steer"],
-                                              "right" if item["steer"] > 0 else "left"),
+                right = (item["steer"] > 0) != item.get("reverse", False)
+                add("steer %+.2f%s turns %s" % (
+                    item["steer"], " in reverse" if item.get("reverse") else "",
+                    "right" if right else "left"),
                     item["sign_ok"], "curvature %.4f 1/m, gain %.2f" % (
                         item["curvature_inv_m"], item["gain"]))
             if not (metrics.get("vehicle") or {}).get("steer"):
@@ -1188,10 +1200,12 @@ def summary_markdown(m):
     if m.get("vehicle"):
         lines += ["", "## Vehicle response (open loop)", ""]
         for item in m["vehicle"]["steer"]:
-            lines.append("- steer %+.2f: curvature %+.4f 1/m, wheel angle %+.2f deg, "
-                         "gain %.2f of the nominal, sign %s" % (
-                             item["steer"], item["curvature_inv_m"],
-                             math.degrees(item["wheel_angle_rad"]), item["gain"],
+            lines.append("- steer %+.2f%s: turns %s, rear axle on a radius of %.1f m, "
+                         "wheel angle %.2f deg, gain %.2f of the nominal, sign %s" % (
+                             item["steer"], " in reverse" if item.get("reverse") else "",
+                             "right" if item["turns_right"] else "left",
+                             item.get("rear_axle_radius_m") or float("inf"),
+                             abs(math.degrees(item["wheel_angle_rad"])), item["gain"],
                              "ok" if item["sign_ok"] else "WRONG"))
         b = m["vehicle"]["brake"]
         if b:
