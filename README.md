@@ -722,6 +722,25 @@ both FP16:
 | Braking for a car, a truck, a person, a cut-in | stopped 3.9 to 11.3 m short in 12 runs, no collision |
 | Data lost or controller killed | braked within the budget: 500 ms, 303 ms |
 
+Two scenarios on one PC show it driving and parking, with the same two
+models (`--gui` opens the CARLA window; boxes and lane lines are on the
+device's dashboard, `http://127.0.0.1:9011`):
+
+```bash
+simulation/run.sh --scenario show_drive --arm --gui   # Town04, up to 30 km/h
+simulation/run.sh --scenario show_park --arm --gui    # Town05's car park
+```
+
+| Show | Measured |
+|:-----|:---------|
+| `show_drive`, 9 runs | follows a car at 24 m for 14 s, changes lane in 3.1 s, stops 15 m before a person crossing, drives on 2.5 s later; no collision |
+| `show_park`, 4 runs | backs into a 2.72 m stall: 0.06 m beside its axis, 1 degree off, parking brake set |
+| `show_park_occupied` | a car in the stall: the park is given up before the vehicle moves |
+
+A brake for an obstacle is now released when the path is clear again; old
+perception, a lost pose or a lane lost for five results still stop the car
+for the rest of the run. The script exits with the evaluation's code.
+
 Targets that were not met: 200 ms end to end needs a better link than this
 one (the budgets in `simulation/config/carla.yaml` are set for it, and say so);
 the simulation ran at 29.7 ticks a second, not 30; nothing is detected
