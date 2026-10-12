@@ -418,8 +418,24 @@ class Simulator:
             raise SystemExit("CARLA server %s and client %s differ" % (
                 self.server_version, client_version))
         town = self.scenario.get("map", self.c.get("map", "Town04"))
-        self.world = self.client.load_world(town)
+        self.world = self.client.get_world()
+        if self.world.get_map().name.split("/")[-1] != town:
+            self.client.load_world(town)
+            # The map before leaves its textures in video memory until the
+            # next load, and the server starts with its largest map: with
+            # them, the device's models did not fit beside it on 8 GB
+            self.world = self.client.reload_world()
+        else:
+            # The map is kept: after some twenty loads in a row the server
+            # rendered wrong colours. What an earlier run left behind (it
+            # was killed) is removed instead.
+            for actor in self.world.get_actors():
+                if actor.type_id.startswith(("vehicle.", "walker.", "sensor.")):
+                    actor.destroy()
         self.original_settings = self.world.get_settings()
+        # A run that was killed left the world waiting for ticks
+        self.original_settings.synchronous_mode = False
+        self.original_settings.fixed_delta_seconds = None
         settings = self.world.get_settings()
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = self.dt
