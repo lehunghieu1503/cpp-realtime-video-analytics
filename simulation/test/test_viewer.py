@@ -61,7 +61,7 @@ class Window(unittest.TestCase):
         view.result("rear", found)
         view.show(6, 0.0, {})
         front, rear = self.shown[-1][:360, :640], self.shown[-1][:360, 640:]
-        self.assertGreater((front != 90).any(axis=2).sum(), 200)  # the box and its label
+        self.assertGreater((front != 90).any(axis=2).sum(), 200)  # the box, two lane lines
         # The stall the model found, green for an empty one, and over its
         # corners the ends of its dividers: crosses
         self.assertGreater((rear == (0, 255, 0)).all(axis=2).sum(), 5)
@@ -80,21 +80,6 @@ class Window(unittest.TestCase):
         drawn = self.shown[-1]
         self.assertGreater((drawn[:360, 640:] == (0, 255, 255)).all(axis=2).sum(), 200)
         self.assertGreater((drawn[360:] > 0).sum(), 500)  # the line of text
-
-    def test_lane_lines_are_drawn_on_the_road_and_not_in_a_car_park(self):
-        result = {"simulation": {"sim_ns": 1}, "detections": [],
-                  "lane": {"pixels": [[[500, 700], [600, 400]], [[800, 700], [700, 400]]]}}
-        grey = np.full((720, 1280, 4), 90, np.uint8)
-        # This viewer has a rear camera: the scenario parks
-        self.view.frame("front", 1, grey)
-        self.view.result("front", result)
-        self.view.show(0, 0.0, {})
-        self.assertTrue((self.shown[-1][:360, :640] == 90).all())
-        road = viewer.Viewer({"front": FRONT}, lambda ns: self.pose)
-        road.frame("front", 1, grey)
-        road.result("front", result)
-        road.show(0, 0.0, {})
-        self.assertGreater((self.shown[-1][:360] == (0, 255, 255)).all(axis=2).sum(), 100)
 
     def test_a_result_of_a_frame_no_longer_kept_changes_nothing(self):
         view = self.view

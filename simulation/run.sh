@@ -24,6 +24,10 @@
 #                      cameras and what the device finds in them: boxes, lane
 #                      lines, parking stalls. An off-screen server left by an
 #                      earlier run is stopped and started again with a window.
+#   --web              serve the device's dashboard too: a page with each
+#                      camera's video and what was found in it, at the
+#                      address the script prints. Off by default: then the
+#                      device draws and encodes nothing for a browser.
 #   --config FILE      default simulation/config/carla.yaml
 #   --scenarios FILE   default simulation/config/carla-scenarios.yaml
 #   --run-dir DIR      default .cache/carla/<run id>; must not exist
@@ -46,7 +50,7 @@ set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
 TICKS=0 CONFIG=simulation/config/carla.yaml SCENARIOS=simulation/config/carla-scenarios.yaml
-RUN_DIR="" LOCAL_BACKEND="" GUI="" OFFSCREEN=-RenderOffScreen
+RUN_DIR="" LOCAL_BACKEND="" GUI="" OFFSCREEN=-RenderOffScreen WEB=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="$2"; shift 2 ;;
@@ -55,16 +59,17 @@ while [ $# -gt 0 ]; do
     --sim-host) SIM_HOST="$2"; shift 2 ;;
     --arm) ARM=--arm; shift ;;
     --gui) GUI="--follow --view" OFFSCREEN=""; shift ;;
+    --web) WEB=1; shift ;;
     --ticks) TICKS="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -159,22 +164,28 @@ else
   SIM_HOST="${SIM_HOST:-$(ip -4 route get "$(getent ahostsv4 "$BOARD" | awk 'NR==1{print $1}')" | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
   DEVICE_URL=http://$BOARD:9002
 fi
-# The device's copy of the config: the camera streams come from this PC. The
-# rear camera and the stall model are for the scenarios that park; the others
-# neither send its images nor load its model.
-"$CARLA_PYTHON" - "$CONFIG" "$SCENARIOS" "$SCENARIO" "$SIM_HOST" >"$RUN_DIR/device.yaml" <<'PY'
+# The device's copy of the config: the camera streams come from this PC. It
+# has what this scenario uses and nothing else. The rear camera and the stall
+# model are for the scenarios that park; the lane model is for the others (a
+# car park has no lanes); the dashboard is served only with --web.
+"$CARLA_PYTHON" - "$CONFIG" "$SCENARIOS" "$SCENARIO" "$SIM_HOST" "$WEB" >"$RUN_DIR/device.yaml" <<'PY'
 import sys
 import yaml
-config_path, scenarios_path, name, host = sys.argv[1:]
+config_path, scenarios_path, name, host, web = sys.argv[1:]
 with open(config_path) as f:
     config = yaml.safe_load(f.read().replace("SIM_HOST", host))
 with open(scenarios_path) as f:
     scenarios = yaml.safe_load(f)
 if name not in scenarios["scenarios"]:
     raise SystemExit("unknown scenario " + name)
-if not dict(scenarios.get("defaults", {}), **scenarios["scenarios"][name]).get("park"):
+if dict(scenarios.get("defaults", {}), **scenarios["scenarios"][name]).get("park"):
+    for source in config["sources"]:
+        source.pop("lane", None)
+    config.pop("lane", None)
+else:
     config["sources"] = [s for s in config["sources"] if not s.get("stall")]
     config.pop("stall", None)
+config["dashboard"] = bool(web)
 yaml.safe_dump(config, sys.stdout, sort_keys=False)
 PY
 
@@ -207,7 +218,8 @@ if [ "$DEVICE" = none ]; then
 elif [ "$DEVICE" = local ]; then
   [ -z "$LOCAL_BACKEND" ] || sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
   start_local_device
-  [ -n "$GUI" ] || echo "   boxes and lane lines: http://127.0.0.1:9011 (or run with --gui)"
+  [ -z "$WEB" ] || echo "   dashboard: http://127.0.0.1:9011"
+  [ -n "$WEB$GUI" ] || echo "   nothing to watch: --gui opens the camera window, --web serves the dashboard"
 else
   MODELS=$(sed -n 's/^ *model: *//p' "$RUN_DIR/device.yaml")
   for model in $MODELS; do
