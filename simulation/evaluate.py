@@ -813,7 +813,8 @@ def vehicle_section(controls, ego_rows, manifest):
     return out
 
 
-def depth_fixture_section(run_dir, generated, truth_by_ns, rig, every=15):
+def depth_fixture_section(run_dir, generated, truth_by_ns, rig, every=15,
+                          front_bumper_m=None):
     """What the depth image measures, checked on the road itself.
 
     The road is a known plane: z = ground_z in the ego frame. Each sampled
@@ -853,6 +854,12 @@ def depth_fixture_section(run_dir, generated, truth_by_ns, rig, every=15):
         expected, on_road = rig.uv_to_ground(u + 0.5, v + 0.5, 60.0)
         # Only where the road is the nearest thing: the lane ahead, within 60 m
         on_road &= np.abs(expected[:, 1]) < 5.0
+        if front_bumper_m is not None:
+            # ... and not the vehicle's own bonnet, which a camera pitched
+            # down has in its lowest rows. A bonnet up to half the camera's
+            # height at the bumper hides the road as far as twice the
+            # distance to the bumper.
+            on_road &= expected[:, 0] > 2.0 * front_bumper_m - rig.x + 0.25
         u, v, d, expected = u[on_road], v[on_road], d[on_road], expected[on_road]
         along_axis = rig.depth_to_ego(u + 0.5, v + 0.5, d)
         along_ray = rig.depth_to_ego(u + 0.5, v + 0.5, d, radial=True)
@@ -1330,8 +1337,9 @@ def evaluate(run_dir, do_replay=False, lane_model=None):
     if vehicle:
         metrics["vehicle"] = vehicle
     if manifest["scenario_config"].get("depth_fixture"):
-        metrics["depth_fixture"] = depth_fixture_section(run_dir, generated,
-                                                         truth_by_ns, rig)
+        metrics["depth_fixture"] = depth_fixture_section(
+            run_dir, generated, truth_by_ns, rig,
+            front_bumper_m=manifest["vehicle"].get("front_bumper_m"))
         metrics["reprojection"] = reprojection_section(run_dir, truth_by_ns, rig)
     if do_replay:
         # Every frame of the ledger: the tracker's state at the first tick of
