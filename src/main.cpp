@@ -624,6 +624,7 @@ int runLive(const AppConfig& app) {
   sseConfig.port = app.port;
   sseConfig.bindAddress = app.bind;
   sseConfig.staticDir = "web/";
+  sseConfig.dashboard = app.dashboard;
   sseConfig.numStreams = static_cast<int>(app.sources.size());
   sseConfig.streamsJson = streamsJson(app);
   sseConfig.username = app.httpUser;
@@ -648,8 +649,9 @@ int runLive(const AppConfig& app) {
 
   std::cout << "Pipeline running. Press "
             << (app.headless ? "Ctrl+C" : "'q' or Ctrl+C") << " to stop.\n";
-  std::cout << "Dashboard: " << (app.tlsCert.empty() ? "http" : "https")
-            << "://localhost:" << app.port << "\n"
+  std::cout << (app.dashboard ? "Dashboard: " : "Dashboard off; results: ")
+            << (app.tlsCert.empty() ? "http" : "https") << "://localhost:"
+            << app.port << (app.dashboard ? "" : "/events") << "\n"
             << std::flush;
 
   // Create the windows up front so waitKey() can pump events before the
@@ -863,7 +865,9 @@ void printUsage(const char* prog) {
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
       << "  --workers N      Inference worker threads (default: 2, or 1 with\n"
       << "                   an accelerator)\n"
-      << "  --headless       No local window; dashboard only\n\n"
+      << "  --headless       No local window; dashboard only\n"
+      << "  --no-dashboard   No page and no video on the port: results\n"
+      << "                   (/events), /health and /metrics only\n\n"
       << "Benchmark options:\n"
       << "  --input FILE     Input video file (required)\n"
       << "  --frames N       Number of frames to measure (default: 300)\n"
@@ -970,6 +974,8 @@ int main(int argc, char* argv[]) {
       app.profileLayers = true;
     } else if (is("--headless")) {
       app.headless = true;
+    } else if (is("--no-dashboard")) {
+      app.dashboard = false;
     } else if (is("--help")) {
       printUsage(argv[0]);
       return 0;

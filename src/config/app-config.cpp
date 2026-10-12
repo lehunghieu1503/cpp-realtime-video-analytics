@@ -86,6 +86,7 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     read(root["port"], config.port);
     read(root["bind"], config.bind);
     read(root["headless"], config.headless);
+    read(root["dashboard"], config.dashboard);
     read(root["confidence"], config.confidence);
     read(root["tracking"], config.tracking);
     read(root["dwell_seconds"], config.dwellSeconds);

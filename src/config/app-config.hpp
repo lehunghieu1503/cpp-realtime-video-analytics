@@ -65,6 +65,8 @@ struct AppConfig {
   int port = 9001;
   std::string bind = "127.0.0.1";
   bool headless = false;
+  // false: the dashboard's page and video are not served; results still are
+  bool dashboard = true;
   float confidence = 0.5f;
   // Keep only these COCO classes; empty keeps all of them
   std::vector<int> classes;

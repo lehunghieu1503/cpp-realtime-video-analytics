@@ -196,96 +196,98 @@ void SseServer::start() {
           });
     });
 
-    // MJPEG video stream endpoint: /video?stream=N (default 0)
-    svr.Get("/video", [this](const httplib::Request& req,
-                             httplib::Response& res) {
-      size_t stream = 0;
-      if (req.has_param("stream")) {
-        try {
-          stream = std::stoul(req.get_param_value("stream"));
-        } catch (const std::exception&) {
-          stream = videos_.size();  // rejected below
+    if (config_.dashboard) {
+      // MJPEG video stream endpoint: /video?stream=N (default 0)
+      svr.Get("/video", [this](const httplib::Request& req,
+                               httplib::Response& res) {
+        size_t stream = 0;
+        if (req.has_param("stream")) {
+          try {
+            stream = std::stoul(req.get_param_value("stream"));
+          } catch (const std::exception&) {
+            stream = videos_.size();  // rejected below
+          }
         }
-      }
-      if (stream >= videos_.size()) {
-        res.status = 404;
-        res.set_content("No such stream", "text/plain");
-        return;
-      }
-      VideoSlot& slot = videos_[stream];
-      res.set_header("Cache-Control", "no-cache");
-      slot.clients++;
-      res.set_chunked_content_provider(
-          "multipart/x-mixed-replace; boundary=frame",
-          [this, &slot](size_t, httplib::DataSink& sink) {
-            // Start after the buffered frame: with no viewer it is not
-            // refreshed, so it can be arbitrarily old
-            uint64_t lastSeq;
-            {
-              std::lock_guard<std::mutex> lock(slot.mutex);
-              lastSeq = slot.seq;
-            }
-            while (running_) {
-              // Wait for new frame
-              std::unique_lock<std::mutex> lock(slot.mutex);
-              slot.ready.wait_for(lock, std::chrono::milliseconds(100),
-                                  [this, &slot, lastSeq] {
-                                    return slot.seq > lastSeq || !running_;
-                                  });
-
-              if (!running_) break;
-              if (slot.seq == lastSeq) continue;
-
-              lastSeq = slot.seq;
-              // Copy JPEG buffer while holding lock
-              std::vector<unsigned char> jpeg = slot.jpeg;
-              lock.unlock();
-
-              // Write MJPEG frame boundary
-              std::string header = "--frame\r\nContent-Type: image/jpeg\r\n"
-                                   "Content-Length: " +
-                                   std::to_string(jpeg.size()) + "\r\n\r\n";
-
-              if (!sink.write(header.data(), header.size())) return false;
-              if (!sink.write(reinterpret_cast<const char*>(jpeg.data()),
-                              jpeg.size()))
-                return false;
-              if (!sink.write("\r\n", 2)) return false;
-            }
-            return false;
-          },
-          // Runs when the response is destroyed, however the stream ended
-          [&slot](bool) { slot.clients--; });
-    });
-
-    // Serve index.html at root
-    svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
-      auto content = readFile(config_.staticDir + "index.html");
-      if (content.empty()) {
-        res.status = 404;
-        res.set_content("Not found", "text/plain");
-      } else {
-        res.set_content(content, "text/html");
-      }
-    });
-
-    // Static files
-    svr.Get("/static/(.*)",
-            [this](const httplib::Request& req, httplib::Response& res) {
-              std::string path = req.matches[1];
-              if (path.find("..") != std::string::npos) {
-                res.status = 403;
-                res.set_content("Forbidden", "text/plain");
-                return;
+        if (stream >= videos_.size()) {
+          res.status = 404;
+          res.set_content("No such stream", "text/plain");
+          return;
+        }
+        VideoSlot& slot = videos_[stream];
+        res.set_header("Cache-Control", "no-cache");
+        slot.clients++;
+        res.set_chunked_content_provider(
+            "multipart/x-mixed-replace; boundary=frame",
+            [this, &slot](size_t, httplib::DataSink& sink) {
+              // Start after the buffered frame: with no viewer it is not
+              // refreshed, so it can be arbitrarily old
+              uint64_t lastSeq;
+              {
+                std::lock_guard<std::mutex> lock(slot.mutex);
+                lastSeq = slot.seq;
               }
-              auto content = readFile(config_.staticDir + path);
-              if (content.empty()) {
-                res.status = 404;
-                res.set_content("Not found", "text/plain");
-              } else {
-                res.set_content(content, contentType(path));
+              while (running_) {
+                // Wait for new frame
+                std::unique_lock<std::mutex> lock(slot.mutex);
+                slot.ready.wait_for(lock, std::chrono::milliseconds(100),
+                                    [this, &slot, lastSeq] {
+                                      return slot.seq > lastSeq || !running_;
+                                    });
+
+                if (!running_) break;
+                if (slot.seq == lastSeq) continue;
+
+                lastSeq = slot.seq;
+                // Copy JPEG buffer while holding lock
+                std::vector<unsigned char> jpeg = slot.jpeg;
+                lock.unlock();
+
+                // Write MJPEG frame boundary
+                std::string header = "--frame\r\nContent-Type: image/jpeg\r\n"
+                                     "Content-Length: " +
+                                     std::to_string(jpeg.size()) + "\r\n\r\n";
+
+                if (!sink.write(header.data(), header.size())) return false;
+                if (!sink.write(reinterpret_cast<const char*>(jpeg.data()),
+                                jpeg.size()))
+                  return false;
+                if (!sink.write("\r\n", 2)) return false;
               }
-            });
+              return false;
+            },
+            // Runs when the response is destroyed, however the stream ended
+            [&slot](bool) { slot.clients--; });
+      });
+
+      // Serve index.html at root
+      svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
+        auto content = readFile(config_.staticDir + "index.html");
+        if (content.empty()) {
+          res.status = 404;
+          res.set_content("Not found", "text/plain");
+        } else {
+          res.set_content(content, "text/html");
+        }
+      });
+
+      // Static files
+      svr.Get("/static/(.*)",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                std::string path = req.matches[1];
+                if (path.find("..") != std::string::npos) {
+                  res.status = 403;
+                  res.set_content("Forbidden", "text/plain");
+                  return;
+                }
+                auto content = readFile(config_.staticDir + path);
+                if (content.empty()) {
+                  res.status = 404;
+                  res.set_content("Not found", "text/plain");
+                } else {
+                  res.set_content(content, contentType(path));
+                }
+              });
+    }
 
     svr.listen_after_bind();
   });
