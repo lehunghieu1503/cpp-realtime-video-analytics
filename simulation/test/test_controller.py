@@ -832,6 +832,30 @@ class LaneChange(unittest.TestCase):
         world.frame()
         self.assertEqual(world.core.debug["lane_change"], "done")
 
+    def test_a_new_lane_seen_only_far_ahead_does_not_end_the_change(self):
+        world = self.world(self.LINES)
+        for _ in range(20):
+            world.frame()
+        self.moved(world, 0.0, 1.7)
+        # Over the marking the device reports the new lane, its left
+        # boundary from 19 m on only: valid, and nothing to steer on here
+        near = fixtures.lane_pixels(RIG, -1.75 + 1.8, xs=np.arange(5.5, 32.0, 1.0))
+        far = fixtures.lane_pixels(RIG, -5.25 + 1.8, xs=np.arange(19.0, 30.0, 1.0))
+        world.lane = dict(lane.estimate_lane([far, near], RIG, LANE_CONFIG),
+                          pixels=[far, near])
+        self.assertTrue(world.lane["valid"])
+        self.assertGreater(world.lane["centerline"]["x_min_m"], 18.0)
+        for _ in range(10):
+            world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "active")
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertEqual(world.last["reason"], "")
+        # Once it is seen from near as well, the change is done
+        world.lane = lane_envelope(offset=1.8, markings=self.LINES)
+        world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "done")
+        self.assertEqual(world.core.state, RUNNING)
+
     def test_to_the_right(self):
         world = self.world((-1.75, 1.75, 5.25), side="right")
         for _ in range(30):

@@ -468,7 +468,7 @@ class ControlCore:
         reason = ""
         change = self.lane_change
         if change and change["state"] == "active":
-            centre = self.crossing_path(lane_now, pose_now, ego_now["sim_ns"], dt)
+            centre = self.crossing_path(lane_now, pose_now, ego_now["sim_ns"], dt, speed)
             if centre is None and change["state"] == "active":
                 reason = "lane:marking_lost"
         if aisle:
@@ -540,7 +540,7 @@ class ControlCore:
         # Steering: a point on the centreline, inside what was observed
         pursuit = self.c["pure_pursuit"]
         lookahead = max(pursuit["lookahead_min_m"], pursuit["lookahead_gain_s"] * speed)
-        if centre["x_min_m"] > lookahead + pursuit.get("slack_m", 6.0):
+        if centre["x_min_m"] > self.lookahead_limit(speed):
             return stop("no_lookahead_support")
         target_x = min(max(lookahead, centre["x_min_m"]), centre["x_max_m"])
         target_y = lane_geometry.evaluate(centre["coefficients"], target_x)
@@ -733,7 +733,13 @@ class ControlCore:
         elif tick >= change["at_tick"] + change.get("window_ticks", 30):
             self.give_up_lane_change(reason)
 
-    def crossing_path(self, lane_now, pose_now, now_ns, dt):
+    def lookahead_limit(self, speed):
+        """A path must begin no farther ahead than this to be steered on."""
+        pursuit = self.c["pure_pursuit"]
+        return max(pursuit["lookahead_min_m"], pursuit["lookahead_gain_s"] * speed) \
+            + pursuit.get("slack_m", 6.0)
+
+    def crossing_path(self, lane_now, pose_now, now_ns, dt, speed):
         """The path during a lane change: beside the marking being crossed,
         from the centre of the lane the vehicle leaves to the centre of the
         one it enters. None when that marking is lost, or when the change is
@@ -757,7 +763,12 @@ class ControlCore:
                 change.get("coast_s", 2.0) * 1e9:
             return None
         y = self.marking_at(marking)
-        if lane_now["valid"]:
+        # A lane the device reports is taken only when it begins near
+        # enough to steer on: over the marking it sometimes reports one whose
+        # far boundary is five points from 19 m on. That is the new lane,
+        # and nothing at the lookahead.
+        if lane_now["valid"] and \
+                lane_now["centerline"]["x_min_m"] <= self.lookahead_limit(speed):
             ahead, behind = ("left", "right") if left else ("right", "left")
             if abs(self.marking_at(lane_now[behind]) - y) < 0.4:
                 change["state"] = "done"
