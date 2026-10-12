@@ -122,13 +122,16 @@ inline nlohmann::json serializeLane(const LaneResult& lane,
   return json;
 }
 
-// The parking stalls of a frame, added to the result as "stalls": pixels of
-// the frame, nothing in metres. corners are [x, y, confidence]: the two of
-// the mouth, then the two of the back, around the stall.
+// The parking stalls of a frame, added to the result as "stalls", and the
+// ends of the dividers between them, added as "stall_points": pixels of the
+// frame, nothing in metres. corners are [x, y, confidence]: the two of the
+// mouth, then the two of the back, around the stall.
 // Example output:
 // [{"class":"empty","confidence":0.93,"bbox":{"x":150,"y":207,"w":460,"h":103},
 //   "corners":[[150.2,302.1,0.98],[508.4,310.0,0.97],[606.3,207.2,0.91],
 //              [466.0,205.4,0.9]]}]
+// [{"class":"mouth","confidence":0.9,"x":150.2,"y":302.1},
+//  {"class":"back","confidence":0.8,"x":466.0,"y":205.4}]
 inline nlohmann::json serializeStalls(const std::vector<StallDetection>& stalls) {
   nlohmann::json list = nlohmann::json::array();
   for (const auto& stall : stalls) {
@@ -147,6 +150,17 @@ inline nlohmann::json serializeStalls(const std::vector<StallDetection>& stalls)
            {"w", static_cast<int>(stall.bbox.width)},
            {"h", static_cast<int>(stall.bbox.height)}}},
          {"corners", std::move(corners)}});
+  }
+  return list;
+}
+
+inline nlohmann::json serializeStallPoints(const std::vector<StallPoint>& points) {
+  nlohmann::json list = nlohmann::json::array();
+  for (const auto& point : points) {
+    list.push_back({{"class", point.back ? "back" : "mouth"},
+                    {"confidence", std::round(point.confidence * 100) / 100.0},
+                    {"x", std::round(point.at.x * 10) / 10.0},
+                    {"y", std::round(point.at.y * 10) / 10.0}});
   }
   return list;
 }

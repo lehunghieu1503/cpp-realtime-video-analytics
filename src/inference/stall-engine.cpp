@@ -32,7 +32,7 @@ StallEngine::StallEngine(const StallEngineConfig& config) : config_(config) {
     backend->run(zeros.data(), {1, 3, inputHeight_, inputWidth_}, outputShape);
     if (outputShape.size() != 3 || outputShape[1] != kFeatures) {
       std::cerr << "Stall model: " << config.modelPath
-                << " does not give a 1x18xN output\n";
+                << " does not give a 1x20xN output\n";
       return;
     }
   } catch (const std::exception& e) {
@@ -45,11 +45,12 @@ StallEngine::StallEngine(const StallEngineConfig& config) : config_(config) {
             << inputHeight_ << ")\n";
 }
 
-std::vector<StallDetection> StallEngine::decode(
-    const float* output, const std::vector<int64_t>& shape, float confidence,
-    float nms, int width, int height, int inputWidth, int inputHeight) {
+StallResult StallEngine::decode(const float* output,
+                                const std::vector<int64_t>& shape,
+                                float confidence, float nms, int width,
+                                int height, int inputWidth, int inputHeight) {
   if (shape.size() != 3 || shape[1] != kFeatures) {
-    throw std::runtime_error("the stall model's output is not [1, 18, N]");
+    throw std::runtime_error("the stall model's output is not [1, 20, N]");
   }
   const int count = static_cast<int>(shape[2]);
   // Feature-major, as the detector's: output[feature * count + candidate]
@@ -59,12 +60,17 @@ std::vector<StallDetection> StallEngine::decode(
   const float scaleX = static_cast<float>(width) / inputWidth;
   const float scaleY = static_cast<float>(height) / inputHeight;
 
-  std::vector<StallDetection> candidates;
-  std::vector<cv::Rect> boxes;
-  std::vector<float> scores;
+  std::vector<StallDetection> stalls;
+  std::vector<StallPoint> points;
+  // Boxes and scores for NMS, of the stalls and of the ends apart
+  std::vector<cv::Rect> boxes[2];
+  std::vector<float> scores[2];
   for (int i = 0; i < count; i++) {
-    float empty = at(4, i), occupied = at(5, i);
-    float score = std::max(empty, occupied);
+    int best = 0;
+    for (int c = 1; c < kClasses; c++) {
+      if (at(4 + c, i) > at(4 + best, i)) best = c;
+    }
+    float score = at(4 + best, i);
     if (!(score >= confidence)) continue;  // also drops a score that is NaN
     float cx = at(0, i), cy = at(1, i), w = at(2, i), h = at(3, i);
     float x = std::max(0.0f, (cx - w / 2.0f) * scaleX);
@@ -74,9 +80,10 @@ std::vector<StallDetection> StallEngine::decode(
     if (!(x2 > x && y2 > y)) continue;
 
     StallDetection stall;
-    stall.occupied = occupied > empty;
+    stall.occupied = best == 1;
     stall.confidence = score;
     stall.bbox = cv::Rect2f(x, y, x2 - x, y2 - y);
+    cv::Point2f mean(0.0f, 0.0f);
     for (int k = 0; k < kCorners; k++) {
       int feature = 4 + kClasses + 3 * k;
       // Not clamped to the image: a corner outside it is still where the
@@ -84,25 +91,37 @@ std::vector<StallDetection> StallEngine::decode(
       stall.corners[k] =
           cv::Point2f(at(feature, i) * scaleX, at(feature + 1, i) * scaleY);
       stall.cornerConfidence[k] = at(feature + 2, i);
+      mean += stall.corners[k] * (1.0f / kCorners);
     }
-    candidates.push_back(stall);
-    boxes.emplace_back(static_cast<int>(x), static_cast<int>(y),
-                       std::max(1, static_cast<int>(x2 - x)),
-                       std::max(1, static_cast<int>(y2 - y)));
-    scores.push_back(score);
+    const int group = best < 2 ? 0 : 1;
+    if (group == 0) {
+      stalls.push_back(stall);
+    } else {
+      // The four keypoints of an end are the same place, found four times
+      StallPoint point;
+      point.back = best == 3;
+      point.confidence = score;
+      point.at = mean;
+      points.push_back(point);
+    }
+    boxes[group].emplace_back(static_cast<int>(x), static_cast<int>(y),
+                              std::max(1, static_cast<int>(x2 - x)),
+                              std::max(1, static_cast<int>(y2 - y)));
+    scores[group].push_back(score);
   }
 
+  StallResult result;
   std::vector<int> kept;
-  cv::dnn::NMSBoxes(boxes, scores, confidence, nms, kept);
-  std::vector<StallDetection> stalls;
-  stalls.reserve(kept.size());
-  for (int index : kept) stalls.push_back(candidates[index]);
-  return stalls;
+  cv::dnn::NMSBoxes(boxes[0], scores[0], confidence, nms, kept);
+  for (int index : kept) result.stalls.push_back(stalls[index]);
+  kept.clear();
+  cv::dnn::NMSBoxes(boxes[1], scores[1], confidence, nms, kept);
+  for (int index : kept) result.points.push_back(points[index]);
+  return result;
 }
 
-std::vector<StallDetection> StallEngine::detect(const cv::Mat& bgr,
-                                                double* preMs, double* inferMs,
-                                                double* postMs) {
+StallResult StallEngine::detect(const cv::Mat& bgr, double* preMs,
+                                double* inferMs, double* postMs) {
   if (!backend_) throw std::runtime_error("the stall model is not loaded");
   using Clock = std::chrono::steady_clock;
   auto ms = [](Clock::time_point from, Clock::time_point to) {
@@ -117,12 +136,12 @@ std::vector<StallDetection> StallEngine::detect(const cv::Mat& bgr,
       blob.ptr<float>(), {1, 3, inputHeight_, inputWidth_}, outputShape);
   auto inferDone = Clock::now();
   // decode() reads the backend's buffer before the next run() reuses it
-  auto stalls = decode(output, outputShape, config_.confidence, config_.nms,
+  auto result = decode(output, outputShape, config_.confidence, config_.nms,
                        bgr.cols, bgr.rows, inputWidth_, inputHeight_);
   auto done = Clock::now();
 
   if (preMs) *preMs = ms(start, preDone);
   if (inferMs) *inferMs = ms(preDone, inferDone);
   if (postMs) *postMs = ms(inferDone, done);
-  return stalls;
+  return result;
 }

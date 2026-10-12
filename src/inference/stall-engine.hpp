@@ -29,17 +29,37 @@ struct StallDetection {
   std::array<float, 4> cornerConfidence{};
 };
 
-// Parking stall detector: an Ultralytics pose model with two classes (empty,
-// occupied) and four keypoints, trained by scripts/train-stall-model.py on
-// the images of simulation/stall-dataset.py. A model of its own next to the
-// YOLO detector, with its own backend instance:
+// Where a divider between two stalls ends, in pixels of the frame
+struct StallPoint {
+  // false: its end at the mouth of the stalls; true: where it meets the
+  // line across at their back
+  bool back = false;
+  float confidence = 0.0f;
+  cv::Point2f at;
+};
+
+struct StallResult {
+  std::vector<StallDetection> stalls;
+  std::vector<StallPoint> points;
+};
+
+// Parking stall detector: an Ultralytics pose model with four classes and
+// four keypoints, trained by scripts/train-stall-model.py on the images of
+// simulation/stall-dataset.py. A model of its own next to the YOLO
+// detector, with its own backend instance:
 //
 //   input   [1, 3, H, W]      RGB, [0, 1]; the frame is stretched to it
-//   output  [1, 18, N]        per candidate: cx, cy, w, h, 2 class scores,
+//   output  [1, 20, N]        per candidate: cx, cy, w, h, 4 class scores,
 //                             4 x (x, y, confidence), in pixels of the input
+//
+// Classes 0 and 1 are a stall, empty or occupied, with its four corners.
+// Classes 2 and 3 are the end of a divider, at the mouth or at the back; its
+// four keypoints are all that one place. A stall is large and its corners
+// are far from its middle: the model puts them roughly. An end is small and
+// is put sharply: stalls are measured by the ends.
 class StallEngine {
 public:
-  static constexpr int kClasses = 2;
+  static constexpr int kClasses = 4;
   static constexpr int kCorners = 4;
   static constexpr int kFeatures = 4 + kClasses + 3 * kCorners;
 
@@ -47,18 +67,17 @@ public:
   bool isLoaded() const { return backend_ != nullptr; }
 
   // Throws when inference fails
-  std::vector<StallDetection> detect(const cv::Mat& bgr,
-                                     double* preMs = nullptr,
-                                     double* inferMs = nullptr,
-                                     double* postMs = nullptr);
+  StallResult detect(const cv::Mat& bgr, double* preMs = nullptr,
+                     double* inferMs = nullptr, double* postMs = nullptr);
 
-  // The output tensor to stalls of a width x height frame, after
-  // class-agnostic NMS: a stall is found once, empty or occupied. Throws on
-  // a shape that is not [1, 18, N].
-  static std::vector<StallDetection> decode(
-      const float* output, const std::vector<int64_t>& shape,
-      float confidence, float nms, int width, int height, int inputWidth,
-      int inputHeight);
+  // The output tensor to the stalls and divider ends of a width x height
+  // frame. NMS runs among the stalls, whatever their class: a stall is found
+  // once, empty or occupied; and among the ends likewise. Throws on a shape
+  // that is not [1, 20, N].
+  static StallResult decode(const float* output,
+                            const std::vector<int64_t>& shape,
+                            float confidence, float nms, int width, int height,
+                            int inputWidth, int inputHeight);
 
 private:
   StallEngineConfig config_;

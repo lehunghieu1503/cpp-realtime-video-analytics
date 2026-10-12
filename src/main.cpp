@@ -34,9 +34,15 @@ void signalHandler(int) { gShutdown = true; }
 
 // Draw detection bounding boxes and labels on frame
 // Green for an empty stall, red for one with a vehicle in it; only the
-// corners the model says it sees are joined
-void drawStalls(cv::Mat& frame, const std::vector<StallDetection>& stalls) {
-  for (const auto& stall : stalls) {
+// corners the model says it sees are joined. The ends of the dividers are
+// crosses: yellow at the mouth, magenta at the back.
+void drawStalls(cv::Mat& frame, const StallResult& found) {
+  for (const auto& point : found.points) {
+    cv::drawMarker(frame, point.at,
+                   point.back ? cv::Scalar(255, 0, 255) : cv::Scalar(0, 255, 255),
+                   cv::MARKER_CROSS, 14, 2, cv::LINE_AA);
+  }
+  for (const auto& stall : found.stalls) {
     cv::Scalar color = stall.occupied ? cv::Scalar(0, 0, 255)
                                       : cv::Scalar(0, 255, 0);
     for (size_t k = 0; k < stall.corners.size(); k++) {
@@ -730,7 +736,7 @@ int runLive(const AppConfig& app) {
       }
     }
 
-    std::vector<StallDetection> stalls;
+    StallResult stalls;
     if (app.sources[s].stall) {
       try {
         stalls = stallEngine->detect(result.cpuFrame());
@@ -765,7 +771,10 @@ int runLive(const AppConfig& app) {
         app.simulation.enabled ? app.simulation.runId : std::string());
     json["stream"] = stream.id;
     if (app.sources[s].lane) json["lane"] = serializeLane(lane, calibrationId);
-    if (app.sources[s].stall) json["stalls"] = serializeStalls(stalls);
+    if (app.sources[s].stall) {
+      json["stalls"] = serializeStalls(stalls.stalls);
+      json["stall_points"] = serializeStallPoints(stalls.points);
+    }
     if (!events.empty()) {
       // One snapshot per frame, shared by the events it raised
       std::string snapshot = snapshots.save(result.frame, events.front());
