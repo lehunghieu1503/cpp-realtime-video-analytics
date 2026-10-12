@@ -268,6 +268,11 @@ scenarios:
       - {name: walker, class: person, blueprint: walker.pedestrian.0001,
          ahead_m: 212.0, lane: -2.6, yaw_deg: 90.0,
          cut_in: {start_tick: 800, duration_ticks: 300, to_lane: 1.6}}
+    # A lane change that was skipped is logged and fails the show. The
+    # person has no physics, so the collision sensor would not notice it
+    # being hit: the boxes are compared instead.
+    expect: {drives: true, follows: 2.0, lane_change: done, resumes: person,
+             no_box_overlap: [walker, lead], collisions: 0}
 
   # ── The park show. Needs --arm ────────────────────────────────────────────
   # Town05's car park: along the aisle at 2 m/s, past the stall, then
@@ -290,6 +295,7 @@ scenarios:
     park:
       stall: {x: 9.83, y: -35.50, yaw_deg: 0.0, length_m: 4.96, width_m: 2.72}
       handover: {x: 17.03, y: -13.10}
+    expect: {drives: true, parked: 15, collisions: 0, no_box_overlap: true}
 
   # The same stall with a car in it: the park must be given up before the
   # vehicle goes backwards
@@ -299,6 +305,9 @@ scenarios:
     actors:
       - {name: in_the_stall, class: car, blueprint: vehicle.tesla.model3,
          physics: true, at: {x: 9.83, y: -35.50, z: 0.157, yaw_deg: 0.0}}
+    # Passes when the park is given up as it should be. Parked anyway, a
+    # collision, a box over the other car's, or going backwards: fails.
+    expect: {park_abort: true, collisions: 0}
 
   # ── Faults. Need --arm ────────────────────────────────────────────────────
   # The vehicle is driving when the fault starts; it must be braked within

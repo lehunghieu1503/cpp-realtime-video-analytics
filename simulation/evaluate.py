@@ -57,7 +57,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from video_analytics_simulation import protocol  # noqa: E402
 from video_analytics_simulation.calibration import Pose, Rig, decode_depth  # noqa: E402
+from video_analytics_simulation.controller import stopping_distance  # noqa: E402
 from video_analytics_simulation.metric_tracker import MetricTracker  # noqa: E402
+from video_analytics_simulation.parking import Park  # noqa: E402
 
 BINS = [(0, 30), (30, 60), (60, 90), (90, 120)]
 IOU_MATCH = 0.5
@@ -515,6 +517,191 @@ def control_section(controls, truth_rows, manifest):
         "collisions": events["collision"], "lane_invasions": events["lane_invasion"],
         "commands_rejected": {},
     }
+
+
+def footprints_overlap(a, b):
+    """Two convex quadrilaterals, (4, 2) each, corners in order: whether
+    they share any area (separating axes)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    for polygon in (a, b):
+        for i in range(4):
+            edge = polygon[(i + 1) % 4] - polygon[i]
+            axis = np.array([-edge[1], edge[0]])
+            pa, pb = a @ axis, b @ axis
+            if pa.max() <= pb.min() or pb.max() <= pa.min():
+                return False
+    return True
+
+
+def ego_footprint(vehicle):
+    """The vehicle's box on the road, in its own frame."""
+    front = vehicle["front_bumper_m"]
+    # Runs written before the rear bumper was recorded: as long behind as ahead
+    rear = vehicle.get("rear_bumper_m", -front)
+    half = vehicle["width_m"] / 2.0
+    return np.array([[front, -half], [front, half], [rear, half], [rear, -half]])
+
+
+def actor_footprint(actor, ego_pose):
+    """An actor's box on the road, in the ego frame, corners in order."""
+    corners = actor_corners_ego(actor, ego_pose)
+    # Built as sx, sy, sz in (-1, 1): the lower face is every second corner
+    low = corners[::2, :2]
+    return low[[0, 1, 3, 2]]
+
+
+def show_section(controls, commands, truth_rows, manifest, matches):
+    """What the drive show and the park show are judged on: whether the
+    vehicle drove on after a brake it could release, the lane change, the
+    stretch it followed another vehicle on, whether its box ever shared
+    ground with another's, and where and how it ended a park.
+
+    A brake that was released is read from the controller's own record of
+    it (debug.hold in commands.jsonl), not from the reason of the last
+    stop: a vehicle that drives on has no last stop.
+    """
+    scenario = manifest["scenario_config"]
+    vehicle = manifest["vehicle"]
+    applied = sorted((c for c in controls if c.get("event") == "applied"),
+                     key=lambda c: c["tick"])
+    tick_of = {c["sim_ns_after"]: c["tick"] for c in applied}
+    out = {}
+
+    # Holds: runs of commands the controller marked as a brake it can release
+    holds = []
+    for record in commands:
+        command, debug = record.get("command"), record.get("debug") or {}
+        if not command or "control_sim_ns" not in command:
+            continue
+        holding = debug.get("hold") is True or debug.get("state") == "HOLDING"
+        tick = tick_of.get(command["control_sim_ns"])
+        if tick is None:
+            continue
+        if holding and command["brake"] >= 1.0:
+            if holds and holds[-1]["last_tick"] >= tick - 2:
+                holds[-1]["last_tick"] = tick
+                holds[-1]["reasons"].add(command["reason"])
+            else:
+                holds.append({"first_tick": tick, "last_tick": tick,
+                              "reasons": {command["reason"]}})
+    driving = [c["tick"] for c in applied if c["reason"] == "" and c["throttle"] > 0.0
+               and not c.get("reverse")]
+    for hold in holds:
+        hold["reasons"] = sorted(hold["reasons"])
+        hold["drove_before"] = any(t < hold["first_tick"] for t in driving)
+        # The command of a tick is applied in the next one
+        hold["drove_on_tick"] = next((t for t in driving if t > hold["last_tick"] + 1), None)
+    out["holds"] = holds
+
+    # Lane change: the last state the controller logged
+    states = [(tick_of.get(r["command"]["control_sim_ns"]), r["debug"])
+              for r in commands if r.get("command") and (r.get("debug") or {}).get("lane_change")]
+    lane_change = {"state": None}
+    if states:
+        lane_change["state"] = states[-1][1]["lane_change"]
+        for wanted in ("active", "done", "skipped"):
+            lane_change[wanted + "_tick"] = next(
+                (t for t, d in states if d["lane_change"] == wanted), None)
+        lane_change["skipped_reason"] = next(
+            (d["lane_change_skipped"] for _, d in states if d.get("lane_change_skipped")),
+            None)
+    out["lane_change"] = lane_change
+
+    # Following, and boxes that share ground
+    ego_box = ego_footprint(vehicle)
+    bumper = vehicle["front_bumper_m"]
+    half = vehicle["width_m"] / 2.0
+    brake = (manifest.get("control") or {}).get("brake")
+    follow_gap = scenario.get("follow_gap_m")
+    kinematics = truth_kinematics(truth_rows)
+    followed, overlaps = {}, {}
+    for row in truth_rows:
+        ego_pose = Pose.from_dict(row["ego"]["pose"])
+        speed = row["ego"]["speed_mps"]
+        for actor in row["actors"]:
+            if not actor.get("present"):
+                continue
+            if footprints_overlap(ego_box, actor_footprint(actor, ego_pose)):
+                overlaps.setdefault(actor["name"], []).append(row["tick"])
+            if not (follow_gap and brake) or actor["class"] == "person":
+                continue
+            corners = actor_corners_ego(actor, ego_pose)
+            if corners[:, 1].max() < -half or corners[:, 1].min() > half:
+                continue  # not ahead of the vehicle's own width
+            gap = float(corners[:, 0].min()) - bumper
+            velocity = kinematics.get((actor["id"], row["sim_ns"]), (None,))[0]
+            if velocity is None or not np.isfinite(velocity).all():
+                continue
+            # Evidence of following only where following is what is asked
+            # for: farther than the stopping distance, nearer than the gap
+            if stopping_distance(speed, brake) < gap < follow_gap:
+                entry = followed.setdefault(actor["name"], {"ticks": 0, "matched": 0,
+                                                            "gaps": []})
+                entry["ticks"] += 1
+                entry["gaps"].append(gap)
+                if abs(speed - float(np.linalg.norm(velocity))) <= 2.0:
+                    entry["matched"] += 1
+    dt = manifest["fixed_delta_seconds"]
+    out["follow"] = {name: {"seconds_in_the_gap": e["ticks"] * dt,
+                            "seconds_at_its_speed": e["matched"] * dt,
+                            "gap_m": percentile_summary(e["gaps"])}
+                     for name, e in followed.items()}
+    out["box_overlap"] = {name: {"ticks": len(t), "first_tick": t[0]}
+                          for name, t in overlaps.items()}
+
+    # Park
+    if scenario.get("park"):
+        park = Park(scenario["park"], vehicle, (manifest.get("control") or {}).get("park", {}))
+        poses = {row["tick"]: row["ego"] for row in truth_rows}
+        tail = []
+        for c in reversed(applied):
+            ego = poses.get(c["tick"])
+            if ego is None:
+                break
+            pose = ego["pose"]
+            ok = (c["reason"] == "parked" and c["brake"] >= 1.0 and c["throttle"] == 0.0
+                  and c.get("reverse") is False and c.get("hand_brake") is True
+                  and park.contains([pose["x"], pose["y"]])
+                  and abs(park.heading_error(pose["yaw"])) < math.radians(15.0)
+                  and ego["speed_mps"] <= 0.2)
+            if not ok:
+                break
+            tail.append(c["tick"])
+        last = truth_rows[-1]["ego"]["pose"] if truth_rows else None
+        inside = [row["tick"] for row in truth_rows
+                  if park.contains([row["ego"]["pose"]["x"], row["ego"]["pose"]["y"]])]
+        reasons = sorted({c["reason"] for c in applied if c["reason"].startswith("park_abort")})
+        in_stall = [a["name"] for a in (truth_rows[0]["actors"] if truth_rows else [])
+                    if park.contains([a["pose"]["x"], a["pose"]["y"]])]
+        first_abort = next((c["tick"] for c in applied
+                            if c["reason"].startswith("park_abort")), None)
+        seen = 0
+        for sim_ns, pairs in matches.items():
+            tick = tick_of.get(sim_ns)
+            if tick is None or (first_abort is not None and tick > first_abort):
+                continue
+            seen += sum(1 for truth, _ in pairs if truth["name"] in in_stall)
+        out["park"] = {
+            "parked_ticks_at_the_end": len(tail),
+            "parked_tick": tail[-1] if tail else None,
+            "parked_command_ticks": sum(1 for c in applied if c["reason"] == "parked"
+                                        or c.get("hand_brake")),
+            "reverse_ticks": sum(1 for c in applied if c.get("reverse")),
+            "abort_reasons": reasons, "abort_tick": first_abort,
+            "ticks_inside_the_stall": len(inside),
+            "actors_in_the_stall": in_stall,
+            "detections_of_them_before_the_abort": seen,
+        }
+        if last:
+            u, v = park.frame([last["x"], last["y"]])
+            out["park"].update(
+                final_u_m=u, final_v_m=v,
+                final_heading_deg=math.degrees(park.heading_error(last["yaw"])),
+                final_inside=park.contains([last["x"], last["y"]]),
+                max_reverse_speed_mps=max(
+                    [poses[c["tick"]]["speed_mps"] for c in applied
+                     if c.get("reverse") and c["tick"] in poses], default=None))
+    return out
 
 
 def fault_section(controls, scenario, dt):
@@ -1013,6 +1200,67 @@ def check_expectations(expect, metrics):
                 e.get("count", 0) > 0 and e["max"] <= value and r["not_found"] == 0,
                 "max %s px over %s, %s not found" % (
                     e.get("max"), e.get("count", 0), r.get("not_found")))
+        elif key == "resumes":
+            # true: any brake that was released; a word: one whose reason
+            # has it as a field ("person") or starts with it ("obstacle")
+            holds = [h for h in metrics["show"]["holds"] if value is True or any(
+                value in r.split(":") or r.startswith(value) for r in h["reasons"])]
+            done = [h for h in holds if h["drove_before"] and h["drove_on_tick"] is not None]
+            add("drove on after a brake%s" % ("" if value is True else " for " + str(value)),
+                bool(value) == bool(done),
+                "; ".join("held ticks %d-%d (%s), drove on at %s" % (
+                    h["first_tick"], h["last_tick"], ", ".join(h["reasons"]),
+                    h["drove_on_tick"]) for h in holds) or "no such brake")
+        elif key == "lane_change":
+            change = metrics["show"]["lane_change"]
+            add("lane change: %s" % value, change["state"] == value,
+                "%s%s" % (change["state"], " (%s)" % change["skipped_reason"]
+                          if change.get("skipped_reason") else
+                          " at tick %s" % change.get("done_tick")
+                          if change.get("done_tick") is not None else ""))
+        elif key == "follows":
+            best = max(metrics["show"]["follow"].values(),
+                       key=lambda f: f["seconds_at_its_speed"], default=None)
+            add("followed a vehicle at its speed for >= %.1f s, between the stopping "
+                "distance and the follow gap" % value,
+                best is not None and best["seconds_at_its_speed"] >= value,
+                "none" if best is None else "%.1f s of %.1f s in the gap, gap %.1f m" % (
+                    best["seconds_at_its_speed"], best["seconds_in_the_gap"],
+                    best["gap_m"]["p50"]))
+        elif key == "no_box_overlap":
+            overlap = metrics["show"]["box_overlap"]
+            names = sorted(overlap) if value is True else list(value)
+            hit = {n: overlap[n] for n in names if n in overlap}
+            add("the vehicle's box never over %s's" % (
+                "another" if value is True else ", ".join(value)), not hit,
+                "; ".join("%s: %d ticks from %d" % (n, o["ticks"], o["first_tick"])
+                          for n, o in hit.items()) or "0 ticks")
+        elif key == "parked":
+            park = metrics["show"].get("park") or {}
+            needed = 15 if value is True else int(value)
+            add("parked for the last %d ticks: in the stall, within 15 deg, standing, "
+                "reverse off, brakes on" % needed,
+                park.get("parked_ticks_at_the_end", 0) >= needed,
+                "%d ticks; %.2f m along, %.2f m beside the axis, %.1f deg" % (
+                    park.get("parked_ticks_at_the_end", 0), park.get("final_u_m", math.nan),
+                    park.get("final_v_m", math.nan), park.get("final_heading_deg", math.nan)))
+        elif key == "park_abort":
+            park = metrics["show"].get("park") or {}
+            checks = [
+                ("no parked tick", park.get("parked_command_ticks", 1) == 0),
+                ("given up: %s" % ", ".join(park.get("abort_reasons", [])),
+                 bool(park.get("abort_reasons"))),
+                ("never in the stall", park.get("ticks_inside_the_stall", 1) == 0),
+                ("never in reverse", park.get("reverse_ticks", 1) == 0),
+                ("no collision", not control["collisions"]),
+                ("no box over another", not metrics["show"]["box_overlap"]),
+                ("%s detected %d times before" % (
+                    ", ".join(park.get("actors_in_the_stall", [])) or "nothing in the stall",
+                    park.get("detections_of_them_before_the_abort", 0)),
+                 park.get("detections_of_them_before_the_abort", 0) > 0),
+            ]
+            add("park given up for an occupied stall", all(ok for _, ok in checks),
+                "; ".join("%s%s" % (name, "" if ok else " FAILED") for name, ok in checks))
         elif key == "evaluator_must_fail":
             pass  # handled by the caller: a negative control
         else:
@@ -1061,6 +1309,7 @@ def evaluate(run_dir, do_replay=False, lane_model=None):
         "lane": lane_section(usable, truth_by_ns),
         "latency": latency_section(usable, generated, ticks, controls, commands),
         "control": control_section(controls, truth_rows, manifest),
+        "show": show_section(controls, commands, truth_rows, manifest, matches),
         "faults": faults, "commands_rejected_by_simulator": rejected,
         "control_budget": {k: manifest.get("control", {}).get(k) for k in (
             "age_limit_ms", "wall_lease_ms", "pose_budget_ms")},
@@ -1203,6 +1452,48 @@ def summary_markdown(m):
                   len(c["collisions"]), len(c["lane_invasions"])),
               "- commands the simulator rejected: %s" % json.dumps(
                   m["commands_rejected_by_simulator"])]
+    show = m.get("show") or {}
+    if show.get("holds") or show.get("lane_change", {}).get("state") \
+            or show.get("follow") or show.get("park") or show.get("box_overlap"):
+        lines += ["", "## Show", ""]
+        for hold in show["holds"]:
+            lines.append("- braked and held, ticks %d to %d (%s); %s" % (
+                hold["first_tick"], hold["last_tick"], ", ".join(hold["reasons"]),
+                "drove on at tick %d" % hold["drove_on_tick"]
+                if hold["drove_on_tick"] is not None else "did not drive on"))
+        change = show["lane_change"]
+        if change["state"]:
+            lines.append("- lane change: %s; began at tick %s, done at tick %s%s" % (
+                change["state"], change.get("active_tick"), change.get("done_tick"),
+                ", skipped: %s" % change["skipped_reason"]
+                if change.get("skipped_reason") else ""))
+        for name, f in show["follow"].items():
+            lines.append("- behind %s between the stopping distance and the follow gap "
+                         "for %.1f s, %.1f s of them within 2 m/s of its speed; gap "
+                         "median %s m" % (name, f["seconds_in_the_gap"],
+                                          f["seconds_at_its_speed"],
+                                          fmt(f["gap_m"].get("p50"), 1)))
+        lines.append("- the vehicle's box over another's: %s" % (
+            "; ".join("%s for %d ticks from tick %d" % (n, o["ticks"], o["first_tick"])
+                      for n, o in show["box_overlap"].items()) or "never"))
+        park = show.get("park")
+        if park:
+            lines.append("- park: %s; ended %s the stall, %s m along and %s m beside "
+                         "its axis, %s deg off its direction; backwards for %d ticks, "
+                         "at most %s m/s" % (
+                             "parked from tick %s" % park["parked_tick"]
+                             if park["parked_ticks_at_the_end"] else
+                             "given up (%s) at tick %s" % (
+                                 ", ".join(park["abort_reasons"]), park["abort_tick"])
+                             if park["abort_reasons"] else "not parked",
+                             "inside" if park.get("final_inside") else "outside",
+                             fmt(park.get("final_u_m")), fmt(park.get("final_v_m")),
+                             fmt(park.get("final_heading_deg"), 1), park["reverse_ticks"],
+                             fmt(park.get("max_reverse_speed_mps"))))
+            if park["actors_in_the_stall"]:
+                lines.append("- in the stall: %s, detected %d times before the park was "
+                             "given up" % (", ".join(park["actors_in_the_stall"]),
+                                           park["detections_of_them_before_the_abort"]))
     for fault in m["faults"]:
         lines.append("- fault %s at tick %d: braked at tick %s (%s), %s ms of "
                      "simulation, %s ms of wall time" % (

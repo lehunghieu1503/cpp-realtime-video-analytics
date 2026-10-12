@@ -421,5 +421,324 @@ class WholeRun(unittest.TestCase):
         self.assertIn("| 0-30 | 30 | 30 | 1.00 | 30 | 1.00 |", text)
 
 
+class Show(unittest.TestCase):
+    """The expectations of the drive show and the park show, on records
+    written here: what was applied, what the controller logged, the truth."""
+    BRAKE = {"a_min_mps2": 2.5, "tau_s": 0.6, "margin_m": 2.0}
+    STALL = {"x": 0.0, "y": 0.0, "yaw_deg": 0.0, "length_m": 5.0, "width_m": 2.8}
+
+    def run_of(self, ticks, drive, hold=None, reason="obstacle:distance:person",
+               debug=None, pose=None, speed=0.0, actors=None, flags=None,
+               scenario=None):
+        """drive(tick) -> bool: a driving command; hold: the ticks braked and
+        marked as a brake that can be released."""
+        controls, commands, truth = [], [], []
+        hold = hold or ()
+        for tick in range(ticks):
+            sim_ns = tick * TICK
+            held = tick in hold
+            driving = drive(tick) and not held
+            applied = {"event": "applied", "tick": tick, "sim_ns_after": sim_ns,
+                       "throttle": 0.3 if driving else 0.0,
+                       "brake": 0.0 if driving else 1.0, "steer": 0.0,
+                       "reverse": False, "hand_brake": False,
+                       "reason": "" if driving else (reason if held else "wait_data")}
+            applied.update((flags(tick) if flags else None) or {})
+            controls.append(applied)
+            d = {"state": "HOLDING" if held else "RUNNING"}
+            if held:
+                d["hold"] = True
+            d.update((debug(tick) if debug else None) or {})
+            commands.append({"command": {"control_sim_ns": sim_ns, "command_seq": tick,
+                                         "throttle": applied["throttle"],
+                                         "brake": applied["brake"],
+                                         "reason": reason if held else ""},
+                             "debug": d})
+            p = pose(tick) if pose else (0.0, 0.0, 0.0)
+            v = speed(tick) if callable(speed) else speed
+            truth.append({"tick": tick, "sim_ns": sim_ns,
+                          "ego": {"pose": {"x": p[0], "y": p[1], "z": 0.0, "roll": 0.0,
+                                           "pitch": 0.0, "yaw": p[2]}, "speed_mps": v},
+                          "lane": {"centre": [p[0], 0.0], "centre_yaw_deg": 0.0},
+                          "actors": actors(tick) if actors else [], "events": []})
+        manifest = {"scenario_config": scenario or {}, "fixed_delta_seconds": 1 / 30,
+                    "vehicle": dict(VEHICLE, rear_bumper_m=-2.4),
+                    "control": {"brake": self.BRAKE}}
+        return controls, commands, truth, manifest
+
+    def judge(self, expect, run, matches=None, collisions=()):
+        show = ev.show_section(*run, matches or {})
+        metrics = {"show": show, "control": {"collisions": list(collisions)}}
+        return {name: passed for name, passed, _ in ev.check_expectations(expect, metrics)}, show
+
+    def one(self, expect, run, **more):
+        results, show = self.judge(expect, run, **more)
+        self.assertEqual(len(results), 1, results)
+        return list(results.values())[0], show
+
+    # ── Driving on after a brake ──────────────────────────────────────────
+
+    def test_resumes_needs_a_hold_and_a_driving_tick_after_it(self):
+        ok, show = self.one({"resumes": True},
+                            self.run_of(90, lambda t: True, hold=range(30, 60)))
+        self.assertTrue(ok)
+        self.assertEqual((show["holds"][0]["first_tick"], show["holds"][0]["last_tick"],
+                          show["holds"][0]["drove_on_tick"]), (30, 59, 61))
+        # Braked to the end: no driving on
+        ok, show = self.one({"resumes": True},
+                            self.run_of(90, lambda t: True, hold=range(30, 90)))
+        self.assertFalse(ok)
+        self.assertIsNone(show["holds"][0]["drove_on_tick"])
+        # Never braked
+        self.assertFalse(self.one({"resumes": True}, self.run_of(90, lambda t: True))[0])
+
+    def test_throttle_before_the_first_brake_is_not_driving_on(self):
+        run = self.run_of(90, lambda t: t < 30, hold=range(30, 60))
+        self.assertFalse(self.one({"resumes": True}, run)[0])
+        # ... and a hold that began before the vehicle ever drove is not one
+        # it drove on from
+        run = self.run_of(90, lambda t: t >= 40, hold=range(0, 40))
+        self.assertFalse(self.one({"resumes": True}, run)[0])
+
+    def test_resumes_does_not_read_the_stop_reason(self):
+        # A run that drives on has no last stop: control_section reports
+        # none, and the hold is still found in what the controller logged
+        controls, commands, truth, manifest = self.run_of(
+            90, lambda t: True, hold=range(30, 60))
+        control = ev.control_section(controls, truth, manifest)
+        self.assertIsNone(control["stop_reason"])
+        self.assertTrue(self.one({"resumes": True},
+                                 (controls, commands, truth, manifest))[0])
+        # Without the controller's mark, a brake between two drives is not a hold
+        for record in commands:
+            record["debug"] = {"state": "RUNNING"}
+        self.assertFalse(self.one({"resumes": True},
+                                  (controls, commands, truth, manifest))[0])
+
+    def test_resumes_for_a_class_or_a_kind(self):
+        run = self.run_of(90, lambda t: True, hold=range(30, 60),
+                          reason="obstacle:distance:person")
+        self.assertTrue(self.one({"resumes": "person"}, run)[0])
+        self.assertTrue(self.one({"resumes": "obstacle"}, run)[0])
+        self.assertFalse(self.one({"resumes": "car"}, run)[0])
+        self.assertFalse(self.one({"resumes": "lane"}, run)[0])
+
+    # ── Lane change ───────────────────────────────────────────────────────
+
+    def test_lane_change_done_passes_and_skipped_fails(self):
+        def states(done_at, last):
+            def debug(tick):
+                if tick < 20:
+                    return {"lane_change": "pending"}
+                if tick < done_at:
+                    return {"lane_change": "active"}
+                return dict({"lane_change": last}, **(
+                    {"lane_change_skipped": "no_marking"}
+                    if last == "skipped" and tick == done_at else {}))
+            return debug
+        ok, show = self.one({"lane_change": "done"},
+                            self.run_of(90, lambda t: True, debug=states(50, "done")))
+        self.assertTrue(ok)
+        self.assertEqual((show["lane_change"]["active_tick"],
+                          show["lane_change"]["done_tick"]), (20, 50))
+        ok, show = self.one({"lane_change": "done"},
+                            self.run_of(90, lambda t: True, debug=states(50, "skipped")))
+        self.assertFalse(ok)
+        self.assertEqual(show["lane_change"]["skipped_reason"], "no_marking")
+        # Still under way at the end, or never asked for: not done
+        self.assertFalse(self.one({"lane_change": "done"}, self.run_of(
+            90, lambda t: True, debug=states(500, "done")))[0])
+        self.assertFalse(self.one({"lane_change": "done"},
+                                  self.run_of(90, lambda t: True))[0])
+
+    # ── Following ─────────────────────────────────────────────────────────
+
+    def following(self, gap, lead_speed=5.0, ego_speed=5.0, ticks=120):
+        """The ego vehicle behind a car `gap` metres from its bumper."""
+        def lead(tick):
+            # actor(): a box 4 m long around its centre
+            x = ego_speed * tick / 30 + 2.4 + gap + 2.0 + (lead_speed - ego_speed) * tick / 30
+            return [actor(x)]
+        return self.run_of(ticks, lambda t: True, speed=ego_speed, actors=lead,
+                           pose=lambda t: (ego_speed * t / 30, 0.0, 0.0),
+                           scenario={"follow_gap_m": 30.0})
+
+    def test_follows_between_stopping_distance_and_follow_gap(self):
+        # At 5 m/s the stopping distance is 10 m: 25 m is in the follow range
+        ok, show = self.one({"follows": 2.0}, self.following(25.0))
+        self.assertTrue(ok)
+        self.assertAlmostEqual(show["follow"]["lead"]["seconds_at_its_speed"], 118 / 30,
+                               delta=0.1)
+        self.assertAlmostEqual(show["follow"]["lead"]["gap_m"]["p50"], 25.0, delta=0.01)
+
+    def test_inside_the_stopping_distance_is_not_evidence_of_following(self):
+        ok, show = self.one({"follows": 2.0}, self.following(8.0))
+        self.assertFalse(ok)
+        self.assertEqual(show["follow"], {})
+        # Beyond the follow gap neither
+        self.assertFalse(self.one({"follows": 2.0}, self.following(35.0))[0])
+
+    def test_in_the_gap_at_another_speed_is_not_following(self):
+        ok, show = self.one({"follows": 2.0}, self.following(25.0, lead_speed=5.0,
+                                                           ego_speed=8.0, ticks=40))
+        self.assertFalse(ok)
+        self.assertGreater(show["follow"]["lead"]["seconds_in_the_gap"], 1.0)
+        self.assertEqual(show["follow"]["lead"]["seconds_at_its_speed"], 0.0)
+        # Too short a stretch
+        self.assertFalse(self.one({"follows": 2.0}, self.following(25.0, ticks=40))[0])
+
+    def test_a_car_in_the_next_lane_is_not_followed(self):
+        run = self.run_of(120, lambda t: True, speed=5.0,
+                          actors=lambda t: [actor(5.0 * t / 30 + 29.4, y=3.5)],
+                          pose=lambda t: (5.0 * t / 30, 0.0, 0.0),
+                          scenario={"follow_gap_m": 30.0})
+        self.assertFalse(self.one({"follows": 2.0}, run)[0])
+
+    # ── Boxes ─────────────────────────────────────────────────────────────
+
+    def test_footprints(self):
+        square = [[0, 0], [2, 0], [2, 2], [0, 2]]
+        self.assertTrue(ev.footprints_overlap(square, [[1, 1], [3, 1], [3, 3], [1, 3]]))
+        self.assertFalse(ev.footprints_overlap(square, [[2.1, 0], [4, 0], [4, 2], [2.1, 2]]))
+        # Touching edges share no area
+        self.assertFalse(ev.footprints_overlap(square, [[2, 0], [4, 0], [4, 2], [2, 2]]))
+        # A diamond in the corner the axis-aligned boxes would both cover
+        diamond = [[3.2, 2.0], [4.2, 3.0], [3.2, 4.0], [2.2, 3.0]]
+        self.assertFalse(ev.footprints_overlap(square, diamond))
+        self.assertTrue(ev.footprints_overlap(square, [[1.5, 1.0], [2.5, 2.0],
+                                                       [1.5, 3.0], [0.5, 2.0]]))
+
+    def person(self, x, y):
+        return {"id": 5, "name": "walker", "class": "person", "present": True,
+                "pose": {"x": x, "y": y, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 90.0},
+                "speed_mps": 0.0, "extent": [0.25, 0.25, 0.9], "box_centre": [0, 0, 0.9]}
+
+    def test_a_box_over_the_persons_fails(self):
+        # The person has no physics: no collision event, only the boxes
+        crossing = lambda t: [self.person(2.0, -3.0 + 0.1 * t)]
+        ok, show = self.one({"no_box_overlap": ["walker"]},
+                            self.run_of(60, lambda t: True, actors=crossing))
+        self.assertFalse(ok)
+        # Under the vehicle's 2 m of width while y is within 1.25 m of it
+        self.assertEqual(show["box_overlap"]["walker"]["first_tick"], 18)
+        self.assertEqual(show["box_overlap"]["walker"]["ticks"], 25)
+        ahead = lambda t: [self.person(8.0, -3.0 + 0.1 * t)]
+        self.assertTrue(self.one({"no_box_overlap": ["walker"]},
+                                 self.run_of(60, lambda t: True, actors=ahead))[0])
+        # Another actor's overlap is not this one's, unless all are asked for
+        run = self.run_of(60, lambda t: True, actors=crossing)
+        self.assertTrue(self.one({"no_box_overlap": ["lead"]}, run)[0])
+        self.assertFalse(self.one({"no_box_overlap": True}, run)[0])
+
+    # ── Park ──────────────────────────────────────────────────────────────
+
+    def park_run(self, final=(0.0, 0.1, 2.0), parked_from=40, ticks=60, flags=None,
+                 speed=0.0, actors=None, reason_after="parked"):
+        scenario = {"park": {"stall": self.STALL, "handover": {"x": 7.0, "y": 20.0}}}
+
+        def flag(tick):
+            if tick >= parked_from:
+                out = {"reason": reason_after, "hand_brake": True, "reverse": False}
+            elif tick >= 10:
+                out = {"reverse": True, "reason": "", "throttle": 0.2, "brake": 0.0}
+            else:
+                out = {}
+            out.update((flags(tick) if flags else None) or {})
+            return out
+
+        def pose(tick):
+            if tick >= parked_from:
+                return final
+            return (7.0, 6.0 - 0.1 * tick, -90.0)
+        return self.run_of(ticks, lambda t: t < 10, flags=flag, pose=pose, speed=speed,
+                           actors=actors, scenario=scenario)
+
+    def test_parked_in_the_stall(self):
+        ok, show = self.one({"parked": 15}, self.park_run())
+        self.assertTrue(ok)
+        park = show["park"]
+        self.assertEqual((park["parked_ticks_at_the_end"], park["parked_tick"]), (20, 40))
+        self.assertAlmostEqual(park["final_v_m"], 0.1)
+        self.assertAlmostEqual(park["final_heading_deg"], 2.0)
+        self.assertEqual(park["reverse_ticks"], 30)
+
+    def test_not_parked(self):
+        cases = {
+            "outside the stall": dict(final=(0.0, 1.6, 0.0)),
+            "beyond its back": dict(final=(-2.6, 0.0, 0.0)),
+            "17 degrees off": dict(final=(0.0, 0.0, 17.0)),
+            "nose in": dict(final=(0.0, 0.0, 180.0)),
+            "still in reverse": dict(flags=lambda t: {"reverse": True} if t >= 40 else None),
+            "brake not full": dict(flags=lambda t: {"brake": 0.5} if t >= 40 else None),
+            "no parking brake": dict(flags=lambda t: {"hand_brake": False}
+                                     if t >= 40 else None),
+            "another reason": dict(reason_after="park:stopping"),
+            "still rolling": dict(speed=lambda t: 0.3),
+            "for 10 ticks only": dict(parked_from=50),
+            "interrupted": dict(flags=lambda t: {"reason": ""} if t == 55 else None),
+        }
+        for name, changes in cases.items():
+            self.assertFalse(self.one({"parked": 15}, self.park_run(**changes))[0], name)
+        self.assertTrue(self.one({"parked": 15}, self.park_run(speed=lambda t: 0.2))[0])
+        # No park in the scenario at all
+        self.assertFalse(self.one({"parked": 15}, self.run_of(30, lambda t: True))[0])
+
+    def occupied(self, **changes):
+        """The stall has a car in it; the park is given up at tick 20."""
+        car = lambda t: [actor(0.0, name="in_the_stall")]
+        scenario = {"park": {"stall": self.STALL, "handover": {"x": 7.0, "y": 20.0}}}
+        options = dict(
+            flags=lambda t: {"reason": "park_abort:stall_occupied", "throttle": 0.0,
+                             "brake": 1.0} if t >= 20 else None,
+            pose=lambda t: (7.0, 20.0 - 0.07 * min(t, 20), -90.0), actors=car,
+            scenario=scenario)
+        options.update(changes)
+        return self.run_of(60, lambda t: t < 20, **options)
+
+    SEEN = {5 * TICK: [({"name": "in_the_stall"}, {})], 6 * TICK: [({"name": "in_the_stall"}, {})]}
+
+    def test_park_given_up_as_it_should_be(self):
+        ok, show = self.one({"park_abort": True}, self.occupied(), matches=self.SEEN)
+        self.assertTrue(ok)
+        park = show["park"]
+        self.assertEqual(park["abort_reasons"], ["park_abort:stall_occupied"])
+        self.assertEqual((park["abort_tick"], park["actors_in_the_stall"],
+                          park["detections_of_them_before_the_abort"]),
+                         (20, ["in_the_stall"], 2))
+        self.assertFalse(park["final_inside"])
+
+    def test_park_abort_fails(self):
+        give_up = lambda t: {"reason": "park_abort:stall_occupied", "throttle": 0.0,
+                             "brake": 1.0} if t >= 20 else None
+        # The car in the stall was never detected: the stall was not seen
+        # to be occupied, whatever the reason says
+        self.assertFalse(self.one({"park_abort": True}, self.occupied())[0])
+        # ... or detected only after the park was given up
+        late = {30 * TICK: [({"name": "in_the_stall"}, {})]}
+        self.assertFalse(self.one({"park_abort": True}, self.occupied(), matches=late)[0])
+        # Another actor's detection is not the stall's
+        other = {5 * TICK: [({"name": "lead"}, {})]}
+        self.assertFalse(self.one({"park_abort": True}, self.occupied(), matches=other)[0])
+        cases = {
+            "parked anyway": lambda t: {"reason": "parked", "hand_brake": True,
+                                        "throttle": 0.0, "brake": 1.0} if t >= 20 else None,
+            "went backwards": lambda t: {"reverse": True, "reason": ""}
+            if 20 <= t < 25 else give_up(t),
+            "no reason to give up": lambda t: {"reason": "obstacle:distance:car",
+                                               "throttle": 0.0, "brake": 1.0}
+            if t >= 20 else None,
+        }
+        for name, flags in cases.items():
+            self.assertFalse(self.one({"park_abort": True}, self.occupied(flags=flags),
+                                      matches=self.SEEN)[0], name)
+        # Ended inside the stall, on the car
+        into = lambda t: (7.0 - 0.35 * min(t, 20), 0.0, 0.0)
+        self.assertFalse(self.one({"park_abort": True}, self.occupied(pose=into),
+                                  matches=self.SEEN)[0])
+        # A collision
+        self.assertFalse(self.one({"park_abort": True}, self.occupied(), matches=self.SEEN,
+                                  collisions=[{"tick": 3}])[0])
+
+
 if __name__ == "__main__":
     unittest.main()
