@@ -98,10 +98,11 @@ def check_onnx(onnx_path, data, confidence=0.5, nms=0.5):
     session = onnxruntime.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     name = session.get_inputs()[0].name
     stalls = {"labelled": 0, "found": 0, "class_right": 0}
-    # Ends by the width of their box: 0.8 m of ground is 40 pixels wide at
-    # about 7 m from the camera
-    ends = {"near": [], "far": []}
-    labelled = {"near": 0, "far": 0}
+    # Ends by the height of their box, which is 0.8 m of ground: under 12
+    # pixels beyond about 9 m from the camera, over 50 within about 3 m
+    sizes = {"under_12_px_high": 12, "12_to_50_px_high": 50, "over_50_px_high": math.inf}
+    ends = {size: [] for size in sizes}
+    labelled = {size: 0 for size in sizes}
     for image_path in sorted(glob.glob(os.path.join(data, "images", "val", "*.jpg"))):
         image = cv2.imread(image_path)
         height, width = image.shape[:2]
@@ -122,12 +123,12 @@ def check_onnx(onnx_path, data, confidence=0.5, nms=0.5):
                     stalls["found"] += 1
                     stalls["class_right"] += int(best[0] == cls)
             else:
-                size = "near" if box[2] >= 40 else "far"
+                size = next(name for name, limit in sizes.items() if box[3] < limit)
                 labelled[size] += 1
                 x, y = label[5] * width, label[6] * height
                 apart = [math.hypot(px - x, py - y) for c, px, py in found_ends if c == cls]
                 # Farther than this it is not this end that was found
-                if apart and min(apart) <= 0.5 * box[2]:
+                if apart and min(apart) <= max(8.0, 0.35 * box[2]):
                     ends[size].append(min(apart))
     report = {"image_size": [width, height], "stalls": stalls}
     for size, errors in ends.items():
@@ -135,7 +136,7 @@ def check_onnx(onnx_path, data, confidence=0.5, nms=0.5):
         report["ends_" + size] = {
             "labelled": labelled[size], "found": int(np.isfinite(errors).sum()),
             "error_px_median": float(np.median(errors)),
-            "error_px_p95": float(np.percentile(errors, 95)),
+            "error_px_p90": float(np.percentile(errors, 90)),
             "error_px_max": float(errors.max())}
     return report
 
