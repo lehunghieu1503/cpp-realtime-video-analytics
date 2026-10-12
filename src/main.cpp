@@ -704,9 +704,9 @@ int runLive(const AppConfig& app) {
       result.cpuFrame();
       drawDetections(result.frame, result.detections);
       for (const auto& points : lane.pixels) {
-        for (const auto& p : points) {
-          cv::circle(result.frame, p, 3, cv::Scalar(0, 255, 255), -1);
-        }
+        if (points.size() < 2) continue;
+        cv::polylines(result.frame, points, false, cv::Scalar(0, 255, 255), 2,
+                      cv::LINE_AA);
       }
       if (stream.rules) drawRules(result.frame, *stream.rules);
       drawOverlay(result.frame, stream.fps.fps, result.inferenceLatencyMs,
