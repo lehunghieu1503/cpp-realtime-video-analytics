@@ -2,7 +2,7 @@
 
 tests/fixtures/lane-calibration.json is written from the Python reference:
 
-    python3 ros2/video_analytics_simulation/test/fixtures.py
+    python3 simulation/test/fixtures.py
 
 test_calibration.py checks the file still matches the Python code, and
 tests/test-lane.cpp checks the C++ code against the same file.
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from video_analytics_simulation import lane  # noqa: E402
 from video_analytics_simulation.calibration import Rig  # noqa: E402
 
-PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tests",
+PATH = os.path.join(os.path.dirname(__file__), "..", "..", "tests",
                     "fixtures", "lane-calibration.json")
 
 CALIBRATION = {"width": 1280, "height": 720, "fov_deg": 52.0,
@@ -99,7 +99,7 @@ def build():
     lanes.append({"name": "too short", "pixels": px,
                   "expected": lane.estimate_lane(px, rig)})
 
-    return {"comment": "Written by ros2/video_analytics_simulation/test/fixtures.py",
+    return {"comment": "Written by simulation/test/fixtures.py",
             "calibration": CALIBRATION, "calibration_id": rig.calibration_id,
             "focal_px": rig.focal, "lane_config": lane.DEFAULTS,
             "ground": ground, "decoder": decoder, "lanes": lanes}

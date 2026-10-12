@@ -415,7 +415,7 @@ class ControlCore:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--config", required=True, help="deploy/config/carla.yaml")
+    parser.add_argument("--config", required=True, help="simulation/config/carla.yaml")
     parser.add_argument("--run-dir", required=True, help="directory of this run")
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()

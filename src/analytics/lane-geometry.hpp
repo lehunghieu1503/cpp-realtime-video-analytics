@@ -7,7 +7,7 @@
 
 // A forward camera fixed to the vehicle, over a flat road. No lens
 // distortion. Frames, signs and the id are those of
-// ros2/video_analytics_simulation/video_analytics_simulation/calibration.py;
+// simulation/video_analytics_simulation/calibration.py;
 // both are tested against tests/fixtures/lane-calibration.json.
 struct CameraRig {
   int width = 0;  // 0: no calibration

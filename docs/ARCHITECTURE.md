@@ -119,7 +119,7 @@ camera calibration from the config (`CameraRig`: field of view, position and
 pitch on the vehicle, a flat road), fits the two boundaries around the
 vehicle and gives the centreline. Frames are x forward, y right. The same
 numbers are computed by the Python reference in
-`ros2/video_analytics_simulation`, and both are tested against
+`simulation`, and both are tested against
 `tests/fixtures/lane-calibration.json`.
 
 ### Frames of a simulation

@@ -17,8 +17,7 @@ from video_analytics_simulation.controller import (  # noqa: E402
     RUNNING, STOP_LATCHED, WAIT_DATA, ControlCore, lane_config_from, pure_pursuit,
     stopping_distance)
 
-ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
-with open(os.path.join(ROOT, "deploy", "config", "carla.yaml")) as f:
+with open(os.path.join(os.path.dirname(__file__), "..", "config", "carla.yaml")) as f:
     CONFIG = yaml.safe_load(f)
 # Half the pixels of the real rig: the same geometry, tests four times faster
 CONFIG["calibration"]["width"] = 640

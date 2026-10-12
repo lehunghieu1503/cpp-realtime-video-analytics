@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Evaluate one CARLA run from the files in its run directory.
 
-Usage: scripts/evaluate-carla.py RUN_DIR [--replay] [--lane-model MODEL.onnx]
+Usage: simulation/evaluate.py RUN_DIR [--replay] [--lane-model MODEL.onnx]
 
 Reads what the simulator and the controller wrote (see
-ros2/video_analytics_simulation/video_analytics_simulation/simulator.py) and
+simulation/video_analytics_simulation/simulator.py) and
 writes RUN_DIR/metrics.json and RUN_DIR/summary.md. Exit code 0 when every
 expectation of the scenario holds, 1 when one fails, 2 when a file the
 evaluation needs is missing.
@@ -54,8 +54,7 @@ import zlib
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                                "ros2", "video_analytics_simulation"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from video_analytics_simulation import protocol  # noqa: E402
 from video_analytics_simulation.calibration import Pose, Rig, decode_depth  # noqa: E402
 from video_analytics_simulation.metric_tracker import MetricTracker  # noqa: E402

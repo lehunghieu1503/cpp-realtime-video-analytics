@@ -996,9 +996,9 @@ class Simulator:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--config", required=True, help="deploy/config/carla.yaml")
+    parser.add_argument("--config", required=True, help="simulation/config/carla.yaml")
     parser.add_argument("--scenarios", required=True,
-                        help="deploy/config/carla-scenarios.yaml")
+                        help="simulation/config/carla-scenarios.yaml")
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--run-dir", required=True, help="new directory of this run")
     parser.add_argument("--run-id", required=True)

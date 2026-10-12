@@ -10,7 +10,7 @@
 #   SKIP_BUILD  set to 1 to ship the image already built
 #   IMAGE_ONLY  set to 1 to build and ship the application image and stop:
 #               nothing in REMOTE_DIR is changed and nothing is restarted
-#               (scripts/run-carla-simulation.sh starts its own container)
+#               (simulation/run.sh starts its own container)
 #   SIM         set to 1 to run simulated RTSP cameras on the board and read
 #               them with hardware decoding (docker-compose.sim.yml)
 #   SECURE      set to 1 for HTTPS and passwords on the dashboard, TLS and

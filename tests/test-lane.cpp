@@ -1,6 +1,6 @@
 // The lane model's decoder and the lane geometry, against the numbers the
 // Python reference wrote to tests/fixtures/lane-calibration.json
-// (ros2/video_analytics_simulation/test/fixtures.py).
+// (simulation/test/fixtures.py).
 
 #include "analytics/lane-geometry.hpp"
 #include "config/app-config.hpp"

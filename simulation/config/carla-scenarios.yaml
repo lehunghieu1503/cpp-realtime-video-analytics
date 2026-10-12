@@ -1,5 +1,5 @@
 # Scenarios of CARLA stage 1. Run one with
-#   scripts/run-carla-simulation.sh --scenario <name> [--arm] [--device ...]
+#   simulation/run.sh --scenario <name> [--arm] [--device ...]
 #
 # Other road users are scripted: placed on a lane relative to the ego
 # vehicle's start and moved without physics, so a scenario repeats exactly.
@@ -12,7 +12,7 @@
 # Their positions are written to truth.jsonl for the evaluation and are never
 # given to the controller.
 #
-# `expect` is what scripts/evaluate-carla.py checks. The numbers are targets
+# `expect` is what simulation/evaluate.py checks. The numbers are targets
 # set before the runs; docs/SIMULATION.md has what was measured.
 #
 # "needs --arm" scenarios drive the vehicle; without --arm it stays braked
@@ -242,7 +242,7 @@ scenarios:
 
   # ── Faults. Need --arm ────────────────────────────────────────────────────
   # The vehicle is driving when the fault starts; it must be braked within
-  # the budget of deploy/config/carla.yaml plus one tick: age_limit_ms of
+  # the budget of simulation/config/carla.yaml plus one tick: age_limit_ms of
   # simulation when data stops, wall_lease_ms when the controller is gone.
 
   fault_no_frames:      # the camera stream stops reaching the device

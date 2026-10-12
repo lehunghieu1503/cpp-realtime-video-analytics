@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests of scripts/evaluate-carla.py on runs written here, number by number.
+"""Tests of simulation/evaluate.py on runs written here, number by number.
 
 No simulator, ROS or device: a run directory is a set of files, and the
 evaluation must count them right.
@@ -16,12 +16,13 @@ import zlib
 
 import numpy as np
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+SIM = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, SIM)
+sys.path.insert(0, os.path.join(SIM, "test"))
 spec = importlib.util.spec_from_file_location(
-    "evaluate_carla", os.path.join(ROOT, "scripts", "evaluate-carla.py"))
+    "evaluate_carla", os.path.join(SIM, "evaluate.py"))
 ev = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ev)
-sys.path.insert(0, os.path.join(ROOT, "ros2", "video_analytics_simulation", "test"))
 from test_metric_tracker import render  # noqa: E402
 
 from video_analytics_simulation.calibration import Pose, Rig  # noqa: E402

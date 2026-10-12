@@ -671,8 +671,7 @@ The device keeps only its latest result per source, so these are not every
 frame: a consumer joins them with other data by `(run_id, source, sim_ns)`
 and treats a missing frame as missing.
 
-[ros2/video_analytics_simulation](ros2/video_analytics_simulation) holds the
-CARLA adapter and the controller that use them.
+[simulation](simulation) holds the CARLA adapter and the controller that use them.
 
 ## CARLA simulation
 
@@ -699,12 +698,12 @@ scripts/export-lane-model.py --repo ufld --checkpoint tusimple_18.pth
 IMAGE_ONLY=1 scripts/deploy-jetson.sh user@board
 
 # one scenario; --arm lets the car drive
-scripts/run-carla-simulation.sh --scenario brake_person --arm \
+simulation/run.sh --scenario brake_person --arm \
     --device user@board --remote-dir video-analytics-carla
 ```
 
 Each run gets a new run id and a directory with everything it produced;
-`scripts/evaluate-carla.py` turns that into `summary.md` and a verdict.
+`simulation/evaluate.py` turns that into `summary.md` and a verdict.
 Measured with the Jetson Orin Nano Super over a relayed VPN link (120 ms
 round trip, about 10 Mbit/s), 1280x720 source, YOLO11s and the lane model
 both FP16:
@@ -724,7 +723,7 @@ both FP16:
 | Data lost or controller killed | braked within the budget: 500 ms, 303 ms |
 
 Targets that were not met: 200 ms end to end needs a better link than this
-one (the budgets in `deploy/config/carla.yaml` are set for it, and say so);
+one (the budgets in `simulation/config/carla.yaml` are set for it, and say so);
 the simulation ran at 29.7 ticks a second, not 30; nothing is detected
 beyond 90 m at this resolution; and in 5 of the 12 braking runs the lane
 model lost the lane behind the obstacle before the obstacle rule fired,
@@ -750,13 +749,11 @@ src/
 └── utils/            FPS tracker
 web/                  Dashboard (plain HTML, CSS, JS)
 deploy/               docker compose stack and overlays (Jetson, laptop,
-                      secured, RTSP simulator), configuration, Grafana board
-ros2/                 ROS 2 packages: the bridge, and the CARLA adapter with
-                      its controller
-tests/                Eight test binaries, no framework needed; the CARLA
-                      evaluation's tests
-scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak,
-                      CARLA runs and their evaluation
+                      secured, RTSP simulator, CARLA device), Grafana board
+simulation/           CARLA adapter, controller, scenarios, run and evaluation
+ros2/                 ROS 2 bridge from the device's events to topics
+tests/                Eight test binaries, no framework needed
+scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak
 Dockerfile            x86-64: CPU and OpenVINO (Intel NPU)
 Dockerfile.jetson     JetPack 6: TensorRT, CUDA, hardware decode, zero-copy
 ```
@@ -774,9 +771,8 @@ build/tests/test_capture_timestamps  # a frame's timestamp through GDP and the J
 build/tests/test_lane             # lane decoder and geometry against the Python reference
 
 # the simulation's Python code; no simulator, ROS or device needed
-python3 -m unittest discover -s ros2/video_analytics_simulation/test -p 'test_*.py'
+python3 -m unittest discover -s simulation/test -p 'test_*.py'
 python3 -m unittest discover -s ros2/video_analytics_bridge/test -p 'test_*.py'
-python3 tests/test-carla-evaluation.py
 ```
 
 Each exits non-zero on a failure. `test_inference` checks that every backend

@@ -1,6 +1,6 @@
 # The device side of a CARLA run: only the analytics application, reading the
 # simulator's camera from the laptop. Written to the board and started by
-# scripts/run-carla-simulation.sh, once per run, with the run's id.
+# simulation/run.sh, once per run, with the run's id.
 services:
   app:
     image: video-analytics:jetson
@@ -10,7 +10,7 @@ services:
     network_mode: host
     restart: "no"
     environment:
-      VA_RUN_ID: ${VA_RUN_ID:?set by scripts/run-carla-simulation.sh}
+      VA_RUN_ID: ${VA_RUN_ID:?set by simulation/run.sh}
     command: ["--config", "/app/config/carla.yaml", "--port", "${VA_PORT:-9002}"]
     volumes:
       - ./config:/app/config:ro

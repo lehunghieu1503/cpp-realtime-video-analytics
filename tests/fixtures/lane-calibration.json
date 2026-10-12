@@ -1,5 +1,5 @@
 {
- "comment": "Written by ros2/video_analytics_simulation/test/fixtures.py",
+ "comment": "Written by simulation/test/fixtures.py",
  "calibration": {
   "width": 1280,
   "height": 720,

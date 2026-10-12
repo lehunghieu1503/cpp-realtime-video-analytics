@@ -208,16 +208,16 @@ lệch bao nhiêu mét ở 120 m.
 
 | Việc | Đã làm | Ở đâu |
 |------|--------|-------|
-| Nhận hình từ CARLA | JPEG qua GDP/TCP, timestamp của frame đi kèm; không dùng RTSP vì cần đúng timestamp từng frame | `ros2/video_analytics_simulation/.../simulator.py`, `src/capture/gst-capture.cpp` |
+| Nhận hình từ CARLA | JPEG qua GDP/TCP, timestamp của frame đi kèm; không dùng RTSP vì cần đúng timestamp từng frame | `simulation/video_analytics_simulation/simulator.py`, `src/capture/gst-capture.cpp` |
 | Detect, track | Không đổi; kết quả có thêm `simulation` và `image` | `src/server/result-serializer.hpp` |
-| Calibration và uv → XY | File thông số camera dùng chung cho Jetson và laptop; hàm đổi pixel sang mét trên mặt đường | `deploy/config/carla.yaml`, `calibration.py`, `src/analytics/lane-geometry.cpp` |
+| Calibration và uv → XY | File thông số camera dùng chung cho Jetson và laptop; hàm đổi pixel sang mét trên mặt đường | `simulation/config/carla.yaml`, `calibration.py`, `src/analytics/lane-geometry.cpp` |
 | Tracking trong toạ độ mét | Khoảng cách từ depth, Kalman theo từng track trong hệ toạ độ thế giới, xuất vận tốc và gia tốc | `metric_tracker.py` |
 | Lane | Model UFLD ResNet-18 (TuSimple) làm engine thứ hai, tiền xử lý và giải mã riêng | `src/inference/lane-engine.cpp`, `scripts/export-lane-model.py` |
 | Xuất làn ra ngoài | Làn theo mét trong JSON và topic ROS 2 | `src/server/result-serializer.hpp`, `ros2/video_analytics_bridge` |
 | Điều khiển lái và phanh | Pure pursuit theo tim làn, PI tốc độ, phanh khi có vật cản trong đường đi | `controller.py` |
-| Đánh giá | Recall theo dải khoảng cách, sai số khoảng cách, vận tốc, gia tốc, làn, độ trễ, kết luận theo kỳ vọng của scenario | `scripts/evaluate-carla.py` |
+| Đánh giá | Recall theo dải khoảng cách, sai số khoảng cách, vận tốc, gia tốc, làn, độ trễ, kết luận theo kỳ vọng của scenario | `simulation/evaluate.py` |
 | Đồng bộ thời gian | CARLA chạy đồng bộ, bước 1/30 s, không chờ kết quả inference | `simulator.py` |
-| Khởi chạy | Một script cho một scenario | `scripts/run-carla-simulation.sh` |
+| Khởi chạy | Một script cho một scenario | `simulation/run.sh` |
 
 ISP và LDC để dành cho lúc có camera thật.
 
@@ -318,7 +318,7 @@ IMAGE_ONLY=1 scripts/deploy-jetson.sh machineai@100.85.110.98
 Chạy một scenario:
 
 ```bash
-scripts/run-carla-simulation.sh --scenario brake_person --arm \
+simulation/run.sh --scenario brake_person --arm \
     --device machineai@100.85.110.98 --remote-dir hieule/carla-sim
 ```
 
@@ -334,8 +334,8 @@ scripts/run-carla-simulation.sh --scenario brake_person --arm \
   xe, depth nén không mất dữ liệu, ground truth, lệnh đã áp, kết quả nhận
   được, `metrics.json` và `summary.md`.
 - Danh sách scenario và kỳ vọng của từng cái ở
-  `deploy/config/carla-scenarios.yaml`. Thông số camera, ngân sách thời gian
-  và tham số điều khiển ở `deploy/config/carla.yaml`, dùng chung cho cả hai
+  `simulation/config/carla-scenarios.yaml`. Thông số camera, ngân sách thời gian
+  và tham số điều khiển ở `simulation/config/carla.yaml`, dùng chung cho cả hai
   máy.
 
 ### Trạng thái của controller
@@ -452,7 +452,7 @@ vẫn dừng, nhưng những lần đó không chứng minh được quy tắc v
 
 - **200 ms từ frame tới lệnh.** Trên đường truyền hiện tại riêng vòng ping đã
   120 ms; độ trễ đo được là 237 ms trung vị. Ngân sách trong
-  `deploy/config/carla.yaml` vì vậy là bản 2: tuổi dữ liệu tối đa 500 ms,
+  `simulation/config/carla.yaml` vì vậy là bản 2: tuổi dữ liệu tối đa 500 ms,
   thời hạn theo đồng hồ thật 600 ms, `tau` 0,6 s. Hai máy cùng mạng nội bộ thì
   100 ms, bản 1 (200 và 300 ms) dùng được.
 - **30 FPS.** Laptop chạy mô phỏng ở 29,7 tick/giây, thiếu 1 %. Đường truyền

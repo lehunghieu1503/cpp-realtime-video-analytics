@@ -11,6 +11,6 @@ if(WITH_GSTREAMER)
     target_link_libraries(test_capture_timestamps PRIVATE PkgConfig::GST)
 endif()
 
-# Shared with the Python reference: ros2/video_analytics_simulation/test
+# Shared with the Python reference: simulation/test
 target_compile_definitions(test_lane PRIVATE
     LANE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/lane-calibration.json")

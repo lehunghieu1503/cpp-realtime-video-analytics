@@ -2,8 +2,8 @@
 # Run one CARLA scenario: CARLA and the controller on this PC, inference on
 # the device.
 #
-# Usage: scripts/run-carla-simulation.sh --scenario NAME [options]
-#   --scenario NAME    a scenario of deploy/config/carla-scenarios.yaml
+# Usage: simulation/run.sh --scenario NAME [options]
+#   --scenario NAME    a scenario of simulation/config/carla-scenarios.yaml
 #   --device TARGET    where inference runs:
 #                        USER@HOST  a Jetson that has the video-analytics:jetson
 #                                   image (scripts/deploy-jetson.sh ships it)
@@ -22,8 +22,8 @@
 #   --gui              show the CARLA window, with its camera behind the
 #                      vehicle. An off-screen server left by an earlier run
 #                      is stopped and started again with a window.
-#   --config FILE      default deploy/config/carla.yaml
-#   --scenarios FILE   default deploy/config/carla-scenarios.yaml
+#   --config FILE      default simulation/config/carla.yaml
+#   --scenarios FILE   default simulation/config/carla-scenarios.yaml
 #   --run-dir DIR      default .cache/carla/<run id>; must not exist
 #   --local-backend B  backend of a local device (default: cpu)
 # Environment:
@@ -40,7 +40,7 @@
 set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
-TICKS=0 CONFIG=deploy/config/carla.yaml SCENARIOS=deploy/config/carla-scenarios.yaml
+TICKS=0 CONFIG=simulation/config/carla.yaml SCENARIOS=simulation/config/carla-scenarios.yaml
 RUN_DIR="" LOCAL_BACKEND=cpu GUI="" OFFSCREEN=-RenderOffScreen
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,7 +78,7 @@ set -u
 # The run's topics stay on this PC
 export ROS_LOCALHOST_ONLY=1
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-73}"
-export PYTHONPATH="$PWD/ros2/video_analytics_simulation:$PWD/ros2/video_analytics_bridge:${PYTHONPATH:-}"
+export PYTHONPATH="$PWD/simulation:$PWD/ros2/video_analytics_bridge:${PYTHONPATH:-}"
 
 echo "== Checking this PC"
 "$CARLA_PYTHON" - <<'PY'
@@ -196,5 +196,5 @@ fi
 
 wait "$SIMULATOR"
 echo "== Evaluating"
-scripts/evaluate-carla.py "$RUN_DIR" || true
+simulation/evaluate.py "$RUN_DIR" || true
 echo "Run directory: $RUN_DIR"

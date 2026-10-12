@@ -3,10 +3,10 @@
 #
 #   the device (video_analytics --config) reads the top-level keys, `lane`,
 #   `calibration`, `simulation` and `sources`
-#   the laptop (ros2/video_analytics_simulation) reads `calibration`, `lane`,
+#   the laptop (simulation/) reads `calibration`, `lane`,
 #   `carla`, `metric`, `control` and `routes`
 #
-# scripts/run-carla-simulation.sh copies it to the device for every run, with
+# simulation/run.sh copies it to the device for every run, with
 # SIM_HOST replaced by the laptop's address, and starts the device with the
 # run's id in VA_RUN_ID. See docs/SIMULATION.md.
 
