@@ -429,7 +429,7 @@ class Show(unittest.TestCase):
 
     def run_of(self, ticks, drive, hold=None, reason="obstacle:distance:person",
                debug=None, pose=None, speed=0.0, actors=None, flags=None,
-               scenario=None):
+               scenario=None, truth_stalls=None):
         """drive(tick) -> bool: a driving command; hold: the ticks braked and
         marked as a brake that can be released."""
         controls, commands, truth = [], [], []
@@ -463,7 +463,8 @@ class Show(unittest.TestCase):
                           "actors": actors(tick) if actors else [], "events": []})
         manifest = {"scenario_config": scenario or {}, "fixed_delta_seconds": 1 / 30,
                     "vehicle": dict(VEHICLE, rear_bumper_m=-2.4),
-                    "control": {"brake": self.BRAKE}}
+                    "control": {"brake": self.BRAKE},
+                    "truth": {"stalls": truth_stalls or []}}
         return controls, commands, truth, manifest
 
     def judge(self, expect, run, matches=None, collisions=()):
@@ -632,10 +633,14 @@ class Show(unittest.TestCase):
 
     # ── Park ──────────────────────────────────────────────────────────────
 
-    def park_run(self, final=(0.0, 0.1, 2.0), parked_from=40, ticks=60, flags=None,
-                 speed=0.0, actors=None, reason_after="parked"):
-        scenario = {"park": {"stall": self.STALL, "handover": {"x": 7.0, "y": 20.0}}}
+    # Three stalls in a row along y, opening towards +x; the middle one is
+    # STALL. The vehicle comes along the aisle from +y: stall 2 is the one it
+    # passes before the middle one. The scenario says only that it parks.
+    def row(self, occupied=()):
+        return [dict(self.STALL, y=2.8 * (i - 1), occupied=i in occupied) for i in range(3)]
 
+    def park_run(self, final=(0.0, 0.1, 2.0), parked_from=40, ticks=60, flags=None,
+                 speed=0.0, actors=None, reason_after="parked", occupied=(), seen=None):
         def flag(tick):
             if tick >= parked_from:
                 out = {"reason": reason_after, "hand_brake": True, "reverse": False}
@@ -651,23 +656,36 @@ class Show(unittest.TestCase):
                 return final
             return (7.0, 6.0 - 0.1 * tick, -90.0)
         return self.run_of(ticks, lambda t: t < 10, flags=flag, pose=pose, speed=speed,
-                           actors=actors, scenario=scenario)
+                           actors=actors, scenario={"park": True},
+                           truth_stalls=self.row(occupied),
+                           debug=(lambda t: {"park_stall": seen}) if seen else None)
 
-    def test_parked_in_the_stall(self):
-        ok, show = self.one({"parked": 15}, self.park_run())
+    def test_parked_in_a_stall_that_was_empty(self):
+        believed = dict(self.STALL, x=0.03, y=-0.04, yaw_deg=1.0, width_m=2.9)
+        ok, show = self.one({"parked": 15}, self.park_run(seen=believed))
         self.assertTrue(ok)
         park = show["park"]
         self.assertEqual((park["parked_ticks_at_the_end"], park["parked_tick"]), (20, 40))
+        self.assertEqual((park["stall"]["index"], park["stall"]["y"]), (1, 0.0))
+        self.assertIs(park["stall_before_was_occupied"], False)
         self.assertAlmostEqual(park["final_v_m"], 0.1)
         self.assertAlmostEqual(park["final_heading_deg"], 2.0)
         self.assertEqual(park["reverse_ticks"], 30)
+        # Where the controller put that stall, against where it is painted
+        error = park["seen_stall_error"]
+        self.assertAlmostEqual(error["centre_m"], 0.05)
+        self.assertAlmostEqual(error["direction_deg"], 1.0)
+        self.assertAlmostEqual(error["width_m"], 0.1)
 
     def test_not_parked(self):
         cases = {
-            "outside the stall": dict(final=(0.0, 1.6, 0.0)),
+            "in no stall": dict(final=(3.0, 0.0, 0.0)),
             "beyond its back": dict(final=(-2.6, 0.0, 0.0)),
             "17 degrees off": dict(final=(0.0, 0.0, 17.0)),
             "nose in": dict(final=(0.0, 0.0, 180.0)),
+            "a stall with a vehicle in it": dict(occupied=(1,)),
+            "beside a vehicle in the stall passed before it": dict(occupied=(2,)),
+            "the first stall of the row": dict(final=(0.0, 2.9, 0.0)),
             "still in reverse": dict(flags=lambda t: {"reverse": True} if t >= 40 else None),
             "brake not full": dict(flags=lambda t: {"brake": 0.5} if t >= 40 else None),
             "no parking brake": dict(flags=lambda t: {"hand_brake": False}
@@ -680,45 +698,34 @@ class Show(unittest.TestCase):
         for name, changes in cases.items():
             self.assertFalse(self.one({"parked": 15}, self.park_run(**changes))[0], name)
         self.assertTrue(self.one({"parked": 15}, self.park_run(speed=lambda t: 0.2))[0])
+        # A vehicle in the stall beyond it, which it did not swing over
+        self.assertTrue(self.one({"parked": 15}, self.park_run(occupied=(0,)))[0])
         # No park in the scenario at all
         self.assertFalse(self.one({"parked": 15}, self.run_of(30, lambda t: True))[0])
 
-    def occupied(self, **changes):
-        """The stall has a car in it; the park is given up at tick 20."""
-        car = lambda t: [actor(0.0, name="in_the_stall")]
-        scenario = {"park": {"stall": self.STALL, "handover": {"x": 7.0, "y": 20.0}}}
+    def given_up(self, reason="park_abort:no_free_stall", **changes):
+        """Every stall has a car in it; the park is given up at tick 20."""
         options = dict(
-            flags=lambda t: {"reason": "park_abort:stall_occupied", "throttle": 0.0,
-                             "brake": 1.0} if t >= 20 else None,
-            pose=lambda t: (7.0, 20.0 - 0.07 * min(t, 20), -90.0), actors=car,
-            scenario=scenario)
+            flags=lambda t: {"reason": reason, "throttle": 0.0, "brake": 1.0}
+            if t >= 20 else None,
+            pose=lambda t: (7.0, 20.0 - 0.07 * min(t, 20), -90.0),
+            scenario={"park": True}, truth_stalls=self.row((0, 1, 2)))
         options.update(changes)
         return self.run_of(60, lambda t: t < 20, **options)
 
-    SEEN = {5 * TICK: [({"name": "in_the_stall"}, {})], 6 * TICK: [({"name": "in_the_stall"}, {})]}
-
     def test_park_given_up_as_it_should_be(self):
-        ok, show = self.one({"park_abort": True}, self.occupied(), matches=self.SEEN)
+        ok, show = self.one({"park_abort": "no_free_stall"}, self.given_up())
         self.assertTrue(ok)
         park = show["park"]
-        self.assertEqual(park["abort_reasons"], ["park_abort:stall_occupied"])
-        self.assertEqual((park["abort_tick"], park["actors_in_the_stall"],
-                          park["detections_of_them_before_the_abort"]),
-                         (20, ["in_the_stall"], 2))
+        self.assertEqual(park["abort_reasons"], ["park_abort:no_free_stall"])
+        self.assertEqual((park["abort_tick"], park["stalls"], park["stalls_occupied"]),
+                         (20, 3, 3))
         self.assertFalse(park["final_inside"])
+        self.assertTrue(self.one({"park_abort": True}, self.given_up())[0])
 
     def test_park_abort_fails(self):
-        give_up = lambda t: {"reason": "park_abort:stall_occupied", "throttle": 0.0,
+        give_up = lambda t: {"reason": "park_abort:no_free_stall", "throttle": 0.0,
                              "brake": 1.0} if t >= 20 else None
-        # The car in the stall was never detected: the stall was not seen
-        # to be occupied, whatever the reason says
-        self.assertFalse(self.one({"park_abort": True}, self.occupied())[0])
-        # ... or detected only after the park was given up
-        late = {30 * TICK: [({"name": "in_the_stall"}, {})]}
-        self.assertFalse(self.one({"park_abort": True}, self.occupied(), matches=late)[0])
-        # Another actor's detection is not the stall's
-        other = {5 * TICK: [({"name": "lead"}, {})]}
-        self.assertFalse(self.one({"park_abort": True}, self.occupied(), matches=other)[0])
         cases = {
             "parked anyway": lambda t: {"reason": "parked", "hand_brake": True,
                                         "throttle": 0.0, "brake": 1.0} if t >= 20 else None,
@@ -729,14 +736,23 @@ class Show(unittest.TestCase):
             if t >= 20 else None,
         }
         for name, flags in cases.items():
-            self.assertFalse(self.one({"park_abort": True}, self.occupied(flags=flags),
-                                      matches=self.SEEN)[0], name)
-        # Ended inside the stall, on the car
+            self.assertFalse(self.one({"park_abort": "no_free_stall"},
+                                      self.given_up(flags=flags))[0], name)
+        # Given up, but for another reason than the scenario expects
+        other = self.given_up(reason="park_abort:stall_lost")
+        self.assertFalse(self.one({"park_abort": "no_free_stall"}, other)[0])
+        self.assertTrue(self.one({"park_abort": "stall_lost"}, other)[0])
+        # Given up while backing: that was the right thing, in reverse or not
+        backing = lambda t: {"reverse": True, "reason": ""} if 15 <= t < 20 else \
+            {"reason": "park_abort:stall_occupied", "throttle": 0.0, "brake": 1.0} \
+            if t >= 20 else None
+        self.assertTrue(self.one({"park_abort": "stall_occupied"},
+                                 self.given_up(flags=backing))[0])
+        # Ended inside a stall, on the car
         into = lambda t: (7.0 - 0.35 * min(t, 20), 0.0, 0.0)
-        self.assertFalse(self.one({"park_abort": True}, self.occupied(pose=into),
-                                  matches=self.SEEN)[0])
+        self.assertFalse(self.one({"park_abort": True}, self.given_up(pose=into))[0])
         # A collision
-        self.assertFalse(self.one({"park_abort": True}, self.occupied(), matches=self.SEEN,
+        self.assertFalse(self.one({"park_abort": True}, self.given_up(),
                                   collisions=[{"tick": 3}])[0])
 
 

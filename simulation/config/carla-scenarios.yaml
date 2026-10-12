@@ -275,39 +275,55 @@ scenarios:
              no_box_overlap: [walker, lead], collisions: 0}
 
   # ── The park show. Needs --arm ────────────────────────────────────────────
-  # Town05's car park: along the aisle at 2 m/s, past the stall, then
-  # backwards into it on a quarter circle and straight to its centre, at
-  # 0.5 m/s at most. Ends with the parking brake set, nose out.
+  # Town05's car park, as the map has it: 17 parked cars in its 60 stalls.
+  # The scenario says where the vehicle starts and that it parks, not where.
+  # It drives along the aisle at 2 m/s; the stall model finds, in the rear
+  # camera's image, the stalls it has passed. The first that is empty, wide
+  # enough, and whose neighbour passed before it is empty too, it backs
+  # into: along the aisle to the turning point, a quarter circle, straight
+  # to the centre, at 0.5 m/s at most. Ends with the parking brake set, nose
+  # out.
   #
-  # The stall is one painted stall of the row that opens to the widest aisle,
-  # measured on the paint by simulation/probe-stall.py --margin 0.5 (ray
-  # casts; the map has no Parking lane in the car park). It is 2.72 m wide,
-  # 0.56 m more than the vehicle: no stall of this car park leaves the 1 m
-  # the probe asks for by default. The stalls either side of it are empty.
-  # It is the only stall of the row whose four corners are in the camera's
-  # image from the end of the aisle. The handover point is where the vehicle
-  # starts: there is no lane on this aisle to hold until later.
+  # `expect` is the evaluation's side, read with the stalls measured on the
+  # paint (carla-stalls.yaml); none of it reaches the controller. `parked`
+  # asks for a stall that was empty when the run began, as was the stall
+  # passed before it. Here the first two stalls of the row hold the map's
+  # pick-ups and the third is beside one of them: the fourth is the first
+  # it may take.
   show_park: &show_park
     map: Town05
     route: carpark
-    ticks: 2100
+    ticks: 2700
     jpeg_quality: 75
-    park:
-      stall: {x: 9.83, y: -35.50, yaw_deg: 0.0, length_m: 4.96, width_m: 2.72}
-      handover: {x: 17.03, y: -13.10}
+    park: true
     expect: {drives: true, parked: 15, collisions: 0, no_box_overlap: true}
 
-  # The same stall with a car in it: the park must be given up before the
-  # vehicle goes backwards
+  # A car in the third stall. The fourth is now beside a car on the side
+  # the front swings over; the fifth is not.
+  show_park_next:
+    <<: *show_park
+    actors:
+      - {name: in_the_third, class: car, blueprint: vehicle.tesla.model3,
+         physics: true, at: {x: 9.77, y: -24.36, z: 0.158, yaw_deg: 0.0}}
+    expect: {drives: true, parked: 15, collisions: 0, no_box_overlap: true}
+
+  # Cars in the third, fifth and seventh stall; the last two hold the map's
+  # own. No stall is left that it may take: the park must be given up at the
+  # end of the search, without going backwards.
   show_park_occupied:
     <<: *show_park
-    ticks: 900
+    ticks: 1200
     actors:
-      - {name: in_the_stall, class: car, blueprint: vehicle.tesla.model3,
-         physics: true, at: {x: 9.83, y: -35.50, z: 0.157, yaw_deg: 0.0}}
-    # Passes when the park is given up as it should be. Parked anyway, a
-    # collision, a box over the other car's, or going backwards: fails.
-    expect: {park_abort: true, collisions: 0}
+      - {name: in_the_third, class: car, blueprint: vehicle.tesla.model3,
+         physics: true, at: {x: 9.77, y: -24.36, z: 0.158, yaw_deg: 0.0}}
+      - {name: in_the_fifth, class: car, blueprint: vehicle.audi.tt,
+         physics: true, at: {x: 9.77, y: -29.94, z: 0.158, yaw_deg: 180.0}}
+      - {name: in_the_seventh, class: car, blueprint: vehicle.tesla.model3,
+         physics: true, at: {x: 9.77, y: -35.52, z: 0.158, yaw_deg: 0.0}}
+    # Passes when the park is given up as it should be. Parked anyway, in a
+    # stall at any time, a collision, a box over another car's, or going
+    # backwards: fails.
+    expect: {park_abort: no_free_stall, collisions: 0}
 
   # ── Faults. Need --arm ────────────────────────────────────────────────────
   # The vehicle is driving when the fault starts; it must be braked within

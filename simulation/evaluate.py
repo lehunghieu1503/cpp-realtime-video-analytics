@@ -59,7 +59,7 @@ from video_analytics_simulation import protocol  # noqa: E402
 from video_analytics_simulation.calibration import Pose, Rig, decode_depth  # noqa: E402
 from video_analytics_simulation.controller import stopping_distance  # noqa: E402
 from video_analytics_simulation.metric_tracker import MetricTracker  # noqa: E402
-from video_analytics_simulation.parking import Park  # noqa: E402
+from video_analytics_simulation.parking import Stall  # noqa: E402
 
 BINS = [(0, 30), (30, 60), (60, 90), (90, 120)]
 IOU_MATCH = 0.5
@@ -649,58 +649,75 @@ def show_section(controls, commands, truth_rows, manifest, matches):
     out["box_overlap"] = {name: {"ticks": len(t), "first_tick": t[0]}
                           for name, t in overlaps.items()}
 
-    # Park
+    # Park: judged against the stalls as they are painted (the manifest's
+    # truth), which the controller never saw
     if scenario.get("park"):
-        park = Park(scenario["park"], vehicle, (manifest.get("control") or {}).get("park", {}))
+        stalls = [(Stall.from_dict(spec), spec.get("occupied", False))
+                  for spec in (manifest.get("truth") or {}).get("stalls", [])]
+
+        def stall_at(pose):
+            return next((i for i, (stall, _) in enumerate(stalls)
+                         if stall.contains([pose["x"], pose["y"]])), None)
+
         poses = {row["tick"]: row["ego"] for row in truth_rows}
+        last = truth_rows[-1]["ego"]["pose"] if truth_rows else None
+        index = stall_at(last) if last else None
+        stall = stalls[index][0] if index is not None else None
         tail = []
         for c in reversed(applied):
             ego = poses.get(c["tick"])
-            if ego is None:
+            if ego is None or stall is None:
                 break
             pose = ego["pose"]
             ok = (c["reason"] == "parked" and c["brake"] >= 1.0 and c["throttle"] == 0.0
                   and c.get("reverse") is False and c.get("hand_brake") is True
-                  and park.contains([pose["x"], pose["y"]])
-                  and abs(park.heading_error(pose["yaw"])) < math.radians(15.0)
+                  and stall.contains([pose["x"], pose["y"]])
+                  and abs(stall.heading_error(pose["yaw"])) < math.radians(15.0)
                   and ego["speed_mps"] <= 0.2)
             if not ok:
                 break
             tail.append(c["tick"])
-        last = truth_rows[-1]["ego"]["pose"] if truth_rows else None
-        inside = [row["tick"] for row in truth_rows
-                  if park.contains([row["ego"]["pose"]["x"], row["ego"]["pose"]["y"]])]
+        inside = [row["tick"] for row in truth_rows if stall_at(row["ego"]["pose"]) is not None]
         reasons = sorted({c["reason"] for c in applied if c["reason"].startswith("park_abort")})
-        in_stall = [a["name"] for a in (truth_rows[0]["actors"] if truth_rows else [])
-                    if park.contains([a["pose"]["x"], a["pose"]["y"]])]
-        first_abort = next((c["tick"] for c in applied
-                            if c["reason"].startswith("park_abort")), None)
-        seen = 0
-        for sim_ns, pairs in matches.items():
-            tick = tick_of.get(sim_ns)
-            if tick is None or (first_abort is not None and tick > first_abort):
-                continue
-            seen += sum(1 for truth, _ in pairs if truth["name"] in in_stall)
+        # The stall as the controller last put it, from the rear camera
+        believed = next((r["debug"]["park_stall"] for r in reversed(commands)
+                         if (r.get("debug") or {}).get("park_stall")), None)
         out["park"] = {
+            "stalls": len(stalls), "stalls_occupied": sum(1 for _, taken in stalls if taken),
             "parked_ticks_at_the_end": len(tail),
             "parked_tick": tail[-1] if tail else None,
             "parked_command_ticks": sum(1 for c in applied if c["reason"] == "parked"
                                         or c.get("hand_brake")),
             "reverse_ticks": sum(1 for c in applied if c.get("reverse")),
-            "abort_reasons": reasons, "abort_tick": first_abort,
-            "ticks_inside_the_stall": len(inside),
-            "actors_in_the_stall": in_stall,
-            "detections_of_them_before_the_abort": seen,
+            "abort_reasons": reasons,
+            "abort_tick": next((c["tick"] for c in applied
+                                if c["reason"].startswith("park_abort")), None),
+            "ticks_inside_a_stall": len(inside),
+            "final_inside": stall is not None,
+            "max_reverse_speed_mps": max(
+                [poses[c["tick"]]["speed_mps"] for c in applied
+                 if c.get("reverse") and c["tick"] in poses], default=None),
         }
-        if last:
-            u, v = park.frame([last["x"], last["y"]])
+        if stall is not None:
+            u, v = stall.frame([last["x"], last["y"]])
+            # The stall it passed just before this one: its front swung out
+            # over that one while it turned in. Which side that is, from
+            # where the vehicle was when the run began.
+            first = truth_rows[0]["ego"]["pose"]
+            side = -1.0 if stall.frame([first["x"], first["y"]])[1] < 0 else 1.0
+            before = stall_at(dict(zip("xy", stall.world(0.0, side * stall.width))))
             out["park"].update(
+                stall=dict(stall.as_dict(), index=index), stall_was_occupied=stalls[index][1],
+                stall_before_was_occupied=stalls[before][1] if before is not None else None,
                 final_u_m=u, final_v_m=v,
-                final_heading_deg=math.degrees(park.heading_error(last["yaw"])),
-                final_inside=park.contains([last["x"], last["y"]]),
-                max_reverse_speed_mps=max(
-                    [poses[c["tick"]]["speed_mps"] for c in applied
-                     if c.get("reverse") and c["tick"] in poses], default=None))
+                final_heading_deg=math.degrees(stall.heading_error(last["yaw"])))
+            if believed:
+                seen = Stall.from_dict(believed)
+                out["park"]["seen_stall_error"] = {
+                    "centre_m": float(np.hypot(*(seen.centre - stall.centre))),
+                    "direction_deg": math.degrees(stall.heading_error(seen.yaw_out)),
+                    "width_m": seen.width - stall.width,
+                    "length_m": seen.length - stall.length}
     return out
 
 
@@ -1245,28 +1262,39 @@ def check_expectations(expect, metrics):
         elif key == "parked":
             park = metrics["show"].get("park") or {}
             needed = 15 if value is True else int(value)
-            add("parked for the last %d ticks: in the stall, within 15 deg, standing, "
-                "reverse off, brakes on" % needed,
-                park.get("parked_ticks_at_the_end", 0) >= needed,
-                "%d ticks; %.2f m along, %.2f m beside the axis, %.1f deg" % (
-                    park.get("parked_ticks_at_the_end", 0), park.get("final_u_m", math.nan),
-                    park.get("final_v_m", math.nan), park.get("final_heading_deg", math.nan)))
+            ok = park.get("parked_ticks_at_the_end", 0) >= needed \
+                and park.get("stall_was_occupied") is False \
+                and park.get("stall_before_was_occupied") is False
+            add("parked for the last %d ticks: in a stall that was empty, as was the one "
+                "passed before it; within 15 deg, standing, reverse off, brakes on" % needed,
+                ok, "%d ticks; %s; %.2f m along, %.2f m beside its axis, %.1f deg" % (
+                    park.get("parked_ticks_at_the_end", 0),
+                    "in no stall" if not park.get("final_inside") else
+                    "the stall had a vehicle in it" if park.get("stall_was_occupied") else
+                    "no stall before it: the end of a row"
+                    if park.get("stall_before_was_occupied") is None else
+                    "the stall before it had a vehicle in it"
+                    if park.get("stall_before_was_occupied") else
+                    "stall at (%.2f, %.2f)" % (park["stall"]["x"], park["stall"]["y"]),
+                    park.get("final_u_m", math.nan), park.get("final_v_m", math.nan),
+                    park.get("final_heading_deg", math.nan)))
         elif key == "park_abort":
             park = metrics["show"].get("park") or {}
+            given = park.get("abort_reasons", [])
+            wanted = None if value is True else "park_abort:" + str(value)
             checks = [
                 ("no parked tick", park.get("parked_command_ticks", 1) == 0),
-                ("given up: %s" % ", ".join(park.get("abort_reasons", [])),
-                 bool(park.get("abort_reasons"))),
-                ("never in the stall", park.get("ticks_inside_the_stall", 1) == 0),
-                ("never in reverse", park.get("reverse_ticks", 1) == 0),
+                ("given up: %s" % (", ".join(given) or "no"),
+                 bool(given) and (wanted is None or given == [wanted])),
+                ("never in a stall", park.get("ticks_inside_a_stall", 1) == 0),
                 ("no collision", not control["collisions"]),
                 ("no box over another", not metrics["show"]["box_overlap"]),
-                ("%s detected %d times before" % (
-                    ", ".join(park.get("actors_in_the_stall", [])) or "nothing in the stall",
-                    park.get("detections_of_them_before_the_abort", 0)),
-                 park.get("detections_of_them_before_the_abort", 0) > 0),
             ]
-            add("park given up for an occupied stall", all(ok for _, ok in checks),
+            if wanted in (None, "park_abort:no_free_stall"):
+                # Nothing to back into: it never went backwards
+                checks.append(("never in reverse", park.get("reverse_ticks", 1) == 0))
+            add("park given up%s" % (" (%s)" % value if wanted else ""),
+                all(ok for _, ok in checks),
                 "; ".join("%s%s" % (name, "" if ok else " FAILED") for name, ok in checks))
         elif key == "evaluator_must_fail":
             pass  # handled by the caller: a negative control
@@ -1486,22 +1514,31 @@ def summary_markdown(m):
                       for n, o in show["box_overlap"].items()) or "never"))
         park = show.get("park")
         if park:
-            lines.append("- park: %s; ended %s the stall, %s m along and %s m beside "
-                         "its axis, %s deg off its direction; backwards for %d ticks, "
-                         "at most %s m/s" % (
-                             "parked from tick %s" % park["parked_tick"]
-                             if park["parked_ticks_at_the_end"] else
-                             "given up (%s) at tick %s" % (
-                                 ", ".join(park["abort_reasons"]), park["abort_tick"])
-                             if park["abort_reasons"] else "not parked",
-                             "inside" if park.get("final_inside") else "outside",
-                             fmt(park.get("final_u_m")), fmt(park.get("final_v_m")),
-                             fmt(park.get("final_heading_deg"), 1), park["reverse_ticks"],
-                             fmt(park.get("max_reverse_speed_mps"))))
-            if park["actors_in_the_stall"]:
-                lines.append("- in the stall: %s, detected %d times before the park was "
-                             "given up" % (", ".join(park["actors_in_the_stall"]),
-                                           park["detections_of_them_before_the_abort"]))
+            lines.append("- park: %s; backwards for %d ticks, at most %s m/s" % (
+                "parked from tick %s" % park["parked_tick"]
+                if park["parked_ticks_at_the_end"] else
+                "given up (%s) at tick %s" % (", ".join(park["abort_reasons"]),
+                                              park["abort_tick"])
+                if park["abort_reasons"] else "not parked",
+                park["reverse_ticks"], fmt(park.get("max_reverse_speed_mps"))))
+            if park.get("stall"):
+                lines.append("- ended in the stall at (%.2f, %.2f), %s when the run began: "
+                             "%s m along and %s m beside its axis, %s deg off its "
+                             "direction" % (
+                                 park["stall"]["x"], park["stall"]["y"],
+                                 "occupied" if park["stall_was_occupied"] else "empty",
+                                 fmt(park["final_u_m"]), fmt(park["final_v_m"]),
+                                 fmt(park["final_heading_deg"], 1)))
+            else:
+                lines.append("- ended in no stall (of %d, %d occupied when the run began)"
+                             % (park["stalls"], park["stalls_occupied"]))
+            error = park.get("seen_stall_error")
+            if error:
+                lines.append("- that stall as the rear camera's model put it at the end: "
+                             "centre %s m off, direction %s deg off, %s m wider, %s m "
+                             "longer than painted" % (
+                                 fmt(error["centre_m"]), fmt(error["direction_deg"], 1),
+                                 fmt(error["width_m"]), fmt(error["length_m"])))
     for fault in m["faults"]:
         lines.append("- fault %s at tick %d: braked at tick %s (%s), %s ms of "
                      "simulation, %s ms of wall time" % (

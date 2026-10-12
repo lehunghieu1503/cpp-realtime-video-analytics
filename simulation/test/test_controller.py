@@ -14,6 +14,7 @@ import fixtures  # noqa: E402
 from test_metric_tracker import render  # noqa: E402
 from video_analytics_simulation import lane, protocol  # noqa: E402
 from video_analytics_simulation.calibration import Pose, Rig  # noqa: E402
+from video_analytics_simulation.parking import Stall  # noqa: E402
 from video_analytics_simulation.controller import (  # noqa: E402
     HOLDING, LANE_LATCH_FRAMES, RUNNING, STOP_LATCHED, WAIT_DATA, ControlCore,
     lane_config_from, pure_pursuit, stopping_distance)
@@ -24,6 +25,7 @@ with open(os.path.join(os.path.dirname(__file__), "..", "config", "carla.yaml"))
 CONFIG["calibration"]["width"] = 640
 CONFIG["calibration"]["height"] = 360
 RIG = Rig.from_config(CONFIG["calibration"])
+REAR = Rig.from_config(CONFIG["rear_calibration"])  # no depth is rendered for it
 LANE_CONFIG = lane_config_from(CONFIG["lane"])
 VEHICLE = {"wheelbase_m": 3.0, "max_steer_deg": 70.0, "width_m": 2.16,
            "front_bumper_m": 2.43}
@@ -909,25 +911,31 @@ class LaneChange(unittest.TestCase):
 
 
 class ParkWorld(World):
-    """A car park: no lane markings, a stall, and a vehicle that moves as it
-    is told, on a bicycle model whose wheel turns as the real one does."""
-    STALL = {"x": 0.0, "y": 0.0, "yaw_deg": 0.0, "length_m": 5.0, "width_m": 2.8}
+    """A car park: no lane markings, a row of stalls beside the aisle, a
+    rear camera whose stall model finds what is in its image, and a vehicle
+    that moves as it is told, on a bicycle model whose wheel turns as the
+    real one does. The scenario says only that the vehicle parks."""
     DEPTH = None
+    # Along +y, opening towards +x; the aisle is at x = 7.2
+    ROW = [Stall(0.0, 2.8 * i, 0.0, 5.0, 2.8) for i in range(8)]
 
-    def __init__(self, handover=(7.0, 22.6), start=None, yaw=-90.0, config=None,
-                 stall=None):
+    def __init__(self, occupied=(0, 1), start=(7.2, -8.0), yaw=90.0, config=None,
+                 stalls=None, noise_px=0.0, park=None):
         config = copy.deepcopy(config or CONFIG)
         config["control"]["park"]["reverse_speed_mps"] = 0.6  # a shorter test
-        scenario = {"park": {"stall": dict(stall or self.STALL),
-                             "handover": {"x": handover[0], "y": handover[1]}}}
-        super().__init__(config, scenario=scenario)
+        super().__init__(config, scenario={"park": park or {"search_m": 40.0}})
         self.gain = config["control"]["park"]["turn_gain"]
-        start = start or handover
         self.pose = Pose(start[0], start[1], 0.0, 0.0, 0.0, yaw)
         self.signed = 0.0
         self.lane = dict(lane_envelope(markings=()), pixels=[])
         self.commands = []
         self.stalled_car = None  # (x, y) of something standing in the world
+        self.stalls = list(self.ROW if stalls is None else stalls)
+        self.occupied = set(occupied)
+        self.noise_px = noise_px
+        self.rng = np.random.default_rng(0)
+        self.rear = True         # the rear camera's results arrive
+        self.stall_model = True  # and the model finds the stalls
 
     def ego(self, tick=None, pose=None, run=None):
         ego = super().ego(tick, pose, run)
@@ -949,10 +957,28 @@ class ParkWorld(World):
             return envelope, ParkWorld.DEPTH
         return super().envelope(tick, **changes)
 
+    def rear_envelope(self):
+        found = fixtures.stall_detections(self.stalls, self.pose, REAR, self.occupied,
+                                          self.noise_px, self.rng) if self.stall_model else []
+        ends = fixtures.stall_points(self.stalls, self.pose, REAR, self.noise_px,
+                                     self.rng) if self.stall_model else []
+        return {"simulation": {"run_id": self.run, "sim_ns": self.tick * TICK},
+                "stream": "carla-rear", "image": {"width": REAR.width, "height": REAR.height},
+                "detections": [], "stalls": found, "stall_points": ends}
+
+    def frame(self, deliver=True, with_depth=True, **changes):
+        if self.rear:
+            # The rear result of this tick, as the node would hand it over
+            self.core.on_ego(self.ego())
+            made, reason = self.core.on_rear(self.rear_envelope())
+            assert reason == "", reason
+            json.dumps(made)
+        return super().frame(deliver, with_depth, **changes)
+
     def move(self):
         """Applies the last command for one tick."""
         c = self.last
-        json.dumps(self.core.debug)  # the node writes it to commands.jsonl
+        json.dumps((self.core.debug, self.core.status(self.ego(self.tick - 1))))
         self.commands.append(dict(c, speed=abs(self.signed), phase=self.core.park_phase))
         dt = 1.0 / 30.0
         gear = -1.0 if c.get("reverse") else 1.0
@@ -980,6 +1006,21 @@ class ParkWorld(World):
                 return True
         return False
 
+    def armed(self):
+        for _ in range(3):
+            self.frame()
+        assert self.arm() == "", self.core.gates(self.ego(self.tick - 1))
+        return self
+
+    def where(self):
+        """(index of the stall the vehicle's origin is in, u, v, degrees off
+        nose-out), by where the stalls really are."""
+        for index, stall in enumerate(self.stalls):
+            if stall.contains([self.pose.x, self.pose.y]):
+                u, v = stall.frame([self.pose.x, self.pose.y])
+                return index, u, v, math.degrees(stall.heading_error(self.pose.yaw))
+        return None, None, None, None
+
 
 def _envelope_without_render(self, tick=None, **changes):
     tick = self.tick if tick is None else tick
@@ -998,67 +1039,79 @@ class Parking(unittest.TestCase):
     def parked(self, world):
         return world.core.park_phase == "parked"
 
-    def test_the_turning_point_is_one_radius_past_the_stall(self):
-        from video_analytics_simulation.parking import Park
-        spec = {"stall": ParkWorld.STALL, "handover": {"x": 7.0, "y": 22.6}}
-        park = Park(spec, VEHICLE, {"k": 0.45, "turn_gain": 1.0})
-        # wheelbase 3 m, 0.45 of a 70 degree lock: not the 1.1 m of a full lock
-        self.assertAlmostEqual(park.radius, 3.0 / math.tan(math.radians(31.5)))
-        self.assertAlmostEqual(park.radius, 4.896, places=3)
-        self.assertEqual(park.direction, -1.0)       # it comes from +y
-        self.assertAlmostEqual(park.track_u, 7.0)
-        # Rear axle one radius past the axis; the origin half a wheelbase on
-        self.assertAlmostEqual(park.stop_v, -(park.radius + 1.5))
-        self.assertAlmostEqual(park.turn_steer(), -0.45)
-        # A quarter circle from there ends on the axis, nose out
-        self.assertAlmostEqual(park.track_u - park.radius, 7.0 - 4.896, places=3)
-        measured = Park(spec, VEHICLE, CONFIG["control"]["park"])
-        self.assertAlmostEqual(measured.radius, 5.72, delta=0.05)  # as measured
-        mirrored = Park({"stall": ParkWorld.STALL, "handover": {"x": 7.0, "y": -22.6}},
-                        VEHICLE, {"k": 0.45})
-        self.assertEqual((mirrored.direction, mirrored.turn_steer()), (1.0, 0.45))
-        self.assertTrue(park.contains([0.0, 0.0]) and park.contains([2.4, 1.3]))
-        self.assertFalse(park.contains([2.4, 1.3], 0.3) or park.contains([0.0, 1.5]))
-
-    def test_arms_without_a_lane_only_past_the_handover(self):
+    def test_arms_without_a_lane_but_not_without_the_rear_camera(self):
         world = ParkWorld()
+        world.rear = False
         for _ in range(3):
             world.frame()
         self.assertFalse(world.lane["valid"])
+        self.assertIn("no_rear_perception", world.arm())
+        world.rear = True
+        world.frame()
         self.assertEqual(world.arm(), "")
-        before = ParkWorld(handover=(7.0, 22.6), start=(7.0, 30.0))
+        self.assertEqual(world.core.park_phase, "search")
+        # Results of the rear camera that are too old do not arm either
+        late = ParkWorld()
         for _ in range(3):
-            before.frame()
-        self.assertIn("lane_invalid", before.arm())
+            late.frame()
+        late.rear = False
+        for _ in range(STALE_TICKS):
+            late.frame()
+        self.assertIn("stale_rear_perception", late.arm())
 
-    def test_parks_backwards_into_the_stall(self):
+    def test_results_of_the_rear_camera_that_cannot_be_used(self):
         world = ParkWorld()
-        for _ in range(3):
-            world.frame()
-        self.assertEqual(world.arm(), "")
+        world.frame()
+        good = world.rear_envelope()
+        on_rear = world.core.on_rear
+        world.core.on_ego(world.ego())
+        self.assertEqual(on_rear(dict(good, simulation={"run_id": "r0", "sim_ns": TICK}))[1],
+                         "wrong_run")
+        self.assertEqual(on_rear(dict(good, stream="carla-front"))[1], "wrong_source")
+        self.assertEqual(on_rear(dict(good, image={"width": 640, "height": 360}))[1],
+                         "image_size")
+        without = dict(good)
+        del without["stalls"]
+        self.assertEqual(on_rear(without)[1], "no_stalls_block")
+        only_stalls = dict(good)
+        del only_stalls["stall_points"]
+        self.assertEqual(on_rear(only_stalls)[1], "no_stalls_block")
+        self.assertEqual(on_rear(dict(good, stall_points=[{"class": "mouth"}]))[1],
+                         "bad_envelope")
+        self.assertEqual(on_rear(dict(good, simulation={"run_id": "r1",
+                                                        "sim_ns": 999 * TICK}))[1],
+                         "no_ego_for_frame")
+        self.assertEqual(on_rear(good)[1], "")
+        self.assertEqual(on_rear(good)[1], "not_newer")
+        # A controller that does not park takes none of them
+        self.assertEqual(World().core.on_rear(good)[1], "not_parking")
+
+    def test_finds_a_free_stall_and_parks_backwards_into_it(self):
+        world = ParkWorld().armed()
         import video_analytics_simulation.controller as controller
         real = controller.pure_pursuit
         try:
-            self.assertTrue(world.drive(900, lambda w: w.core.park_phase == "align"))
-            self.assertTrue(world.core.park_seen)
-            # At the turning point: standing, one radius past the axis
-            park = world.core.park
+            self.assertTrue(world.drive(900, lambda w: w.core.park_phase == "back"))
+            # Stalls 0 and 1 are taken; 2 is free but the one passed before
+            # it is not; 3 is the first it may turn into
+            chosen = world.core.target_stall
+            self.assertEqual(round(chosen.centre[1] / 2.8), 3)
+            np.testing.assert_allclose(chosen.centre, ParkWorld.ROW[3].centre, atol=0.1)
             self.assertLess(world.speed, 0.15)
-            rear = park.frame(park.rear_axle(world.pose))
-            self.assertAlmostEqual(rear[1], -park.radius, delta=0.15)
-            self.assertAlmostEqual(rear[0], 7.0, delta=0.1)
+            aisle = world.core.aisle
+            self.assertGreater(aisle.past(chosen, world.pose), aisle.radius(chosen, world.pose))
 
             def no_pursuit(*_):
                 raise AssertionError("pure pursuit while going backwards")
             controller.pure_pursuit = no_pursuit
-            self.assertTrue(world.drive(1500, self.parked))
+            self.assertTrue(world.drive(2500, self.parked))
         finally:
             controller.pure_pursuit = real
-        u, v = park.frame([world.pose.x, world.pose.y])
-        self.assertTrue(park.contains([world.pose.x, world.pose.y], 0.3))
+        index, u, v, off = world.where()
+        self.assertEqual(index, 3)
         self.assertLess(abs(v), 0.15)
         self.assertLess(abs(u), 0.3)
-        self.assertLess(abs(math.degrees(park.heading_error(world.pose.yaw))), 3.0)
+        self.assertLess(abs(off), 3.0)
         world.drive(20)
         last = world.last
         self.assertEqual((last["throttle"], last["brake"], last["reason"]),
@@ -1069,7 +1122,7 @@ class Parking(unittest.TestCase):
 
         phases = [c["phase"] for c in world.commands]
         self.assertEqual([p for i, p in enumerate(phases) if i == 0 or phases[i - 1] != p],
-                         ["approach", "align", "enter", "parked"])
+                         ["search", "back", "align", "enter", "parked"])
         for before, after in zip(world.commands, world.commands[1:]):
             # The parking brake comes with the state, never earlier
             self.assertEqual(after["hand_brake"], after["phase"] == "parked")
@@ -1077,9 +1130,11 @@ class Parking(unittest.TestCase):
                 self.assertLess(after["speed"], 0.15)
             self.assertFalse(after["throttle"] > 0 and after["brake"] > 0)
         turning = [c for c in world.commands if c["phase"] == "align" and c["throttle"] > 0]
-        self.assertEqual({round(c["steer"], 2) for c in turning[10:]}, {-0.45})
+        # It passed the row along +v: the wheel to the right, about 0.45 of the lock
+        self.assertTrue(all(0.3 <= c["steer"] <= 0.65 for c in turning[10:]))
+        self.assertAlmostEqual(float(np.median([c["steer"] for c in turning])), 0.45, delta=0.06)
         self.assertTrue(all(c["reverse"] for c in turning))
-        forwards = [c for c in world.commands if c["phase"] == "approach"]
+        forwards = [c for c in world.commands if c["phase"] == "search"]
         self.assertLessEqual(max(c["speed"] for c in forwards), 2.0 + 0.2)
         # Every one of them is a command the simulator would take
         limits = {"age_limit_ns": AGE_MS * MS, "pose_budget_ns": 100 * MS}
@@ -1088,85 +1143,102 @@ class Parking(unittest.TestCase):
             c, "r1", "carla-front", c["command_seq"] - 1, c["control_sim_ns"], limits,
             lambda ns: True, lambda ns, frame: True), "")
 
-    def test_a_road_user_in_the_stall_gives_the_park_up_before_reversing(self):
-        world = ParkWorld()
-        world.stalled_car = (1.0, 0.0)
-        for _ in range(3):
-            world.frame()
-        world.arm()
+    def test_the_other_way_along_the_aisle(self):
+        # The row on the left, passed along its -v
+        world = ParkWorld(occupied=(7, 6), start=(7.2, 28.0), yaw=-90.0).armed()
+        self.assertTrue(world.drive(3500, self.parked))
+        index, u, v, off = world.where()
+        self.assertEqual(index, 4)
+        self.assertLess(max(abs(u), abs(v)), 0.3)
+        self.assertLess(abs(off), 3.0)
+        turning = [c for c in world.commands if c["phase"] == "align" and c["throttle"] > 0]
+        self.assertLess(max(c["steer"] for c in turning[10:]), -0.3)
+
+    def test_with_a_car_in_that_stall_it_takes_another(self):
+        world = ParkWorld(occupied=(0, 1, 3)).armed()
+        self.assertTrue(world.drive(3500, self.parked))
+        # 2 and 4 have a car on the side the front swings over; 5 has not
+        self.assertEqual(world.where()[0], 5)
+
+    def test_corners_two_pixels_off_still_end_in_the_stall(self):
+        world = ParkWorld(noise_px=2.0).armed()
+        self.assertTrue(world.drive(3500, self.parked))
+        index, u, v, off = world.where()
+        self.assertEqual(index, 3)
+        self.assertLess(abs(v), 0.25)
+        self.assertLess(abs(u), 0.4)
+        self.assertLess(abs(off), 4.0)
+
+    def test_no_stall_it_may_take_gives_the_park_up(self):
+        world = ParkWorld(occupied=(0, 2, 4, 6), park={"search_m": 30.0}).armed()
         world.drive(900, lambda w: w.core.state == STOP_LATCHED)
-        self.assertEqual(world.core.stop_reason, "park_abort:stall_occupied")
-        self.assertEqual(world.core.park_phase, "approach")
+        self.assertEqual(world.core.stop_reason, "park_abort:no_free_stall")
+        self.assertEqual(world.core.park_phase, "search")
         self.assertFalse(any(c["reverse"] or c["hand_brake"] for c in world.commands))
-        world.stalled_car = None
-        world.drive(60)  # gone or not: this run does not park any more
+        self.assertAlmostEqual(world.core.aisle.travelled(world.pose), 30.0, delta=1.0)
+        self.assertEqual(world.where()[0], None)
+        why = {c["why"] for c in world.core.debug.get("park_candidates", [])} \
+            or {c["why"] for c in world.commands[-1].get("candidates", [])}
+        world.drive(30)  # this run does not park any more
         self.assertEqual((world.last["brake"], world.last["reason"]),
-                         (1.0, "park_abort:stall_occupied"))
-        self.assertFalse(world.core.park.contains([world.pose.x, world.pose.y]))
+                         (1.0, "park_abort:no_free_stall"))
+        self.assertLessEqual(why, {"occupied", "neighbour_not_known_empty",
+                                   "judged_too_little", "not_past_it_yet", ""})
 
-    def test_a_car_in_the_next_stall_is_not_in_this_one(self):
-        world = ParkWorld()
-        world.stalled_car = (1.0, 2.8)
-        for _ in range(3):
-            world.frame()
-        world.arm()
-        world.drive(300)
-        self.assertEqual(world.core.state, RUNNING)
-
-    def test_a_stall_that_was_never_in_the_image_is_not_backed_into(self):
-        # From 9 m before it, the far corners are outside the image
-        world = ParkWorld(handover=(7.0, 9.0))
-        for _ in range(3):
-            world.frame()
-        world.arm()
+    def test_stalls_too_narrow_or_not_on_this_aisle_are_not_taken(self):
+        narrow = [Stall(0.0, 2.5 * i, 0.0, 5.0, 2.5) for i in range(8)]
+        world = ParkWorld(occupied=(), stalls=narrow, park={"search_m": 20.0}).armed()
         world.drive(900, lambda w: w.core.state == STOP_LATCHED)
-        self.assertFalse(world.core.park_seen)
-        self.assertEqual(world.core.stop_reason, "park_abort:stall_unseen")
-        self.assertFalse(any(c["reverse"] for c in world.commands))
-        self.assertAlmostEqual(world.core.park.remaining(world.pose), 0.0, delta=0.2)
+        self.assertEqual(world.core.stop_reason, "park_abort:no_free_stall")
+        # The same stalls 2.8 m wide, but of a row that opens the other way
+        away = [Stall(0.0, 2.8 * i, 180.0, 5.0, 2.8) for i in range(8)]
+        world = ParkWorld(occupied=(), stalls=away, park={"search_m": 20.0}).armed()
+        world.drive(900, lambda w: w.core.state == STOP_LATCHED)
+        self.assertEqual(world.core.stop_reason, "park_abort:no_free_stall")
 
-    def test_before_the_handover_a_lost_lane_still_latches(self):
-        world = ParkWorld(handover=(7.0, 22.6), start=(7.0, 40.0))
-        world.lane = lane_envelope()
-        for _ in range(3):
-            world.frame()
-        self.assertEqual(world.arm(), "")
+    def test_a_car_that_is_in_the_stall_after_all_gives_the_park_up(self):
+        world = ParkWorld().armed()
+        self.assertTrue(world.drive(900, lambda w: w.core.park_phase == "back"))
         world.drive(20)
-        self.assertGreater(world.speed, 0.0)
-        world.lane = dict(lane_envelope(markings=()), pixels=[])
-        world.drive(LANE_LATCH_FRAMES)
-        self.assertEqual(world.core.state, STOP_LATCHED)
-        self.assertTrue(world.core.stop_reason.startswith("lane:"))
+        world.occupied.add(3)
+        world.drive(60, lambda w: w.core.state == STOP_LATCHED)
+        self.assertEqual(world.core.stop_reason, "park_abort:stall_occupied")
+        self.assertEqual(world.last["brake"], 1.0)
+        self.assertIs(world.last["reverse"], False)
+        self.assertEqual(world.where()[0], None)
 
-    def test_past_the_handover_the_lane_is_not_asked_for(self):
-        world = ParkWorld(handover=(7.0, 22.6), start=(7.0, 30.0))
-        world.lane = lane_envelope()
-        for _ in range(3):
-            world.frame()
-        world.arm()
-        world.drive(900, lambda w: w.core.on_aisle(w.pose))
-        world.lane = dict(lane_envelope(markings=()), pixels=[])
-        world.drive(60)
+    def test_a_stall_the_model_no_longer_finds_gives_the_park_up(self):
+        world = ParkWorld().armed()
+        self.assertTrue(world.drive(900, lambda w: w.core.park_phase == "back"))
+        world.stall_model = False  # results keep coming, without stalls
+        world.drive(120, lambda w: w.core.state == STOP_LATCHED)
+        self.assertEqual(world.core.stop_reason, "park_abort:stall_lost")
+
+    def test_without_the_rear_camera_it_stands_and_goes_on_when_it_is_back(self):
+        world = ParkWorld().armed()
+        self.assertTrue(world.drive(900, lambda w: w.core.park_phase == "back"))
+        world.drive(30)
+        world.rear = False
+        world.drive(STALE_TICKS + 30)
+        self.assertEqual((world.last["brake"], world.last["reason"]),
+                         (1.0, "park:rear_stale"))
         self.assertEqual(world.core.state, RUNNING)
-        self.assertEqual(world.last["reason"], "")
+        self.assertLess(world.speed, 0.05)
+        world.rear = True
+        self.assertTrue(world.drive(3000, self.parked))
+        self.assertEqual(world.where()[0], 3)
 
     def test_braking_for_something_on_the_aisle_gives_the_park_up(self):
-        world = ParkWorld()
-        for _ in range(3):
-            world.frame()
-        world.arm()
+        world = ParkWorld().armed()
         world.drive(60)
-        world.stalled_car = (7.0, world.pose.y - 6.0)  # on the track, 6 m ahead
+        world.stalled_car = (7.2, world.pose.y + 6.0)  # on the line, 6 m ahead
         world.drive(30)
         self.assertEqual(world.core.state, STOP_LATCHED)
         self.assertTrue(world.core.stop_reason.startswith("park_abort:obstacle:"))
 
     def test_stale_perception_stops_it_backwards_too(self):
-        world = ParkWorld()
-        for _ in range(3):
-            world.frame()
-        world.arm()
-        world.drive(900, lambda w: w.core.park_phase == "align")
+        world = ParkWorld().armed()
+        self.assertTrue(world.drive(1500, lambda w: w.core.park_phase == "align"))
         world.drive(60)
         for _ in range(STALE_TICKS + 1):
             world.frame(deliver=False)
@@ -1175,6 +1247,13 @@ class Parking(unittest.TestCase):
         self.assertIs(world.last["reverse"], False)
         self.assertIs(world.last["hand_brake"], False)
         self.assertEqual(world.last["brake"], 1.0)
+
+    def test_the_scenario_names_no_stall(self):
+        world = ParkWorld(park=True)
+        self.assertTrue(world.core.parking)
+        self.assertEqual(world.core.park_config["turn_gain"],
+                         CONFIG["control"]["park"]["turn_gain"])
+        self.assertNotIn("stall", json.dumps(world.core.park_config))
 
 
 class DelayedSource(unittest.TestCase):

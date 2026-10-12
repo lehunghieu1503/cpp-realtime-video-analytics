@@ -163,6 +163,45 @@ class Rig:
         v = -f * camera[..., 2] / safe + self.height / 2.0
         return np.stack([u, v], axis=-1), depth
 
+    def visible_box(self, points_ego, near_m=0.15):
+        """The box in the image, (x0, y0, x1, y1), of the part of a convex
+        polygon (ego points, (n, 3), in order around it) that the camera
+        sees; None when it sees none of it. The polygon is cut at the plane
+        near_m in front of the camera, projected, and cut at the image's
+        four edges."""
+        ring = self.pose.from_parent(points_ego)
+
+        def cut(polygon, inside, cross):
+            kept = []
+            for i in range(len(polygon)):
+                a, b = polygon[i], polygon[(i + 1) % len(polygon)]
+                if inside(a):
+                    kept.append(a)
+                if inside(a) != inside(b):
+                    kept.append(cross(a, b))
+            return kept
+
+        ring = cut(list(ring), lambda p: p[0] >= near_m,
+                   lambda a, b: a + (b - a) * (near_m - a[0]) / (b[0] - a[0]))
+        if len(ring) < 3:
+            return None
+        f = self.focal
+        polygon = [np.array([f * p[1] / p[0] + self.width / 2.0,
+                             -f * p[2] / p[0] + self.height / 2.0]) for p in ring]
+        for axis, limit, keep_below in ((0, 0.0, False), (0, float(self.width), True),
+                                        (1, 0.0, False), (1, float(self.height), True)):
+            polygon = cut(
+                polygon,
+                lambda p: p[axis] <= limit if keep_below else p[axis] >= limit,
+                lambda a, b: a + (b - a) * (limit - a[axis]) / (b[axis] - a[axis]))
+            if len(polygon) < 3:
+                return None
+        polygon = np.array(polygon)
+        low, high = polygon.min(axis=0), polygon.max(axis=0)
+        if high[0] - low[0] <= 0.0 or high[1] - low[1] <= 0.0:
+            return None
+        return float(low[0]), float(low[1]), float(high[0]), float(high[1])
+
     def uv_to_ground(self, u, v, max_range_m=150.0):
         """Where the ray through each pixel meets the road.
 

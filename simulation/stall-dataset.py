@@ -282,7 +282,6 @@ def label(cls, outline, points, needed, min_box, capture, rig, depth_m):
     """One label line, or None: the box of the ground polygon `outline`
     (world, (n, 3)) as far as it is in the image, and the four `points`
     (world, (4, 3)), of which `needed` must be seen."""
-    import cv2
     f, w, h = rig.focal, rig.width, rig.height
 
     def camera(world):  # x forward, y right, z up
@@ -292,25 +291,11 @@ def label(cls, outline, points, needed, min_box, capture, rig, depth_m):
         return np.stack([f * points[:, 1] / points[:, 0] + w / 2.0,
                          -f * points[:, 2] / points[:, 0] + h / 2.0], axis=1)
 
-    # The part in front of the camera, then the part inside the image
     near = 0.15
-    polygon, ring = [], camera(outline)
-    for i in range(len(ring)):
-        a, b = ring[i], ring[(i + 1) % len(ring)]
-        if a[0] >= near:
-            polygon.append(a)
-        if (a[0] >= near) != (b[0] >= near):
-            polygon.append(a + (b - a) * (near - a[0]) / (b[0] - a[0]))
-    if len(polygon) < 3:
+    box = rig.visible_box(capture.from_parent(outline), near)
+    if box is None:
         return None
-    image = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
-    area, inside = cv2.intersectConvexConvex(
-        project(np.array(polygon)).astype(np.float32), image)
-    if area <= 0 or inside is None:
-        return None
-    inside = inside.reshape(-1, 2)
-    x0, y0 = inside.min(axis=0)
-    x1, y1 = inside.max(axis=0)
+    x0, y0, x1, y1 = box
     if x1 - x0 < min_box[0] or y1 - y0 < min_box[1]:
         return None
 

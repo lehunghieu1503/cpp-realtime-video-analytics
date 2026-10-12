@@ -66,6 +66,52 @@ def lane_pixels(rig, offset_m, curvature=0.0, heading=0.0, xs=None):
             if 0 <= round(u) < rig.width and 0 <= round(v) < rig.height]
 
 
+def stall_detections(stalls, pose, rig, occupied=(), noise_px=0.0, rng=None):
+    """What the device's stall model would send for these stalls (objects
+    with corners(), on the ground at z = pose.z + rig.ground_z) in the image
+    taken from `pose`: a corner inside the image is seen, any other is not.
+    A stall with fewer than two corners in the image is not found."""
+    found = []
+    for index, stall in enumerate(stalls):
+        uv, depth = rig.project(pose.from_parent(stall.corners(pose.z + rig.ground_z)))
+        seen = (depth > 0.1) & (uv[:, 0] >= 0) & (uv[:, 0] < rig.width) \
+            & (uv[:, 1] >= 0) & (uv[:, 1] < rig.height)
+        if seen.sum() < 2:
+            continue
+        if noise_px:
+            uv = uv + rng.normal(0.0, noise_px, uv.shape)
+        # The box of the part of the stall that is in the image, as labelled
+        box = rig.visible_box(pose.from_parent(stall.corners(pose.z + rig.ground_z)))
+        found.append({
+            "class": "occupied" if index in occupied else "empty", "confidence": 0.9,
+            "bbox": {"x": int(box[0]), "y": int(box[1]), "w": int(box[2] - box[0]),
+                     "h": int(box[3] - box[1])},
+            # Where it does not see a corner the model still puts one
+            "corners": [[float(u), float(v), 0.95] if ok else [0.0, 0.0, 0.05]
+                        for (u, v), ok in zip(np.nan_to_num(uv), seen)]})
+    return found
+
+
+def stall_points(stalls, pose, rig, noise_px=0.0, rng=None):
+    """The ends of the dividers of these stalls that are in the image taken
+    from `pose`, as the device's stall model would send them: every corner
+    of every stall once, "mouth" or "back"."""
+    ends = []
+    for stall in stalls:
+        for k, corner in enumerate(stall.corners(pose.z + rig.ground_z)):
+            cls = "mouth" if k < 2 else "back"
+            if not any(c == cls and np.hypot(*(p[:2] - corner[:2])) < 0.5 for p, c in ends):
+                ends.append((corner, cls))
+    found = []
+    for corner, cls in ends:
+        (u, v), depth = rig.project(pose.from_parent(corner))
+        if depth > 0.1 and 0 <= u < rig.width and 0 <= v < rig.height:
+            if noise_px:
+                u, v = u + rng.normal(0.0, noise_px), v + rng.normal(0.0, noise_px)
+            found.append({"class": cls, "confidence": 0.9, "x": float(u), "y": float(v)})
+    return found
+
+
 def build():
     rig = Rig.from_config(CALIBRATION)
     pixels = [[640, 700], [200, 650], [1100, 500], [640, 400], [640, 330],

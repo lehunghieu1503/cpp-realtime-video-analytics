@@ -188,5 +188,50 @@ class Lane(unittest.TestCase):
         self.assertFalse(lane.rebase_lane(None, capture, moved)["valid"])
 
 
+class VisibleBox(unittest.TestCase):
+    """The box of what the camera sees of a polygon on the ground."""
+
+    def test_same_box_as_cutting_the_projected_polygon_with_opencv(self):
+        import cv2
+        rig = Rig(1280, 720, 120.0, -2.45, 0.0, 1.0, pitch_deg=-30.0, yaw_deg=180.0)
+        rng = np.random.default_rng(3)
+        image = np.array([[0, 0], [1280, 0], [1280, 720], [0, 720]], np.float32)
+        seen = 0
+        for _ in range(300):
+            # A 5 x 2.8 m rectangle on the ground, anywhere behind the vehicle
+            centre, turn = rng.uniform([-16.0, -9.0], [-2.6, 9.0]), rng.uniform(0, np.pi)
+            along = np.array([np.cos(turn), np.sin(turn)])
+            across = np.array([-along[1], along[0]])
+            ring = np.array([np.append(centre + a * 2.5 * along + b * 1.4 * across, 0.0)
+                             for a, b in ((1, 1), (1, -1), (-1, -1), (-1, 1))])
+            box = rig.visible_box(ring)
+            camera = rig.pose.from_parent(ring)
+            if (camera[:, 0] < 0.2).any():
+                continue  # the reference below has no near plane
+            uv, _ = rig.project(ring)
+            area, inside = cv2.intersectConvexConvex(uv.astype(np.float32), image)
+            if area <= 1.0:
+                self.assertTrue(box is None or (box[2] - box[0]) * (box[3] - box[1]) < 30.0)
+                continue
+            inside = inside.reshape(-1, 2)
+            np.testing.assert_allclose(box, [*inside.min(axis=0), *inside.max(axis=0)],
+                                       atol=0.05)
+            seen += 1
+        self.assertGreater(seen, 100)
+
+    def test_a_polygon_through_the_camera_plane_and_one_behind_it(self):
+        rig = Rig(1280, 720, 120.0, -2.45, 0.0, 1.0, pitch_deg=-30.0, yaw_deg=180.0)
+        # From 3 m behind the vehicle to 3 m ahead of it: what is behind the
+        # camera is cut off, the rest reaches the lower edge of the image
+        through = np.array([[-5.45, 1.4, 0.0], [-5.45, -1.4, 0.0], [0.55, -1.4, 0.0],
+                            [0.55, 1.4, 0.0]])
+        box = rig.visible_box(through)
+        self.assertIsNotNone(box)
+        self.assertEqual(box[3], 720.0)
+        self.assertTrue(0.0 <= box[0] < box[2] <= 1280.0)
+        ahead = through + [8.0, 0.0, 0.0]
+        self.assertIsNone(rig.visible_box(ahead))
+
+
 if __name__ == "__main__":
     unittest.main()

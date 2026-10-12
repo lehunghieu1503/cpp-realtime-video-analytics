@@ -35,25 +35,39 @@ States:
 
 What a scenario asks for comes from the run's manifest, never from the
 device: its own target speed, follow_gap_m, one lane change
-(lane_change: {at_tick, side}) and one park (park: {stall, handover}).
-Without these keys the vehicle keeps the shared target speed and its lane.
+(lane_change: {at_tick, side}) and that it parks (park: true, or the park
+settings it changes). Without these keys the vehicle keeps the shared target
+speed and its lane.
 
-A park (see parking.py for the geometry), backwards into a stall:
-  approach  forwards along the aisle at 2 m/s at most, to the point one
-            turning radius past the stall. Until the handover point a lost
-            lane stops the vehicle as anywhere else; from it on the aisle is
-            followed by the vehicle's own pose, since a car park has no lane
-            markings. The stall must have been in the image with all four
-            corners, and no road user measured inside it: otherwise the park
-            is given up before the vehicle goes backwards. Braking for an
-            obstacle here gives it up too.
-  align     backwards, the wheel held at k of its lock, until the vehicle is
-            within 12 degrees of the stall's direction
+A park (parking.py has the geometry, stalls.py the stalls), backwards into a
+stall nobody told it about. The stalls are those the device's stall model
+finds in the rear camera's image: measured by the ends of the dividers it
+sees, judged empty or occupied by its stall detections, placed on the
+ground and followed from frame to frame:
+  search    forwards at 2 m/s at most, on the line the vehicle was armed on:
+            a car park has no lane markings, so no lane is asked for. The
+            rear camera sees the stalls the vehicle has passed. The first of
+            them that is empty, wide enough, square to the line, and whose
+            neighbour passed before it is empty too, is taken once the
+            vehicle is far enough beyond it to turn in. None within
+            search_m: the park is given up. Braking for an obstacle here
+            gives it up too.
+  back      backwards along the same line, to where the rear axle is one
+            turning radius past the stall's axis
+  align     backwards on a circle that ends on the stall's axis, its radius
+            worked out again every tick from where the stall is seen to be,
+            until the vehicle is within 12 degrees of the stall's direction
   enter     backwards and nearly straight, steering on the heading and the
             distance from the stall's axis, to the stall's centre
   parked    foot brake and parking brake, reverse off
-The camera looks forward: once the vehicle goes backwards nothing sees the
-stall. Reverse gear is changed only below 0.15 m/s.
+While it goes backwards the stall is still being seen, and where it is put
+is corrected: nearer, a pixel is fewer centimetres. The park is given up
+when the stall turns out to be occupied, or is no longer found. With no
+result from the rear camera within the age limit the vehicle stands until
+one comes. Reverse gear is changed only below 0.15 m/s.
+
+Between two frames the vehicle's place comes from its own pose, as the
+simulator reports it: there is no error in it, which no real vehicle has.
 
 This module never reads another actor's true state or the map: it does not
 import the simulator's API at all.
@@ -72,7 +86,8 @@ from . import lane as lane_geometry
 from . import protocol
 from .calibration import Pose, Rig
 from .metric_tracker import MetricTracker
-from .parking import Park
+from .parking import Aisle, reverse_steer
+from .stalls import StallTracker
 
 WAIT_DATA, RUNNING, HOLDING, STOP_LATCHED = (
     "WAIT_DATA", "RUNNING", "HOLDING", "STOP_LATCHED")
@@ -110,7 +125,8 @@ def pure_pursuit(target_x, target_y, wheelbase, rear_axle_x, max_steer_rad):
 class ControlCore:
     """The controller without ROS: fed with messages, asked for commands."""
 
-    def __init__(self, config, vehicle, run_id, source="carla-front", scenario=None):
+    def __init__(self, config, vehicle, run_id, source="carla-front", scenario=None,
+                 rear_source="carla-rear"):
         self.c = config["control"]
         scenario = scenario or {}
         self.target_speed_kmh = float(scenario.get("target_speed_kmh",
@@ -118,12 +134,22 @@ class ControlCore:
         self.follow_gap_m = scenario.get("follow_gap_m")
         change = scenario.get("lane_change")
         self.lane_change = dict(change, state="pending") if change else None
-        self.park_config = self.c.get("park", {})
-        self.park = Park(scenario["park"], vehicle, self.park_config) \
-            if scenario.get("park") else None
-        self.park_phase = "approach" if self.park else ""
-        self.park_seen = False     # the stall was in the image, all of it
+        park = scenario.get("park")
+        self.parking = bool(park)
+        # A scenario may change park settings; it never names a stall
+        self.park_config = dict(self.c.get("park", {}),
+                                **(park if isinstance(park, dict) else {}))
+        self.park_phase = "search" if self.parking else ""
         self.park_travelled = 0.0  # backwards, in this phase
+        self.aisle = None          # the line it drives on, from where it is armed
+        self.rear_source = rear_source
+        self.rear_rig = Rig.from_config(config["rear_calibration"]) if self.parking else None
+        self.stalls = StallTracker(self.rear_rig, self.c.get("stalls")) \
+            if self.parking else None
+        self.rear_ns = None        # the frame of the last result of the rear camera
+        self.target = None         # id of the track of the stall it parks in
+        self.target_stall = None   # that stall, as last seen
+        self.park_direction = 0
         self.rig = Rig.from_config(config["calibration"])
         self.lane_config = lane_config_from(config.get("lane"))
         self.vehicle = vehicle
@@ -220,6 +246,40 @@ class ControlCore:
                       "pose": capture["pose"], "detections": envelope.get("detections", [])}
         return metric, ""
 
+    def on_rear(self, envelope):
+        """A device result of the rear camera: its stalls, joined with the
+        ego pose of its frame. Returns (what was made of each stall, "") or
+        (None, reason)."""
+        if not self.parking:
+            return None, "not_parking"
+        simulation = envelope.get("simulation") or {}
+        if simulation.get("run_id") != self.run_id:
+            return None, "wrong_run"
+        if envelope.get("stream") != self.rear_source:
+            return None, "wrong_source"
+        sim_ns = simulation.get("sim_ns")
+        if not isinstance(sim_ns, int) or isinstance(sim_ns, bool):
+            return None, "bad_sim_ns"
+        if self.rear_ns is not None and sim_ns <= self.rear_ns:
+            return None, "not_newer"
+        image = envelope.get("image") or {}
+        if (image.get("width"), image.get("height")) != (self.rear_rig.width,
+                                                         self.rear_rig.height):
+            return None, "image_size"
+        if not isinstance(envelope.get("stalls"), list) \
+                or not isinstance(envelope.get("stall_points"), list):
+            return None, "no_stalls_block"
+        ego = self.ego.get(sim_ns)
+        if ego is None:
+            return None, "no_ego_for_frame"
+        try:
+            records = self.stalls.update(envelope["stalls"], envelope["stall_points"],
+                                         Pose.from_dict(ego["pose"]), sim_ns)
+        except (KeyError, TypeError, ValueError):
+            return None, "bad_envelope"
+        self.rear_ns = sim_ns
+        return records, ""
+
     def gates(self, ego_now):
         """Why the run may not be armed yet; empty when it may."""
         reasons = []
@@ -236,6 +296,12 @@ class ControlCore:
             reasons.append("fresh_frames_%d" % self.fresh_frames)
         if abs(ego_now.get("speed_mps", 0.0)) > 0.3:
             reasons.append("moving")
+        if self.parking:
+            # It will go backwards on what the rear camera shows
+            if self.rear_ns is None:
+                reasons.append("no_rear_perception")
+            elif ego_now["sim_ns"] - self.rear_ns > self.arm_age_ns:
+                reasons.append("stale_rear_perception")
         return reasons
 
     def on_arm(self, message, ego_now):
@@ -257,11 +323,14 @@ class ControlCore:
             return "gates:" + ";".join(reasons)
         self.state = RUNNING
         self.integral = 0.0
+        if self.parking:
+            self.aisle = Aisle(Pose.from_dict(ego_now["pose"]), self.vehicle,
+                               self.park_config)
         return ""
 
-    def on_aisle(self, pose):
-        """Past the handover point of a park: no lane is asked for."""
-        return self.park is not None and self.park.handed_over(pose)
+    def on_aisle(self, pose=None):
+        """In a car park: no lane is asked for."""
+        return self.parking
 
     def latch(self, reason):
         if self.state != STOP_LATCHED:
@@ -446,16 +515,11 @@ class ControlCore:
         if not math.isfinite(speed):
             return stop("bad_ego_state")
 
-        park = self.park
-        aisle = False
-        if park:
+        aisle = self.parking
+        if aisle:
             self.debug["park"] = self.park_phase
-            if self.park_phase != "approach":
+            if self.park_phase != "search":
                 return self.park_backwards(ego_now, pose_now, speed, dt, stop)
-            aisle = park.handed_over(pose_now)
-            given_up = self.watch_stall()
-            if given_up:
-                return stop(given_up)
 
         # The lane as seen from where the vehicle is now
         lane_now = lane_geometry.rebase_lane(self.basis["lane"], self.basis["pose"],
@@ -472,7 +536,7 @@ class ControlCore:
             if centre is None and change["state"] == "active":
                 reason = "lane:marking_lost"
         if aisle:
-            centre = park.track(pose_now)
+            centre = self.aisle.track(pose_now)
         if centre is None and not reason:
             if lane_now["valid"]:
                 centre = lane_now["centerline"]
@@ -523,19 +587,19 @@ class ControlCore:
             self.debug["state"] = RUNNING
 
         if aisle:
-            remaining = park.remaining(pose_now)
-            if remaining <= 0.05:
-                # At the turning point: stand, then go backwards
+            if self.target is None:
+                self.choose_stall(pose_now)
+            if self.target is not None:
+                # Far enough beyond a stall it can take: stand, then go back
                 self.steer = 0.0
                 if speed < 0.15:
-                    if not self.park_seen:
-                        return stop("park_abort:stall_unseen")
-                    self.park_phase = "align"
+                    self.park_phase = "back"
                     self.park_travelled = 0.0
                     self.integral = 0.0  # of the speed loop: a new phase
-                return self.command(ego_now, 0.0, 1.0, 0.0, "park:turning_point")
-            target_speed = min(target_speed, self.park_config.get("approach_speed_mps", 2.0),
-                               max(0.25, 0.5 * remaining))
+                return self.command(ego_now, 0.0, 1.0, 0.0, "park:found")
+            if self.aisle.travelled(pose_now) > self.park_config.get("search_m", 25.0):
+                return stop("park_abort:no_free_stall")
+            target_speed = min(target_speed, self.park_config.get("approach_speed_mps", 2.0))
 
         # Steering: a point on the centreline, inside what was observed
         pursuit = self.c["pure_pursuit"]
@@ -582,49 +646,110 @@ class ControlCore:
         throttle = max(0.0, min(gains.get("max_throttle", 0.6), throttle))
         return self.command(ego_now, throttle, brake, self.steer, "")
 
-    def watch_stall(self):
-        """On the approach: whether the stall has been seen whole, and
-        whether something stands in it. Returns why the park is given up, or
-        empty. No detection in the stall does not make it empty: it must
-        have been in the image."""
-        park = self.park
-        if park.in_view(self.basis["pose"], self.rig):
-            self.park_seen = True
-        for obs in self.basis["metric"]["observations"]:
-            if obs.get("predicted_only") or not obs["valid"] \
-                    or obs["class"] not in self.hazards:
+    def choose_stall(self, pose_now):
+        """The stall to park in, among those the rear camera has shown: the
+        nearest one behind that can be turned into from here. Sets
+        self.target, or leaves it None."""
+        config, aisle = self.park_config, self.aisle
+        best, considered = None, []
+        for track in self.stalls.tracks:
+            stall = track.stall()
+            if stall is None:
                 continue
-            if park.contains(obs["position_world_m"],
-                             -self.park_config.get("occupied_margin_m", 0.3)):
-                return "park_abort:stall_occupied"
-        return ""
+            direction = aisle.direction(stall)
+            why = ""
+            if track.hits < config.get("min_sightings", 10):
+                why = "judged_too_little"
+            elif not track.free(self.stalls.config):
+                why = "occupied"
+            elif stall.width < self.vehicle["width_m"] + config.get("min_margin_m", 0.4):
+                why = "narrow"
+            elif direction == 0:
+                why = "not_on_this_aisle"
+            else:
+                # The front swings out over the stall passed before this
+                # one while the vehicle turns in: that one must be empty
+                before = self.stalls.beside(track, -direction)
+                radius = aisle.radius(stall, pose_now)
+                share = aisle.steer_share(radius)
+                past = aisle.past(stall, pose_now)
+                if before is None or not before.free(self.stalls.config):
+                    why = "neighbour_not_known_empty"
+                elif not config.get("k_min", 0.3) <= share <= config.get("k_max", 0.65):
+                    why = "aisle_does_not_fit"
+                elif past < radius + config.get("past_margin_m", 0.5):
+                    why = "not_past_it_yet"
+                elif best is None or past < best[0]:
+                    best = (past, track, stall, direction)
+            considered.append({"id": track.id, "why": why})
+        self.debug["park_candidates"] = considered
+        if best is not None:
+            _, track, self.target_stall, self.park_direction = best
+            self.target = track.id
 
     def park_backwards(self, ego_now, pose_now, speed, dt, stop):
-        """Align, enter, parked: by the vehicle's own pose alone."""
-        park = self.park
-        config = self.park_config
-        heading = park.heading_error(pose_now.yaw)
-        u, v = park.frame([pose_now.x, pose_now.y])
+        """Back, align, enter, parked: onto the stall as it is seen now."""
+        config, aisle = self.park_config, self.aisle
+        track = self.stalls.get(self.target)
+        if track is not None and track.stall() is not None:
+            self.target_stall = track.stall()
+        stall = self.target_stall
+        heading = stall.heading_error(pose_now.yaw)
+        u, v = stall.frame([pose_now.x, pose_now.y])
         self.debug.update(park=self.park_phase, park_u_m=u, park_v_m=v,
-                          park_heading_rad=heading)
+                          park_heading_rad=heading, park_stall=stall.as_dict())
         if self.park_phase == "parked":
             # The state says so, not a reason: brake held, gear forward
             return self.command(ego_now, 0.0, 1.0, 0.0, "parked", hand_brake=True)
 
+        if self.park_phase in ("back", "align"):
+            # Still outside the stall: what the camera says of it decides
+            if track is None or ego_now["sim_ns"] - track.last_ns > \
+                    int(config.get("lost_s", 3.0) * 1e9):
+                return stop("park_abort:stall_lost")
+            if track.occupied_share() > 0.5:
+                return stop("park_abort:stall_occupied")
+        if ego_now["sim_ns"] - self.rear_ns > self.age_limit_ns:
+            # Nothing has looked behind for too long: stand until it has
+            self.integral = 0.0
+            return self.command(ego_now, 0.0, 1.0, self.steer, "park:rear_stale",
+                                reverse=True)
+
         self.park_travelled += speed * dt
+        rear_u, rear_v = stall.frame(aisle.rear_axle(pose_now))
+        if self.park_phase == "back":
+            radius = aisle.radius(stall, pose_now)
+            if aisle.past(stall, pose_now) <= radius:
+                self.park_phase = "align"
+                self.park_travelled = 0.0
+                self.park_radius = radius
+            else:
+                steer = reverse_steer(aisle.heading_error(pose_now.yaw),
+                                      aisle.offset(aisle.rear_axle(pose_now)), config)
         if self.park_phase == "align":
             if abs(heading) <= math.radians(config.get("align_done_deg", 12.0)):
                 self.park_phase = "enter"
                 self.park_travelled = 0.0
                 self.integral = 0.0
-            elif self.park_travelled > 1.3 * math.pi / 2.0 * park.radius:
+            elif self.park_travelled > 1.3 * math.pi / 2.0 * self.park_radius:
                 return stop("park_abort:turn_overrun")
-            steer = park.turn_steer()
+            else:
+                # The circle through the rear axle that ends on the axis,
+                # pointing along it: from where the stall is seen to be now
+                radius = abs(rear_v) / max(1e-3, 1.0 - math.cos(heading))
+                share = max(config.get("k_min", 0.3), min(config.get("k_max", 0.65),
+                                                          aisle.steer_share(radius)))
+                self.debug["park_share"] = share
+                # Its centre is on the stall's side of the aisle. Backwards
+                # on that circle the wheel points the same way as forwards
+                # on it, and the vehicle turns the other way.
+                steer = self.park_direction * share
         if self.park_phase == "enter":
-            inside = u < park.length / 2.0
-            if (inside and abs(v) > park.width / 2.0 - park.inset) \
+            inset = config.get("inset_m", 0.3)
+            inside = u < stall.length / 2.0
+            if (inside and abs(v) > stall.width / 2.0 - inset) \
                     or abs(heading) > math.radians(15.0) \
-                    or u < -(park.length / 2.0 - park.inset):
+                    or u < -(stall.length / 2.0 - inset):
                 return stop("park_abort:off_the_stall")
             if u <= config.get("stop_before_m", 0.05):
                 if speed < 0.15:
@@ -634,11 +759,7 @@ class ControlCore:
                                         hand_brake=True)
                 return self.command(ego_now, 0.0, 1.0, 0.0, "park:stopping",
                                     reverse=True)
-            # Backwards the rear axle moves against the heading: to come
-            # back to the axis from the right the vehicle must point right
-            _, rear_v = park.frame(park.rear_axle(pose_now))
-            wanted = max(-0.3, min(0.3, config.get("axis_gain_rad_per_m", 0.6) * rear_v))
-            steer = max(-0.3, min(0.3, config.get("heading_gain", 2.5) * (heading - wanted)))
+            steer = reverse_steer(heading, rear_v, config)
         limit = self.c["steer"].get("rate_per_s", 2.0) * dt
         self.steer += max(-limit, min(limit, steer - self.steer))
 
@@ -797,7 +918,16 @@ class ControlCore:
                 "ready": self.state == WAIT_DATA and not reasons,
                 "not_ready": reasons, "stop_reason": self.stop_reason,
                 "perception_frames": self.accepted,
-                "rejected": self.rejected}
+                "rejected": self.rejected,
+                "park": self.park_status() if self.parking else None}
+
+    def park_status(self):
+        """For whoever watches: the phase, the stalls followed, the one taken."""
+        return {"phase": self.park_phase, "target": self.target,
+                "stalls": [dict(row, corners=[
+                    [round(float(x), 3), round(float(y), 3)]
+                    for x, y, _ in self.stalls.get(row["id"]).stall().corners()])
+                    for row in self.stalls.summary()]}
 
 
 # ── ROS 2 node ───────────────────────────────────────────────────────────────
@@ -829,10 +959,11 @@ def main():
         raise SystemExit("the run directory belongs to run %s" % manifest["run_id"])
 
     core = ControlCore(config, manifest["vehicle"], args.run_id, manifest["source"],
-                       manifest.get("scenario_config"))
+                       manifest.get("scenario_config"),
+                       manifest.get("rear_source", "carla-rear"))
     names = protocol.topics(args.run_id, manifest["source"])
     logs = {name: open(os.path.join(args.run_dir, name + ".jsonl"), "x")
-            for name in ("perception", "metric", "commands")}
+            for name in ("perception", "metric", "commands", "stalls")}
 
     def log(name, record):
         logs[name].write(json.dumps(record, separators=(",", ":")) + "\n")
@@ -866,6 +997,21 @@ def main():
             log("metric", metric)
             pub_metric.publish(String(data=json.dumps(metric)))
 
+    def on_rear(message):
+        received = time.monotonic_ns()
+        try:
+            envelope = json.loads(message.data)
+        except ValueError:
+            return
+        records, reason = core.on_rear(envelope)
+        # Without the image's pixels of every stall: the tracks say where they are
+        log("stalls", {"received_mono_ns": received, "rejected": reason,
+                       "sim_ns": (envelope.get("simulation") or {}).get("sim_ns"),
+                       "detections": envelope.get("stalls"),
+                       "points": envelope.get("stall_points"), "made": records,
+                       "tracks": core.stalls.summary() if records is not None else None,
+                       "target": core.target})
+
     def on_ego(message):
         try:
             ego = json.loads(message.data)
@@ -895,6 +1041,10 @@ def main():
                            history=HistoryPolicy.KEEP_LAST)
     node.create_subscription(Image, names["depth"], on_depth, depth_qos)
     node.create_subscription(String, names["perception"], on_perception, 20)
+    if core.parking:
+        node.create_subscription(
+            String, protocol.topics(args.run_id, core.rear_source)["perception"],
+            on_rear, 20)
     node.create_subscription(String, names["ego"], on_ego, 20)
     node.create_subscription(String, names["arm"], on_arm, 10)
     try:

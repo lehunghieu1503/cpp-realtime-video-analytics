@@ -147,20 +147,31 @@ control:
   pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
   steer: {gain: 1.0, rate_per_s: 2.0}
   speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
-  # One park, backwards into a stall (scenarios with a `park` block)
+  # One park, backwards into a stall the rear camera finds (scenarios with
+  # `park`). Nothing here says where a stall is.
   park:
-    k: 0.45                 # share of the full lock used to turn in
+    approach_speed_mps: 2.0 # while it looks for a stall
+    search_m: 32.0          # no stall it may take within this: the park is given up
+    min_sightings: 10       # times a stall must have been judged before it is taken
+    min_margin_m: 0.4       # a stall must be wider than the vehicle by this
+    past_margin_m: 0.5      # beyond the turning point before it stops to go back
+    # The quarter circle ends this far inside the mouth. Its radius follows
+    # from where the vehicle is on the aisle, and the share of the full lock
+    # from the radius; outside these shares the aisle does not fit.
+    turn_ends_inside_m: 1.0
+    k_min: 0.3
+    k_max: 0.65
     turn_gain: 0.88         # measured wheel angle over the nominal one: scenario
                             # vehicle_response, backwards at steer 0.45, puts
                             # the rear axle on a circle of 5.7 m
-    approach_speed_mps: 2.0
-    # The most it goes backwards. The plan asked for 0.2 m/s, which this
-    # vehicle does not hold: with a throttle up to 0.25 it creeps at 0.07 m/s,
-    # and once it runs the same throttle gives 0.5 m/s. Held at 0.2 it moved
-    # in bursts of up to 0.48 m/s around a mean of 0.09.
+    # The most it goes backwards. 0.2 m/s this vehicle does not hold: with a
+    # throttle up to 0.25 it creeps at 0.07 m/s, and once it runs the same
+    # throttle gives 0.5 m/s. Held at 0.2 it moved in bursts of up to
+    # 0.48 m/s around a mean of 0.09.
     reverse_speed_mps: 0.5
     reverse_throttle: 0.22  # about what keeps it at three quarters of that
     align_done_deg: 12.0    # from here the vehicle is steered onto the axis
+    lost_s: 3.0             # the stall not found for this long, outside it: given up
   ready_frames: 3
   arm_age_fraction: 0.6   # to arm, perception must be younger than 60 % of the limit
 
@@ -174,5 +185,5 @@ routes:
   # Town05, on the widest aisle of its car park, at the east end, heading
   # west. The car park is a paved square 0.16 m above the streets, with a
   # kerb and a fence around it: no lane leads into it and its aisles have no
-  # markings. From simulation/probe-stall.py --margin 0.5.
+  # markings. Where the vehicle starts, not where it parks.
   carpark: {x: 17.03, y: -13.10, z: 0.157, yaw_deg: -90.0}
