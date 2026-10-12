@@ -124,6 +124,15 @@ echo "== Run $RUN_ID in $RUN_DIR"
 PIDS=()
 REMOTE_STARTED=0
 LOCAL_DEVICE=""
+DEVICE_STARTS=0
+start_local_device() {
+  VA_RUN_ID=$RUN_ID build/src/video_analytics --config "$RUN_DIR/device.yaml" \
+    --headless --port 9011 >>"$RUN_DIR/device.log" 2>&1 &
+  LOCAL_DEVICE=$!
+  PIDS+=("$LOCAL_DEVICE")
+  DEVICE_STARTED=$SECONDS
+  DEVICE_STARTS=$((DEVICE_STARTS + 1))
+}
 cleanup() {
   for pid in "${PIDS[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
   sleep 1
@@ -179,10 +188,7 @@ if [ "$DEVICE" = none ]; then
   :
 elif [ "$DEVICE" = local ]; then
   [ -z "$LOCAL_BACKEND" ] || sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
-  VA_RUN_ID=$RUN_ID build/src/video_analytics --config "$RUN_DIR/device.yaml" \
-    --headless --port 9011 >"$RUN_DIR/device.log" 2>&1 &
-  LOCAL_DEVICE=$!
-  PIDS+=("$LOCAL_DEVICE")
+  start_local_device
   echo "   boxes and lane lines: http://127.0.0.1:9011"
 else
   MODELS=$(sed -n 's/^ *model: *//p' "$CONFIG")
@@ -201,13 +207,21 @@ else
   echo "   (the first run with a model builds its TensorRT engine: several minutes)"
 fi
 
-# A local device that stops (a model that does not load) ends the run: the
-# simulator would wait ten minutes for it
+# A local device that stops ends the run: the simulator would wait ten
+# minutes for it. One that stops while it starts is started again a few
+# times: beside a CARLA server that has just loaded a map there is, for the
+# first half minute, not enough video memory for its models.
 while kill -0 "$SIMULATOR" 2>/dev/null; do
   if [ -n "$LOCAL_DEVICE" ] && ! kill -0 "$LOCAL_DEVICE" 2>/dev/null; then
-    echo "The device stopped:" >&2
-    tail -n 3 "$RUN_DIR/device.log" >&2
-    exit 1
+    if [ $((SECONDS - DEVICE_STARTED)) -lt 30 ] && [ "$DEVICE_STARTS" -lt 6 ]; then
+      echo "   the device stopped while starting; again in 8 s ($(tail -n 1 "$RUN_DIR/device.log" | cut -c1-80))"
+      sleep 8
+      start_local_device
+    else
+      echo "The device stopped:" >&2
+      tail -n 3 "$RUN_DIR/device.log" >&2
+      exit 1
+    fi
   fi
   sleep 1
 done

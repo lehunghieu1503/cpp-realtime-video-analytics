@@ -954,11 +954,21 @@ class Simulator:
                   % (self.run_id, self.args.scenario, ticks, int(s.get("port", 5000))),
                   flush=True)
             started = time.monotonic()
-            # The run starts once the device is connected, or after the wait
+            # The run starts once the device is connected, or after the wait.
+            # The world keeps ticking meanwhile: a server that has just loaded
+            # this map still holds the textures of the one before, and lets
+            # go of them only while it renders. Standing still it kept 6 GB
+            # of video memory and the device's models did not fit beside it.
             wait_until = time.monotonic() + float(self.args.wait_client)
             while sender.clients() == 0 and time.monotonic() < wait_until \
                     and not self.stop_requested:
+                self.world.tick()
+                while not self.image_queue.empty():
+                    self.image_queue.get_nowait()
                 time.sleep(0.1)
+            for frame in sorted(self.ledger.registered):
+                self.ledger.update(frame, "dropped", reason="waiting_for_the_device")
+            self.ledger.registered.clear()
             output = threading.Thread(target=self.output_loop, args=(sender,),
                                       daemon=True)
             output.start()
