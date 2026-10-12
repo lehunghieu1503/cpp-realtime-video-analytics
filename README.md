@@ -788,6 +788,7 @@ build/tests/test_latency_tracker  # p50 / p95 / p99 math
 build/tests/test_sse_server       # SSE delivery, MJPEG stream, shutdown, auth, TLS
 build/tests/test_capture_timestamps  # a frame's timestamp through GDP and the JPEG decoder
 build/tests/test_lane             # lane decoder and geometry against the Python reference
+build/tests/test_stall            # stall model decoder: stalls, divider ends, NMS, JSON
 
 # the simulation's Python code; no simulator, ROS or device needed
 python3 -m unittest discover -s simulation/test -p 'test_*.py'
