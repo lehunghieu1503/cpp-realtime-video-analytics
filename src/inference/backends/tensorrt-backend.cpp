@@ -348,7 +348,13 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   if (!fs::exists(modelPath)) {
     throw std::runtime_error("model file does not exist");
   }
-  std::string plan = readFile(enginePath);
+  // An engine older than its model file was built from the file that one
+  // replaced (a model trained again under the same name): built again
+  std::error_code stale;
+  bool current = fs::exists(enginePath, stale) &&
+                 fs::last_write_time(enginePath, stale) >=
+                     fs::last_write_time(modelPath, stale);
+  std::string plan = current ? readFile(enginePath) : std::string();
   if (plan.empty()) {
     plan = impl_->build(config, cacheDir);
     std::error_code ec;
