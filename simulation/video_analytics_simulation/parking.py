@@ -25,18 +25,57 @@ import math
 import numpy as np
 
 
-class Park:
-    def __init__(self, spec, vehicle, config):
-        stall = spec["stall"]
-        self.centre = np.array([float(stall["x"]), float(stall["y"])])
-        self.yaw_out = float(stall["yaw_deg"])
+class Stall:
+    """A rectangle on the ground: centre x, y, yaw_deg pointing out of the
+    stall towards the aisle, length_m along that direction, width_m across."""
+
+    def __init__(self, x, y, yaw_deg, length_m, width_m):
+        self.centre = np.array([float(x), float(y)])
+        self.yaw_out = float(yaw_deg)
         yaw = math.radians(self.yaw_out)
         self.u = np.array([math.cos(yaw), math.sin(yaw)])
         self.v = np.array([-math.sin(yaw), math.cos(yaw)])
-        self.length = float(stall["length_m"])
-        self.width = float(stall["width_m"])
+        self.length = float(length_m)
+        self.width = float(width_m)
         if not (self.length > 0 and self.width > 0):
             raise ValueError("the stall needs a positive length and width")
+
+    @staticmethod
+    def from_dict(d):
+        return Stall(d["x"], d["y"], d["yaw_deg"], d["length_m"], d["width_m"])
+
+    def as_dict(self):
+        return {"x": float(self.centre[0]), "y": float(self.centre[1]),
+                "yaw_deg": self.yaw_out, "length_m": self.length, "width_m": self.width}
+
+    def frame(self, xy):
+        """World x, y to the stall frame (u, v)."""
+        d = np.asarray(xy, dtype=float)[:2] - self.centre
+        return float(d @ self.u), float(d @ self.v)
+
+    def world(self, u, v):
+        return self.centre + u * self.u + v * self.v
+
+    def heading_error(self, yaw_deg):
+        """Radians the vehicle is turned to the right of nose-out."""
+        return math.radians((yaw_deg - self.yaw_out + 180.0) % 360.0 - 180.0)
+
+    def corners(self, z=0.0, grow=0.0):
+        """The four corners in the world, (4, 3), around the stall: the two
+        of the mouth, at +v then -v, then the two of the back, at -v then +v.
+        The stall model's keypoints are these, in this order."""
+        half_l, half_w = self.length / 2.0 + grow, self.width / 2.0 + grow
+        return np.array([list(self.world(su * half_l, sv * half_w)) + [z]
+                         for su, sv in ((1, 1), (1, -1), (-1, -1), (-1, 1))])
+
+    def contains(self, xy, inset=0.0):
+        u, v = self.frame(xy)
+        return abs(u) <= self.length / 2.0 - inset and abs(v) <= self.width / 2.0 - inset
+
+
+class Park(Stall):
+    def __init__(self, spec, vehicle, config):
+        super().__init__(**spec["stall"])
         self.k = float(config.get("k", 0.45))
         self.wheelbase = float(vehicle["wheelbase_m"])
         self.radius = self.wheelbase / math.tan(math.radians(
@@ -52,18 +91,6 @@ class Park:
         # The vehicle's origin when its rear axle is one radius past the axis
         self.stop_v = self.direction * (self.radius + self.wheelbase / 2.0)
         self.inset = float(config.get("inset_m", 0.3))
-
-    def frame(self, xy):
-        """World x, y to the stall frame (u, v)."""
-        d = np.asarray(xy, dtype=float)[:2] - self.centre
-        return float(d @ self.u), float(d @ self.v)
-
-    def world(self, u, v):
-        return self.centre + u * self.u + v * self.v
-
-    def heading_error(self, yaw_deg):
-        """Radians the vehicle is turned to the right of nose-out."""
-        return math.radians((yaw_deg - self.yaw_out + 180.0) % 360.0 - 180.0)
 
     def rear_axle(self, pose):
         yaw = math.radians(pose.yaw)
@@ -87,16 +114,6 @@ class Park:
         b = float((yb - ya) / (xb - xa)) if abs(xb - xa) > 1e-6 else 0.0
         return {"coefficients": [0.0, b, float(ya - b * xa)], "x_min_m": 0.0,
                 "x_max_m": ahead_m}
-
-    def corners(self, z=0.0, grow=0.0):
-        """The four corners in the world, (4, 3)."""
-        half_l, half_w = self.length / 2.0 + grow, self.width / 2.0 + grow
-        return np.array([list(self.world(su * half_l, sv * half_w)) + [z]
-                         for su in (1, -1) for sv in (1, -1)])
-
-    def contains(self, xy, inset=0.0):
-        u, v = self.frame(xy)
-        return abs(u) <= self.length / 2.0 - inset and abs(v) <= self.width / 2.0 - inset
 
     def in_view(self, capture, rig):
         """All four corners are inside the image taken from this pose."""

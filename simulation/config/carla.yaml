@@ -40,6 +40,17 @@ calibration:
   ground_z: 0.0
   distortion: [0, 0, 0, 0, 0]
 
+# The rear camera, of the scenarios that park: over the number plate, looking
+# back and down. Wide: beside a row of stalls it sees the ones just passed,
+# and the ground from 0.3 m behind the bumper.
+rear_calibration:
+  width: 1280
+  height: 720
+  fov_deg: 120.0
+  camera: {x: -2.45, y: 0.0, z: 1.0, pitch_deg: -30.0, yaw_deg: 180.0}
+  ground_z: 0.0
+  distortion: [0, 0, 0, 0, 0]
+
 lane:
   model: models/ufld-tusimple18.onnx
   backend: tensorrt-native
