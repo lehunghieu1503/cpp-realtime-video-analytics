@@ -8,6 +8,10 @@ own images, with what the device found in them drawn on top.
                                       in yellow the one it parks in
     one line: tick, state, phase, speed, what is applied to the vehicle
 
+In a scenario that parks the lane lines are left out: a car park has none,
+the controller asks for none there, and what the lane model makes of kerbs
+and paving would only be mistaken for something the vehicle follows.
+
 An image is shown with the result of its own frame, joined by sim_ns, so it
 is as late as that result. Until the first result an image is shown as it
 is. Nothing in the control path reads this module; without --view it is
@@ -82,7 +86,7 @@ class Viewer:
             cv2.putText(panel, label, point(box["x"], box["y"] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 160, 0), 1, cv2.LINE_AA)
         for points in (envelope.get("lane") or {}).get("pixels", []):
-            if len(points) > 1:
+            if len(points) > 1 and "rear" not in self.rigs:
                 cv2.polylines(panel, [np.array([point(*p) for p in points])], False,
                               (0, 255, 255), 2, cv2.LINE_AA)
         for stall in envelope.get("stalls", []):

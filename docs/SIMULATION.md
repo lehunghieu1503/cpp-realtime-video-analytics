@@ -507,7 +507,8 @@ simulation/run.sh --scenario show_park_occupied --arm --gui
   vạch gì lên đó.
 - **Cửa sổ camera** (`CARLA cameras`): ảnh các camera của xe đặt cạnh nhau,
   lấy thẳng từ simulator, vẽ đè những gì thiết bị tìm thấy. Camera trước: hộp
-  detection, số track, vạch làn. Camera sau (chỉ có ở màn đỗ): ô đỗ model
+  detection, số track, và vạch làn (ở màn đỗ thì không vẽ vạch làn: bãi không
+  có làn, và lane model nhận nhầm mép vỉa thành vạch). Camera sau (chỉ có ở màn đỗ): ô đỗ model
   thấy (xanh là trống, đỏ là có xe), đầu vạch chia ô (dấu cộng), các ô
   controller đang theo dõi (viền trắng) và ô nó chọn (viền vàng). Dòng dưới
   cùng ghi tick, trạng thái, pha đỗ, tốc độ và lệnh đang áp lên xe. Mỗi ảnh
