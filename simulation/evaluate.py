@@ -561,14 +561,19 @@ def vehicle_section(controls, ego_rows, manifest):
     max_steer = math.radians(manifest["vehicle"]["max_steer_deg"])
     out = {"steer": [], "brake": None}
     segments = {}
+    paths = {}
     for ego, command in rows:
         # Backwards at this throttle the vehicle stays under 1 m/s
         if command["steer"] != 0.0 and ego["speed_mps"] > (
-                0.5 if command.get("reverse") else 1.0):
+                0.3 if command.get("reverse") else 1.0):
             # Speed is unsigned: in reverse the yaw rate over it has the
             # sign of the turn, not of the path's curvature
-            segments.setdefault((bool(command.get("reverse")), command["steer"]),
-                                []).append(ego["yaw_rate_radps"] / ego["speed_mps"])
+            key = (bool(command.get("reverse")), command["steer"])
+            segments.setdefault(key, []).append(ego["yaw_rate_radps"] / ego["speed_mps"])
+            yaw = math.radians(ego["pose"]["yaw"])
+            paths.setdefault(key, []).append(
+                (ego["pose"]["x"] - wheelbase / 2.0 * math.cos(yaw),
+                 ego["pose"]["y"] - wheelbase / 2.0 * math.sin(yaw)))
     for (reverse, steer), curvatures in sorted(segments.items()):
         # The first second is the vehicle turning in
         settled = curvatures[len(curvatures) // 2:]
@@ -577,6 +582,13 @@ def vehicle_section(controls, ego_rows, manifest):
         # the wheel angle follows from the rear axle's, half a wheelbase back
         rear = math.sqrt(max(1e-9, 1.0 / curvature ** 2 - (wheelbase / 2.0) ** 2)) \
             if curvature else float("inf")
+        path = np.array(paths[(reverse, steer)])
+        if abs(steer) >= 0.2 and len(path) >= 30:
+            # A turn this tight covers enough of its circle to fit one to
+            # the rear axle's path: the radius a manoeuvre is planned with
+            A = np.c_[2 * path, np.ones(len(path))]
+            cx, cy, k = np.linalg.lstsq(A, (path ** 2).sum(axis=1), rcond=None)[0]
+            rear = math.sqrt(max(1e-9, k + cx * cx + cy * cy))
         wheel = math.atan(wheelbase / rear) * (1 if curvature > 0 else -1)
         out["steer"].append({
             "steer": steer, "reverse": reverse, "curvature_inv_m": curvature,
