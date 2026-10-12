@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import os
 import sys
@@ -94,6 +95,7 @@ class World:
         if deliver:
             result = self.core.on_perception(envelope, ego["sim_ns"])
         self.last = self.core.step(ego)
+        json.dumps((self.last, self.core.debug))  # as the node logs them
         self.tick += 1
         return result
 
@@ -880,6 +882,275 @@ class LaneChange(unittest.TestCase):
         for _ in range(30):  # back to its own lane, which is where it still is
             world.frame()
         self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
+
+
+class ParkWorld(World):
+    """A car park: no lane markings, a stall, and a vehicle that moves as it
+    is told, on a bicycle model whose wheel turns as the real one does."""
+    STALL = {"x": 0.0, "y": 0.0, "yaw_deg": 0.0, "length_m": 5.0, "width_m": 2.8}
+    DEPTH = None
+
+    def __init__(self, handover=(7.0, 22.6), start=None, yaw=-90.0, config=None,
+                 stall=None):
+        config = copy.deepcopy(config or CONFIG)
+        config["control"]["park"]["reverse_speed_mps"] = 0.6  # a shorter test
+        scenario = {"park": {"stall": dict(stall or self.STALL),
+                             "handover": {"x": handover[0], "y": handover[1]}}}
+        super().__init__(config, scenario=scenario)
+        self.gain = config["control"]["park"]["turn_gain"]
+        start = start or handover
+        self.pose = Pose(start[0], start[1], 0.0, 0.0, 0.0, yaw)
+        self.signed = 0.0
+        self.lane = dict(lane_envelope(markings=()), pixels=[])
+        self.commands = []
+        self.stalled_car = None  # (x, y) of something standing in the world
+
+    def ego(self, tick=None, pose=None, run=None):
+        ego = super().ego(tick, pose, run)
+        yaw = math.radians(self.pose.yaw)
+        ego["velocity_world_mps"] = [self.signed * math.cos(yaw),
+                                     self.signed * math.sin(yaw), 0.0]
+        return ego
+
+    def envelope(self, tick=None, **changes):
+        self.objects = []
+        if self.stalled_car is not None:
+            x, y, _ = self.pose.from_parent([self.stalled_car[0], self.stalled_car[1], 0.0])
+            if x > 3.0:
+                self.objects = [("car", float(x), float(y) - 0.9, float(y) + 0.9, 1.5, 5)]
+        if not self.objects:
+            if ParkWorld.DEPTH is None:
+                ParkWorld.DEPTH = render([], RIG)[0]
+            envelope, _ = World.envelope_without_render(self, tick, **changes)
+            return envelope, ParkWorld.DEPTH
+        return super().envelope(tick, **changes)
+
+    def move(self):
+        """Applies the last command for one tick."""
+        c = self.last
+        json.dumps(self.core.debug)  # the node writes it to commands.jsonl
+        self.commands.append(dict(c, speed=abs(self.signed), phase=self.core.park_phase))
+        dt = 1.0 / 30.0
+        gear = -1.0 if c.get("reverse") else 1.0
+        if c["brake"] > 0:
+            change = min(abs(self.signed), 6.0 * c["brake"] * dt)
+            self.signed -= math.copysign(change, self.signed)
+        else:
+            self.signed += gear * 2.0 * c["throttle"] * dt
+            self.signed *= 0.995
+        wheel = math.radians(c["steer"] * VEHICLE["max_steer_deg"] * self.gain)
+        yaw = math.radians(self.pose.yaw)
+        half = VEHICLE["wheelbase_m"] / 2.0
+        rear_x = self.pose.x - half * math.cos(yaw) + self.signed * math.cos(yaw) * dt
+        rear_y = self.pose.y - half * math.sin(yaw) + self.signed * math.sin(yaw) * dt
+        yaw += self.signed * math.tan(wheel) / VEHICLE["wheelbase_m"] * dt
+        self.pose = Pose(rear_x + half * math.cos(yaw), rear_y + half * math.sin(yaw),
+                         0.0, 0.0, 0.0, math.degrees(yaw))
+        self.speed = abs(self.signed)
+
+    def drive(self, ticks, until=None):
+        for _ in range(ticks):
+            self.frame()
+            self.move()
+            if until and until(self):
+                return True
+        return False
+
+
+def _envelope_without_render(self, tick=None, **changes):
+    tick = self.tick if tick is None else tick
+    envelope = {"simulation": {"run_id": self.run, "sim_ns": tick * TICK},
+                "stream": "carla-front",
+                "image": {"width": RIG.width, "height": RIG.height},
+                "detections": [], "lane": copy.deepcopy(self.lane)}
+    envelope.update(changes)
+    return envelope, None
+
+
+World.envelope_without_render = _envelope_without_render
+
+
+class Parking(unittest.TestCase):
+    def parked(self, world):
+        return world.core.park_phase == "parked"
+
+    def test_the_turning_point_is_one_radius_past_the_stall(self):
+        from video_analytics_simulation.parking import Park
+        spec = {"stall": ParkWorld.STALL, "handover": {"x": 7.0, "y": 22.6}}
+        park = Park(spec, VEHICLE, {"k": 0.45, "turn_gain": 1.0})
+        # wheelbase 3 m, 0.45 of a 70 degree lock: not the 1.1 m of a full lock
+        self.assertAlmostEqual(park.radius, 3.0 / math.tan(math.radians(31.5)))
+        self.assertAlmostEqual(park.radius, 4.896, places=3)
+        self.assertEqual(park.direction, -1.0)       # it comes from +y
+        self.assertAlmostEqual(park.track_u, 7.0)
+        # Rear axle one radius past the axis; the origin half a wheelbase on
+        self.assertAlmostEqual(park.stop_v, -(park.radius + 1.5))
+        self.assertAlmostEqual(park.turn_steer(), -0.45)
+        # A quarter circle from there ends on the axis, nose out
+        self.assertAlmostEqual(park.track_u - park.radius, 7.0 - 4.896, places=3)
+        measured = Park(spec, VEHICLE, CONFIG["control"]["park"])
+        self.assertAlmostEqual(measured.radius, 5.72, delta=0.05)  # as measured
+        mirrored = Park({"stall": ParkWorld.STALL, "handover": {"x": 7.0, "y": -22.6}},
+                        VEHICLE, {"k": 0.45})
+        self.assertEqual((mirrored.direction, mirrored.turn_steer()), (1.0, 0.45))
+        self.assertTrue(park.contains([0.0, 0.0]) and park.contains([2.4, 1.3]))
+        self.assertFalse(park.contains([2.4, 1.3], 0.3) or park.contains([0.0, 1.5]))
+
+    def test_arms_without_a_lane_only_past_the_handover(self):
+        world = ParkWorld()
+        for _ in range(3):
+            world.frame()
+        self.assertFalse(world.lane["valid"])
+        self.assertEqual(world.arm(), "")
+        before = ParkWorld(handover=(7.0, 22.6), start=(7.0, 30.0))
+        for _ in range(3):
+            before.frame()
+        self.assertIn("lane_invalid", before.arm())
+
+    def test_parks_backwards_into_the_stall(self):
+        world = ParkWorld()
+        for _ in range(3):
+            world.frame()
+        self.assertEqual(world.arm(), "")
+        import video_analytics_simulation.controller as controller
+        real = controller.pure_pursuit
+        try:
+            self.assertTrue(world.drive(900, lambda w: w.core.park_phase == "align"))
+            self.assertTrue(world.core.park_seen)
+            # At the turning point: standing, one radius past the axis
+            park = world.core.park
+            self.assertLess(world.speed, 0.15)
+            rear = park.frame(park.rear_axle(world.pose))
+            self.assertAlmostEqual(rear[1], -park.radius, delta=0.15)
+            self.assertAlmostEqual(rear[0], 7.0, delta=0.1)
+
+            def no_pursuit(*_):
+                raise AssertionError("pure pursuit while going backwards")
+            controller.pure_pursuit = no_pursuit
+            self.assertTrue(world.drive(1500, self.parked))
+        finally:
+            controller.pure_pursuit = real
+        u, v = park.frame([world.pose.x, world.pose.y])
+        self.assertTrue(park.contains([world.pose.x, world.pose.y], 0.3))
+        self.assertLess(abs(v), 0.15)
+        self.assertLess(abs(u), 0.3)
+        self.assertLess(abs(math.degrees(park.heading_error(world.pose.yaw))), 3.0)
+        world.drive(20)
+        last = world.last
+        self.assertEqual((last["throttle"], last["brake"], last["reason"]),
+                         (0.0, 1.0, "parked"))
+        self.assertIs(last["hand_brake"], True)
+        self.assertIs(last["reverse"], False)
+        self.assertLess(world.speed, 0.05)
+
+        phases = [c["phase"] for c in world.commands]
+        self.assertEqual([p for i, p in enumerate(phases) if i == 0 or phases[i - 1] != p],
+                         ["approach", "align", "enter", "parked"])
+        for before, after in zip(world.commands, world.commands[1:]):
+            # The parking brake comes with the state, never earlier
+            self.assertEqual(after["hand_brake"], after["phase"] == "parked")
+            if before["reverse"] != after["reverse"]:
+                self.assertLess(after["speed"], 0.15)
+            self.assertFalse(after["throttle"] > 0 and after["brake"] > 0)
+        turning = [c for c in world.commands if c["phase"] == "align" and c["throttle"] > 0]
+        self.assertEqual({round(c["steer"], 2) for c in turning[10:]}, {-0.45})
+        self.assertTrue(all(c["reverse"] for c in turning))
+        forwards = [c for c in world.commands if c["phase"] == "approach"]
+        self.assertLessEqual(max(c["speed"] for c in forwards), 2.0 + 0.2)
+        # Every one of them is a command the simulator would take
+        limits = {"age_limit_ns": AGE_MS * MS, "pose_budget_ns": 100 * MS}
+        c = world.last
+        self.assertEqual(protocol.check_command(
+            c, "r1", "carla-front", c["command_seq"] - 1, c["control_sim_ns"], limits,
+            lambda ns: True, lambda ns, frame: True), "")
+
+    def test_a_road_user_in_the_stall_gives_the_park_up_before_reversing(self):
+        world = ParkWorld()
+        world.stalled_car = (1.0, 0.0)
+        for _ in range(3):
+            world.frame()
+        world.arm()
+        world.drive(900, lambda w: w.core.state == STOP_LATCHED)
+        self.assertEqual(world.core.stop_reason, "park_abort:stall_occupied")
+        self.assertEqual(world.core.park_phase, "approach")
+        self.assertFalse(any(c["reverse"] or c["hand_brake"] for c in world.commands))
+        world.stalled_car = None
+        world.drive(60)  # gone or not: this run does not park any more
+        self.assertEqual((world.last["brake"], world.last["reason"]),
+                         (1.0, "park_abort:stall_occupied"))
+        self.assertFalse(world.core.park.contains([world.pose.x, world.pose.y]))
+
+    def test_a_car_in_the_next_stall_is_not_in_this_one(self):
+        world = ParkWorld()
+        world.stalled_car = (1.0, 2.8)
+        for _ in range(3):
+            world.frame()
+        world.arm()
+        world.drive(300)
+        self.assertEqual(world.core.state, RUNNING)
+
+    def test_a_stall_that_was_never_in_the_image_is_not_backed_into(self):
+        # From 9 m before it, the far corners are outside the image
+        world = ParkWorld(handover=(7.0, 9.0))
+        for _ in range(3):
+            world.frame()
+        world.arm()
+        world.drive(900, lambda w: w.core.state == STOP_LATCHED)
+        self.assertFalse(world.core.park_seen)
+        self.assertEqual(world.core.stop_reason, "park_abort:stall_unseen")
+        self.assertFalse(any(c["reverse"] for c in world.commands))
+        self.assertAlmostEqual(world.core.park.remaining(world.pose), 0.0, delta=0.2)
+
+    def test_before_the_handover_a_lost_lane_still_latches(self):
+        world = ParkWorld(handover=(7.0, 22.6), start=(7.0, 40.0))
+        world.lane = lane_envelope()
+        for _ in range(3):
+            world.frame()
+        self.assertEqual(world.arm(), "")
+        world.drive(20)
+        self.assertGreater(world.speed, 0.0)
+        world.lane = dict(lane_envelope(markings=()), pixels=[])
+        world.drive(LANE_LATCH_FRAMES)
+        self.assertEqual(world.core.state, STOP_LATCHED)
+        self.assertTrue(world.core.stop_reason.startswith("lane:"))
+
+    def test_past_the_handover_the_lane_is_not_asked_for(self):
+        world = ParkWorld(handover=(7.0, 22.6), start=(7.0, 30.0))
+        world.lane = lane_envelope()
+        for _ in range(3):
+            world.frame()
+        world.arm()
+        world.drive(900, lambda w: w.core.on_aisle(w.pose))
+        world.lane = dict(lane_envelope(markings=()), pixels=[])
+        world.drive(60)
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertEqual(world.last["reason"], "")
+
+    def test_braking_for_something_on_the_aisle_gives_the_park_up(self):
+        world = ParkWorld()
+        for _ in range(3):
+            world.frame()
+        world.arm()
+        world.drive(60)
+        world.stalled_car = (7.0, world.pose.y - 6.0)  # on the track, 6 m ahead
+        world.drive(30)
+        self.assertEqual(world.core.state, STOP_LATCHED)
+        self.assertTrue(world.core.stop_reason.startswith("park_abort:obstacle:"))
+
+    def test_stale_perception_stops_it_backwards_too(self):
+        world = ParkWorld()
+        for _ in range(3):
+            world.frame()
+        world.arm()
+        world.drive(900, lambda w: w.core.park_phase == "align")
+        world.drive(60)
+        for _ in range(STALE_TICKS + 1):
+            world.frame(deliver=False)
+            world.move()
+        self.assertEqual(world.core.stop_reason, "stale_perception")
+        self.assertIs(world.last["reverse"], False)
+        self.assertIs(world.last["hand_brake"], False)
+        self.assertEqual(world.last["brake"], 1.0)
 
 
 class DelayedSource(unittest.TestCase):

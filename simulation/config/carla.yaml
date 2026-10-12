@@ -122,12 +122,32 @@ control:
   pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
   steer: {gain: 1.0, rate_per_s: 2.0}
   speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
+  # One park, backwards into a stall (scenarios with a `park` block)
+  park:
+    k: 0.45                 # share of the full lock used to turn in
+    turn_gain: 0.88         # measured wheel angle over the nominal one: scenario
+                            # vehicle_response, backwards at steer 0.45, puts
+                            # the rear axle on a circle of 5.7 m
+    approach_speed_mps: 2.0
+    # The most it goes backwards. The plan asked for 0.2 m/s, which this
+    # vehicle does not hold: with a throttle up to 0.25 it creeps at 0.07 m/s,
+    # and once it runs the same throttle gives 0.5 m/s. Held at 0.2 it moved
+    # in bursts of up to 0.48 m/s around a mean of 0.09.
+    reverse_speed_mps: 0.5
+    reverse_throttle: 0.22  # about what keeps it at three quarters of that
+    align_done_deg: 12.0    # from here the vehicle is steered onto the axis
   ready_frames: 3
   arm_age_fraction: 0.6   # to arm, perception must be younger than 60 % of the limit
 
 # Where the ego vehicle starts, snapped to the lane centre. Town04, all on
-# level ground (z = 0).
+# level ground (z = 0). A route with yaw_deg is a pose as it stands, not
+# snapped to any lane.
 routes:
   straight: {x: 13.0, y: 219.9}      # road 46 lane -3: 400 m straight, lanes both sides
   curve_right: {x: -39.4, y: -231.6} # road 23 lane -3: radius about 340 m
   curve_left: {x: -122.6, y: -148.2} # road 23 lane -3
+  # Town05, on the widest aisle of its car park, at the east end, heading
+  # west. The car park is a paved square 0.16 m above the streets, with a
+  # kerb and a fence around it: no lane leads into it and its aisles have no
+  # markings. From simulation/probe-stall.py --margin 0.5.
+  carpark: {x: 17.03, y: -13.10, z: 0.157, yaw_deg: -90.0}

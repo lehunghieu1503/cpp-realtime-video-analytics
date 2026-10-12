@@ -34,9 +34,26 @@ States:
                 or the lane lost for five results in a row.
 
 What a scenario asks for comes from the run's manifest, never from the
-device: its own target speed, follow_gap_m, and one lane change
-(lane_change: {at_tick, side}). Without these keys the vehicle keeps the
-shared target speed and its lane.
+device: its own target speed, follow_gap_m, one lane change
+(lane_change: {at_tick, side}) and one park (park: {stall, handover}).
+Without these keys the vehicle keeps the shared target speed and its lane.
+
+A park (see parking.py for the geometry), backwards into a stall:
+  approach  forwards along the aisle at 2 m/s at most, to the point one
+            turning radius past the stall. Until the handover point a lost
+            lane stops the vehicle as anywhere else; from it on the aisle is
+            followed by the vehicle's own pose, since a car park has no lane
+            markings. The stall must have been in the image with all four
+            corners, and no road user measured inside it: otherwise the park
+            is given up before the vehicle goes backwards. Braking for an
+            obstacle here gives it up too.
+  align     backwards, the wheel held at k of its lock, until the vehicle is
+            within 12 degrees of the stall's direction
+  enter     backwards and nearly straight, steering on the heading and the
+            distance from the stall's axis, to the stall's centre
+  parked    foot brake and parking brake, reverse off
+The camera looks forward: once the vehicle goes backwards nothing sees the
+stall. Reverse gear is changed only below 0.15 m/s.
 
 This module never reads another actor's true state or the map: it does not
 import the simulator's API at all.
@@ -55,6 +72,7 @@ from . import lane as lane_geometry
 from . import protocol
 from .calibration import Pose, Rig
 from .metric_tracker import MetricTracker
+from .parking import Park
 
 WAIT_DATA, RUNNING, HOLDING, STOP_LATCHED = (
     "WAIT_DATA", "RUNNING", "HOLDING", "STOP_LATCHED")
@@ -100,6 +118,12 @@ class ControlCore:
         self.follow_gap_m = scenario.get("follow_gap_m")
         change = scenario.get("lane_change")
         self.lane_change = dict(change, state="pending") if change else None
+        self.park_config = self.c.get("park", {})
+        self.park = Park(scenario["park"], vehicle, self.park_config) \
+            if scenario.get("park") else None
+        self.park_phase = "approach" if self.park else ""
+        self.park_seen = False     # the stall was in the image, all of it
+        self.park_travelled = 0.0  # backwards, in this phase
         self.rig = Rig.from_config(config["calibration"])
         self.lane_config = lane_config_from(config.get("lane"))
         self.vehicle = vehicle
@@ -189,7 +213,8 @@ class ControlCore:
         if metric is None:
             return self.reject("not_newer")
         age_ok = now_sim_ns is None or now_sim_ns - sim_ns <= self.arm_age_ns
-        self.fresh_frames = self.fresh_frames + 1 if (lane.get("valid") and age_ok) else 0
+        lane_ok = lane.get("valid") or self.on_aisle(capture["pose"])
+        self.fresh_frames = self.fresh_frames + 1 if (lane_ok and age_ok) else 0
         self.accepted += 1
         self.basis = {"sim_ns": sim_ns, "lane": lane, "metric": metric,
                       "pose": capture["pose"], "detections": envelope.get("detections", [])}
@@ -205,7 +230,7 @@ class ControlCore:
         else:
             if ego_now["sim_ns"] - self.basis["sim_ns"] > self.arm_age_ns:
                 reasons.append("stale_perception")
-            if not self.basis["lane"].get("valid"):
+            if not self.basis["lane"].get("valid") and not self.on_aisle(self.basis["pose"]):
                 reasons.append("lane_invalid")
         if self.fresh_frames < int(self.c.get("ready_frames", 3)):
             reasons.append("fresh_frames_%d" % self.fresh_frames)
@@ -234,6 +259,10 @@ class ControlCore:
         self.integral = 0.0
         return ""
 
+    def on_aisle(self, pose):
+        """Past the handover point of a park: no lane is asked for."""
+        return self.park is not None and self.park.handed_over(pose)
+
     def latch(self, reason):
         if self.state != STOP_LATCHED:
             self.state = STOP_LATCHED
@@ -241,7 +270,8 @@ class ControlCore:
 
     # ── One control tick ─────────────────────────────────────────────────────
 
-    def command(self, ego_now, throttle, brake, steer, reason):
+    def command(self, ego_now, throttle, brake, steer, reason, reverse=False,
+                hand_brake=False):
         self.seq += 1
         basis_ns = self.basis["sim_ns"] if self.basis else 0
         return {
@@ -251,6 +281,7 @@ class ControlCore:
             "control_frame": int(ego_now["frame"]),
             "valid_until_sim_ns": basis_ns + self.age_limit_ns,
             "throttle": float(throttle), "brake": float(brake), "steer": float(steer),
+            "reverse": bool(reverse), "hand_brake": bool(hand_brake),
             "reason": reason,
         }
 
@@ -284,7 +315,7 @@ class ControlCore:
                 # runs from straight ahead to that point
                 y = lane_geometry.evaluate(centre["coefficients"], centre["x_min_m"])
                 low, high = min(0.0, y) - half, max(0.0, y) + half
-            return right >= low and left <= high
+            return bool(right >= low and left <= high)
 
         for obs in self.basis["metric"]["observations"]:
             predicted = bool(obs.get("predicted_only"))
@@ -392,6 +423,10 @@ class ControlCore:
         def hold(reason):
             """Brake for a reason that can pass; the reason stays the one
             that is still true."""
+            if aisle:
+                # On the way to the stall there is no waiting and trying
+                # again: the park is given up
+                return stop("park_abort:" + reason)
             self.state = HOLDING
             self.stop_reason = reason
             self.debug.update(state=HOLDING, hold=True)
@@ -411,6 +446,17 @@ class ControlCore:
         if not math.isfinite(speed):
             return stop("bad_ego_state")
 
+        park = self.park
+        aisle = False
+        if park:
+            self.debug["park"] = self.park_phase
+            if self.park_phase != "approach":
+                return self.park_backwards(ego_now, pose_now, speed, dt, stop)
+            aisle = park.handed_over(pose_now)
+            given_up = self.watch_stall()
+            if given_up:
+                return stop(given_up)
+
         # The lane as seen from where the vehicle is now
         lane_now = lane_geometry.rebase_lane(self.basis["lane"], self.basis["pose"],
                                              pose_now, self.rig.ground_z,
@@ -425,6 +471,8 @@ class ControlCore:
             centre = self.crossing_path(lane_now, pose_now, ego_now["sim_ns"], dt)
             if centre is None and change["state"] == "active":
                 reason = "lane:marking_lost"
+        if aisle:
+            centre = park.track(pose_now)
         if centre is None and not reason:
             if lane_now["valid"]:
                 centre = lane_now["centerline"]
@@ -474,6 +522,21 @@ class ControlCore:
             self.clear_needed = self.clear_count = 0
             self.debug["state"] = RUNNING
 
+        if aisle:
+            remaining = park.remaining(pose_now)
+            if remaining <= 0.05:
+                # At the turning point: stand, then go backwards
+                self.steer = 0.0
+                if speed < 0.15:
+                    if not self.park_seen:
+                        return stop("park_abort:stall_unseen")
+                    self.park_phase = "align"
+                    self.park_travelled = 0.0
+                    self.integral = 0.0  # of the speed loop: a new phase
+                return self.command(ego_now, 0.0, 1.0, 0.0, "park:turning_point")
+            target_speed = min(target_speed, self.park_config.get("approach_speed_mps", 2.0),
+                               max(0.25, 0.5 * remaining))
+
         # Steering: a point on the centreline, inside what was observed
         pursuit = self.c["pure_pursuit"]
         lookahead = max(pursuit["lookahead_min_m"], pursuit["lookahead_gain_s"] * speed)
@@ -518,6 +581,79 @@ class ControlCore:
             throttle, brake = 0.0, min(1.0, 0.3 * -error)
         throttle = max(0.0, min(gains.get("max_throttle", 0.6), throttle))
         return self.command(ego_now, throttle, brake, self.steer, "")
+
+    def watch_stall(self):
+        """On the approach: whether the stall has been seen whole, and
+        whether something stands in it. Returns why the park is given up, or
+        empty. No detection in the stall does not make it empty: it must
+        have been in the image."""
+        park = self.park
+        if park.in_view(self.basis["pose"], self.rig):
+            self.park_seen = True
+        for obs in self.basis["metric"]["observations"]:
+            if obs.get("predicted_only") or not obs["valid"] \
+                    or obs["class"] not in self.hazards:
+                continue
+            if park.contains(obs["position_world_m"],
+                             -self.park_config.get("occupied_margin_m", 0.3)):
+                return "park_abort:stall_occupied"
+        return ""
+
+    def park_backwards(self, ego_now, pose_now, speed, dt, stop):
+        """Align, enter, parked: by the vehicle's own pose alone."""
+        park = self.park
+        config = self.park_config
+        heading = park.heading_error(pose_now.yaw)
+        u, v = park.frame([pose_now.x, pose_now.y])
+        self.debug.update(park=self.park_phase, park_u_m=u, park_v_m=v,
+                          park_heading_rad=heading)
+        if self.park_phase == "parked":
+            # The state says so, not a reason: brake held, gear forward
+            return self.command(ego_now, 0.0, 1.0, 0.0, "parked", hand_brake=True)
+
+        self.park_travelled += speed * dt
+        if self.park_phase == "align":
+            if abs(heading) <= math.radians(config.get("align_done_deg", 12.0)):
+                self.park_phase = "enter"
+                self.park_travelled = 0.0
+                self.integral = 0.0
+            elif self.park_travelled > 1.3 * math.pi / 2.0 * park.radius:
+                return stop("park_abort:turn_overrun")
+            steer = park.turn_steer()
+        if self.park_phase == "enter":
+            inside = u < park.length / 2.0
+            if (inside and abs(v) > park.width / 2.0 - park.inset) \
+                    or abs(heading) > math.radians(15.0) \
+                    or u < -(park.length / 2.0 - park.inset):
+                return stop("park_abort:off_the_stall")
+            if u <= config.get("stop_before_m", 0.05):
+                if speed < 0.15:
+                    self.park_phase = "parked"
+                    self.debug["park"] = "parked"
+                    return self.command(ego_now, 0.0, 1.0, 0.0, "parked",
+                                        hand_brake=True)
+                return self.command(ego_now, 0.0, 1.0, 0.0, "park:stopping",
+                                    reverse=True)
+            # Backwards the rear axle moves against the heading: to come
+            # back to the axis from the right the vehicle must point right
+            _, rear_v = park.frame(park.rear_axle(pose_now))
+            wanted = max(-0.3, min(0.3, config.get("axis_gain_rad_per_m", 0.6) * rear_v))
+            steer = max(-0.3, min(0.3, config.get("heading_gain", 2.5) * (heading - wanted)))
+        limit = self.c["steer"].get("rate_per_s", 2.0) * dt
+        self.steer += max(-limit, min(limit, steer - self.steer))
+
+        # Speed: reverse_speed_mps is the most it may go; it aims at three
+        # quarters of that, around the throttle at which the vehicle runs at
+        # about that speed, and brakes lightly above the limit.
+        limit = config.get("reverse_speed_mps", 0.5)
+        error = 0.75 * limit - speed
+        if speed > limit:
+            throttle, brake = 0.0, min(1.0, 2.0 * (speed - limit) + 0.05)
+        else:
+            throttle = max(0.0, min(0.4, config.get("reverse_throttle", 0.22)
+                                    + config.get("reverse_kp", 0.4) * error))
+            brake = 0.0
+        return self.command(ego_now, throttle, brake, self.steer, "", reverse=True)
 
     def follow(self, target_speed, speed, envelope, decisions):
         """The target speed behind a vehicle in the lane: its speed once the

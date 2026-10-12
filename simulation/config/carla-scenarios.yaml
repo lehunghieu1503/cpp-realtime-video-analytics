@@ -269,6 +269,37 @@ scenarios:
          ahead_m: 212.0, lane: -2.6, yaw_deg: 90.0,
          cut_in: {start_tick: 800, duration_ticks: 300, to_lane: 1.6}}
 
+  # ── The park show. Needs --arm ────────────────────────────────────────────
+  # Town05's car park: along the aisle at 2 m/s, past the stall, then
+  # backwards into it on a quarter circle and straight to its centre, at
+  # 0.5 m/s at most. Ends with the parking brake set, nose out.
+  #
+  # The stall is one painted stall of the row that opens to the widest aisle,
+  # measured on the paint by simulation/probe-stall.py --margin 0.5 (ray
+  # casts; the map has no Parking lane in the car park). It is 2.72 m wide,
+  # 0.56 m more than the vehicle: no stall of this car park leaves the 1 m
+  # the probe asks for by default. The stalls either side of it are empty.
+  # It is the only stall of the row whose four corners are in the camera's
+  # image from the end of the aisle. The handover point is where the vehicle
+  # starts: there is no lane on this aisle to hold until later.
+  show_park: &show_park
+    map: Town05
+    route: carpark
+    ticks: 2100
+    jpeg_quality: 75
+    park:
+      stall: {x: 9.83, y: -35.50, yaw_deg: 0.0, length_m: 4.96, width_m: 2.72}
+      handover: {x: 17.03, y: -13.10}
+
+  # The same stall with a car in it: the park must be given up before the
+  # vehicle goes backwards
+  show_park_occupied:
+    <<: *show_park
+    ticks: 900
+    actors:
+      - {name: in_the_stall, class: car, blueprint: vehicle.tesla.model3,
+         physics: true, at: {x: 9.83, y: -35.50, z: 0.157, yaw_deg: 0.0}}
+
   # ── Faults. Need --arm ────────────────────────────────────────────────────
   # The vehicle is driving when the fault starts; it must be braked within
   # the budget of simulation/config/carla.yaml plus one tick: age_limit_ms of
