@@ -21,11 +21,12 @@ So a stall is measured by the ends and judged by the stall detections:
   end that has left the image keeps what was learned of it while it was near.
 
   Two ends at the mouth, one stall's width apart, are a stall. It opens
-  towards where the camera was when they were first seen: the vehicle drives
-  on the aisle. Its direction is square to the line through all the mouth
-  ends of its row, which is longer than its own mouth. Its length comes from
-  the ends at the back of its dividers once they are seen; until then it is
-  taken as 5 m, which only moves where its back is.
+  away from the ends at the back of its dividers; while none of those is
+  seen, towards where the camera was when its mouth was first seen: the
+  vehicle drives on the aisle. Its direction is square to the line through
+  all the mouth ends of its row, which is longer than its own mouth. Its
+  length comes from the ends at the back of its dividers once they are seen;
+  until then it is taken as 5 m, which only moves where its back is.
 
   A stall detection votes, empty or occupied, for the stall whose box in the
   image is its own: the two are compared in pixels. On the ground the
@@ -227,18 +228,29 @@ class StallTracker:
             along = axes[0] if axes[0] @ along > 0 else -axes[0]
         # +v, from the end at -v to the one at +v, is to the right of out
         out = np.array([along[1], -along[0]])
-        track.out = out
 
-        # Its length: to the ends at the back of its two dividers
-        backs = []
-        for end in self.ends:
-            if end.hits < config["end_hits"] or not end.at_the_back:
-                continue
-            for corner in (a, b):
-                depth = -float((end.xy - corner) @ out)
-                if config["length_m"][0] <= depth <= config["length_m"][1] \
-                        and abs(float((end.xy - corner) @ along)) <= config["row_gate_m"]:
-                    backs.append((end, depth))
+        def backs_behind(out):
+            """The ends at the back of its two dividers, with how deep the
+            stall is at each, were it to open towards `out`."""
+            found = []
+            for end in self.ends:
+                if end.hits < config["end_hits"] or not end.at_the_back:
+                    continue
+                for corner in (a, b):
+                    depth = -float((end.xy - corner) @ out)
+                    if config["length_m"][0] <= depth <= config["length_m"][1] \
+                            and abs(float((end.xy - corner) @ along)) <= config["row_gate_m"]:
+                        found.append((end, depth))
+            return found
+
+        backs = backs_behind(out)
+        if not backs and backs_behind(-out):
+            # Its back is on the side it was taken to open to: a row seen
+            # from behind. It opens the other way.
+            track.plus, track.minus = track.minus, track.plus
+            along, out = -along, -out
+            backs = backs_behind(out)
+        track.out = out
         track.backs = tuple(end for end, _ in backs)
         length = float(np.mean([depth for _, depth in backs])) if backs \
             else config["length_default_m"]

@@ -126,6 +126,21 @@ class Tracking(unittest.TestCase):
         self.assertAlmostEqual(math.degrees(stall.heading_error(0.0)), 0.0, delta=1.0)
         self.assertLess(track.plus.nearest_m, 2.0)
 
+    def test_a_row_seen_from_behind_opens_away_from_the_camera(self):
+        # The camera passes behind this row: its back line is at x = 2.5,
+        # 1.5 m from the camera's path, its mouths beyond, at x = -2.5
+        away = [Stall(0.0, 2.8 * i, 180.0, 5.0, 2.8) for i in range(4)]
+        tracker = StallTracker(REAR)
+        passing(tracker, away, x=4.0, y_to=22.0)
+        self.assertGreaterEqual(len(tracker.tracks), 2)
+        for track in tracker.tracks:
+            stall = track.stall()
+            self.assertAlmostEqual(abs(math.degrees(stall.heading_error(180.0))), 0.0, delta=1.0)
+            self.assertAlmostEqual(stall.centre[0], 0.0, delta=0.1)
+            self.assertGreater(len(track.backs), 0)
+            # +v is to the right of the way it opens, here towards -y
+            self.assertLess(track.plus.xy[1], track.minus.xy[1])
+
     def test_without_stall_detections_there_are_stalls_but_none_is_free(self):
         tracker = StallTracker(REAR)
         tick = 0
