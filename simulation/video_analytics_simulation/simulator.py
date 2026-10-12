@@ -1098,6 +1098,16 @@ class Simulator:
                 if self.stop_requested:
                     break
                 self.tick(tick)
+                if tick == 59:
+                    # A person watching sees a vehicle that hardly moves and
+                    # no reason for it: say so. Seen with a GPU held at its
+                    # lowest clocks by the machine: 1.6 ticks a second.
+                    rate = 60.0 / (time.monotonic() - started)
+                    if rate < 0.4 / self.dt:
+                        print("WARNING: %.1f ticks a second instead of %.0f: this run will "
+                              "take %.0f minutes. Is the GPU held back? nvidia-smi "
+                              "--query-gpu=pstate,power.draw,clocks.gr --format=csv"
+                              % (rate, 1.0 / self.dt, (ticks - 60) / rate / 60.0), flush=True)
             elapsed = time.monotonic() - started
             self.output_queue.put(None)
             output.join(timeout=10)
