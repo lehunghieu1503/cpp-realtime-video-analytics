@@ -507,17 +507,27 @@ simulation/run.sh --scenario show_park_occupied --arm --gui
   vạch gì lên đó.
 - **Cửa sổ camera** (`CARLA cameras`): ảnh các camera của xe đặt cạnh nhau,
   lấy thẳng từ simulator, vẽ đè những gì thiết bị tìm thấy. Camera trước: hộp
-  detection, số track, và vạch làn (ở màn đỗ thì không vẽ vạch làn: bãi không
-  có làn, và lane model nhận nhầm mép vỉa thành vạch). Camera sau (chỉ có ở màn đỗ): ô đỗ model
-  thấy (xanh là trống, đỏ là có xe), đầu vạch chia ô (dấu cộng), các ô
+  detection, số track, và vạch làn. Ở màn đỗ không có vạch làn: bãi không có
+  làn, nên thiết bị không chạy lane model ở đó. Camera sau (chỉ có ở màn
+  đỗ): ô đỗ model thấy (xanh là trống, đỏ là có xe), đầu vạch chia ô (dấu
+  cộng), các ô
   controller đang theo dõi (viền trắng) và ô nó chọn (viền vàng). Dòng dưới
   cùng ghi tick, trạng thái, pha đỗ, tốc độ và lệnh đang áp lên xe. Mỗi ảnh
   hiện cùng kết quả của chính frame đó, nên hình trễ bằng độ trễ của thiết bị
   (khoảng 0,1 giây). Bấm `q` để đóng cửa sổ; lần chạy vẫn tiếp tục.
 
-Không có `--gui` thì vẫn xem được qua dashboard `http://127.0.0.1:9011` của
-thiết bị (hộp, vạch làn, ô đỗ). Cả hai nơi đều không ghi số mét: khoảng cách
-chỉ có ở controller, trong `commands.jsonl` và `stalls.jsonl`.
+`--web` bật thêm dashboard của thiết bị ở `http://127.0.0.1:9011` (trang web
+với video từng camera, hộp, vạch làn, ô đỗ). Mặc định dashboard tắt: thiết bị
+chỉ phát kết quả (`/events`), `/health` và `/metrics`; nó không vẽ và không
+nén ảnh nào cho trình duyệt. Chạy app ngoài simulation thì dashboard vẫn bật
+mặc định; tắt bằng `dashboard: false` trong config hoặc cờ `--no-dashboard`.
+
+Bản config gửi cho thiết bị (`device.yaml` trong thư mục lần chạy) chỉ có thứ
+scenario dùng: màn lái có lane model, không có camera sau và model ô đỗ; màn
+đỗ thì ngược lại.
+
+Cả cửa sổ camera lẫn dashboard đều không ghi số mét: khoảng cách chỉ có ở
+controller, trong `commands.jsonl` và `stalls.jsonl`.
 
 Model ô đỗ không nằm trong repo. Tạo lại bằng hai lệnh (cần server CARLA cho
 lệnh đầu, khoảng 27 phút; lệnh sau khoảng 50 phút trên RTX 5060):
@@ -548,9 +558,10 @@ nhau 8 giây) trong lúc server nhả texture của map mặc định.
 | Server CARLA | nạp lại map mỗi lần chạy | giữ map đang có; đổi map thì nạp hai lần để nhả bộ nhớ |
 
 Scenario đọc từ `manifest.json` của lần chạy, không bao giờ từ thiết bị:
-`target_speed_kmh`, `follow_gap_m`, `lane_change: {at_tick, side}` và
-`park: true`. Scenario nào không ghi thì giữ 9 km/h, không bám xe, không
-chuyển làn. Không scenario nào ghi ô đỗ nằm ở đâu.
+`target_speed_kmh`, `follow_gap_m`, `overtake: true` và `park: true`.
+Scenario nào không ghi thì giữ 9 km/h, không bám xe, không chuyển làn.
+Scenario ghi xe được phép làm gì; không scenario nào ghi lúc nào, phía nào,
+hay ô đỗ nằm ở đâu.
 
 ### Màn lái: `show_drive`
 
@@ -558,20 +569,29 @@ chuyển làn. Không scenario nào ghi ô đỗ nằm ở đâu.
 
 | Tick | Xe làm gì |
 |------|-----------|
-| 60–420 | bám xe phía trước (5 m/s), cách 24 m |
-| 420–513 | chuyển sang làn trái |
-| 513–800 | vượt xe đó ở 30 km/h |
-| 909 | một người đi ngang qua làn, cách 22 m: phanh, dừng cách người 15 m |
-| 985 | người đã rời làn: đi tiếp |
+| 0–302 | bám xe phía trước (5 m/s), cách 25 m |
+| 302–391 | đã bám xe chậm hơn 10 giây: tự chuyển sang làn trái |
+| 391–750 | vượt xe đó ở 30 km/h |
+| 859 | một người đi ngang qua làn: phanh, dừng cách người 14 đến 15 m |
+| 932–945 | người đã rời làn: đi tiếp |
+
+Các tick trên là số đo, không phải số ghi trong scenario. Scenario chỉ ghi
+`overtake: true`.
 
 - **Bám xe.** Khi xe trước nằm trong đường đi, xa hơn quãng dừng và gần hơn
   `follow_gap_m` (30 m), tốc độ mục tiêu hạ dần về tốc độ của nó; ở 80 % của
   khoảng đó thì bằng. Gần hơn quãng dừng (20,9 m ở 30 km/h) thì phanh, không
   bám.
+- **Vượt xe do controller tự quyết.** Bản đầu chuyển làn ở một tick và một
+  phía ghi sẵn trong scenario (`lane_change: {at_tick: 420, side: left}`). Bản
+  hiện tại (2026-10-13) bỏ hai số đó: khi xe đã bị một xe chậm hơn giữ dưới
+  tốc độ mục tiêu liên tục 10 giây (`control.overtake.after_s`), nó tìm làn
+  bên, thử bên trái trước rồi bên phải. Mất dấu xe trước hơn 1 giây thì đếm
+  lại từ đầu.
 - **Chuyển làn.** Chỉ bắt đầu khi trong pixel làn có vạch nằm ngoài vạch của
   làn mình, nên bề rộng làn bên là số đo, không giả định. Không có vạch, hoặc
-  có xe trong làn đó, thì ghi `lane_change_skipped` và ở lại làn; skip làm màn
-  show trượt.
+  có xe trong làn đó, ở cả hai phía trong 30 tick, thì ghi
+  `lane_change_skipped` và ở lại làn; skip làm màn show trượt.
 - **Lúc đè vạch.** Lane model không dùng được trong khoảng một giây: thiết bị
   báo không có làn (vạch không nằm bên nào của xe), vị trí vạch nó báo lệch tới
   nửa mét, rồi nó đổi slot của vạch và trộn với vạch bên cạnh. Controller vì
@@ -582,17 +602,24 @@ chuyển làn. Không scenario nào ghi ô đỗ nằm ở đâu.
   trái sang lề phải. Cảm biến va chạm không thấy actor loại này, nên script
   đánh giá so hộp của xe với hộp của người.
 
-Đo trên 7 lần chạy liên tiếp sau lần sửa cuối, đều có cửa sổ CARLA, đều đạt:
+Đo ngày 2026-10-13 trên 3 lần chạy liên tiếp không cửa sổ, với controller tự
+quyết lúc vượt, đều đạt:
 
 | Hạng mục | Kết quả |
 |----------|---------|
-| Bám xe | 14,1 đến 14,2 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 24,4 đến 24,5 m |
-| Chuyển làn xong | tick 512 đến 514 (3,1 giây sau khi bắt đầu) |
-| Phanh trước người | giữ phanh từ tick 908–910; khoảng cách nhỏ nhất tới người 14,7 đến 15,8 m |
-| Đi tiếp | tick 978 đến 988, 2,3 đến 2,7 giây sau khi bắt đầu phanh |
-| Tốc độ lớn nhất | 8,44 đến 8,47 m/s (30,4 km/h) |
+| Bám xe | 10,0 đến 10,1 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 25,1 đến 25,3 m |
+| Quyết định vượt | tick 302 đến 303, sang trái |
+| Chuyển làn xong | tick 391 đến 392 (3,0 giây sau khi bắt đầu) |
+| Phanh trước người | giữ phanh từ tick 859; khoảng cách nhỏ nhất tới người 14,2 đến 15,0 m |
+| Đi tiếp | tick 932 đến 945, 2,4 đến 2,9 giây sau khi bắt đầu phanh |
+| Tốc độ lớn nhất | 8,49 đến 8,51 m/s (30,6 km/h) |
 | Va chạm, hộp chồng nhau | 0 |
-| Độ trễ tick tới lệnh được áp | trung vị 101 đến 110 ms, P95 109 đến 172 ms |
+| Độ trễ tick tới lệnh được áp | trung vị 67 đến 69 ms, P95 101 đến 104 ms |
+| Tốc độ mô phỏng | 28,9 đến 29,0 tick/giây |
+
+Với bản đầu (chuyển làn ở tick 420 ghi sẵn), 7 lần chạy có cửa sổ CARLA sau
+lần sửa cuối cũng đều đạt: bám xe 14,1 đến 14,2 giây, chuyển làn xong ở tick
+512 đến 514.
 
 ### Màn đỗ: `show_park`
 

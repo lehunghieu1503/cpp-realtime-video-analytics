@@ -508,6 +508,7 @@ video_analytics --eval-coco DIR OPTIONS    Detections for mAP
 | `--port N` | Dashboard port | `9001` |
 | `--bind ADDR` | Listen address | `127.0.0.1` |
 | `--headless` | No local window, dashboard only | off |
+| `--no-dashboard` | No page and no video on the port: results (`/events`), `/health` and `/metrics` only. `dashboard: false` in the config does the same | off |
 | `--benchmark` | Benchmark a video file instead of running live | off |
 | `--input FILE` | Benchmark input video | required |
 | `--frames N` | Frames to measure | `300` |
@@ -724,8 +725,11 @@ both FP16:
 
 Scenarios on one PC show it driving and parking. `--gui` opens the CARLA
 window and a second one with the vehicle's cameras and what the device finds
-in them; without it, boxes, lane lines and stalls are on the device's
-dashboard, `http://127.0.0.1:9011`.
+in them. `--web` serves the device's dashboard as well
+(`http://127.0.0.1:9011`); without it the device draws and encodes nothing
+for a browser. A scenario says what the vehicle may do (`overtake: true`,
+`park: true`), never when or where: it overtakes after 10 s behind a slower
+car, on the side its camera shows free.
 
 ```bash
 simulation/run.sh --scenario show_drive --arm --gui   # Town04, up to 30 km/h
@@ -744,7 +748,7 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 
 | Show | Measured |
 |:-----|:---------|
-| `show_drive`, 7 runs | follows a car at 24 m for 14 s, changes lane in 3.1 s, stops 15 m before a person crossing, drives on 2.5 s later; no collision |
+| `show_drive`, 3 runs | follows a slower car at 25 m, decides after 10 s to overtake on the left, changes lane in 3.0 s, stops 14 to 15 m before a person crossing, drives on 2.4 to 2.9 s later; no collision |
 | `show_park`, 4 runs | passes two parked cars, takes the first stall it may, backs in: 0.07 to 0.08 m beside its axis, 1.2 degree off, parking brake set |
 | `show_park_next`, 2 runs | a car in that stall: it takes the next one |
 | `show_park_occupied`, 2 runs | no stall left that it may take: gives up at the end of the search without going backwards |
