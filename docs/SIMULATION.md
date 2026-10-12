@@ -635,7 +635,7 @@ Kết quả 4 lần chạy:
 - **Mô phỏng không đạt 30 tick/giây** khi có cửa sổ CARLA: 22,9 đến 29,3
   tick/giây. Mọi thời hạn tính theo thời gian mô phỏng nên kết quả không đổi.
 - **Chuyển làn chỉ thử trên đoạn thẳng, ở 5 m/s, sang trái.** Trước lần sửa
-  cuối, 3 trong 5 lần chạy có cửa sổ CARLA trượt vì thiết bị báo một làn mới
+  cuối, 3 trong 6 lần chạy có cửa sổ CARLA trượt vì thiết bị báo một làn mới
   chỉ thấy từ 19 m; sau khi sửa, 7 lần liên tiếp đều đạt. Đó là 7 lần, không
   phải bằng chứng cho mọi điều kiện.
 - **Một stall, một hàng, một bãi.** Thử trên một ô, một hướng tiến. Không có
