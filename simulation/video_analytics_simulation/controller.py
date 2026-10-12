@@ -220,10 +220,11 @@ class ControlCore:
         image = envelope.get("image") or {}
         if (image.get("width"), image.get("height")) != (self.rig.width, self.rig.height):
             return self.reject("image_size")
+        # A car park has no lanes: the device is not asked for any there
         lane = envelope.get("lane")
-        if lane is None:
+        if lane is None and not self.parking:
             return self.reject("no_lane_block")
-        if lane.get("calibration_id") != self.rig.calibration_id:
+        if lane is not None and lane.get("calibration_id") != self.rig.calibration_id:
             return self.reject("calibration_mismatch")
         ego = self.ego.get(sim_ns)
         if ego is None:
@@ -239,7 +240,7 @@ class ControlCore:
         if metric is None:
             return self.reject("not_newer")
         age_ok = now_sim_ns is None or now_sim_ns - sim_ns <= self.arm_age_ns
-        lane_ok = lane.get("valid") or self.on_aisle(capture["pose"])
+        lane_ok = self.on_aisle(capture["pose"]) or lane.get("valid")
         self.fresh_frames = self.fresh_frames + 1 if (lane_ok and age_ok) else 0
         self.accepted += 1
         self.basis = {"sim_ns": sim_ns, "lane": lane, "metric": metric,
@@ -290,7 +291,7 @@ class ControlCore:
         else:
             if ego_now["sim_ns"] - self.basis["sim_ns"] > self.arm_age_ns:
                 reasons.append("stale_perception")
-            if not self.basis["lane"].get("valid") and not self.on_aisle(self.basis["pose"]):
+            if not self.on_aisle(self.basis["pose"]) and not self.basis["lane"].get("valid"):
                 reasons.append("lane_invalid")
         if self.fresh_frames < int(self.c.get("ready_frames", 3)):
             reasons.append("fresh_frames_%d" % self.fresh_frames)

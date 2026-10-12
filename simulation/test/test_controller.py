@@ -927,7 +927,7 @@ class ParkWorld(World):
         self.gain = config["control"]["park"]["turn_gain"]
         self.pose = Pose(start[0], start[1], 0.0, 0.0, 0.0, yaw)
         self.signed = 0.0
-        self.lane = dict(lane_envelope(markings=()), pixels=[])
+        self.lane = None  # the device is not asked for lanes in a car park
         self.commands = []
         self.stalled_car = None  # (x, y) of something standing in the world
         self.stalls = list(self.ROW if stalls is None else stalls)
@@ -1027,7 +1027,9 @@ def _envelope_without_render(self, tick=None, **changes):
     envelope = {"simulation": {"run_id": self.run, "sim_ns": tick * TICK},
                 "stream": "carla-front",
                 "image": {"width": RIG.width, "height": RIG.height},
-                "detections": [], "lane": copy.deepcopy(self.lane)}
+                "detections": []}
+    if self.lane is not None:
+        envelope["lane"] = copy.deepcopy(self.lane)
     envelope.update(changes)
     return envelope, None
 
@@ -1044,7 +1046,7 @@ class Parking(unittest.TestCase):
         world.rear = False
         for _ in range(3):
             world.frame()
-        self.assertFalse(world.lane["valid"])
+        self.assertNotIn("lane", world.envelope()[0])
         self.assertIn("no_rear_perception", world.arm())
         world.rear = True
         world.frame()
@@ -1247,6 +1249,22 @@ class Parking(unittest.TestCase):
         self.assertIs(world.last["reverse"], False)
         self.assertIs(world.last["hand_brake"], False)
         self.assertEqual(world.last["brake"], 1.0)
+
+    def test_a_lane_the_device_sends_all_the_same_is_not_steered_on(self):
+        world = ParkWorld()
+        world.lane = lane_envelope(offset=1.0)  # a lane 1 m to the right
+        world.armed()
+        world.drive(30)
+        self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
+        # Outside a car park a result without a lane is not driven on
+        road = World()
+        road.frame()
+        ego = road.ego()
+        road.core.on_ego(ego)
+        envelope, depth = road.envelope()
+        del envelope["lane"]
+        road.core.on_depth(road.tick * TICK, depth)
+        self.assertEqual(road.core.on_perception(envelope, ego["sim_ns"])[1], "no_lane_block")
 
     def test_the_scenario_names_no_stall(self):
         world = ParkWorld(park=True)
