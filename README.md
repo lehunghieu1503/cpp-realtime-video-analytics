@@ -733,7 +733,7 @@ simulation/run.sh --scenario show_park --arm --gui    # Town05's car park
 
 | Show | Measured |
 |:-----|:---------|
-| `show_drive`, 9 runs | follows a car at 24 m for 14 s, changes lane in 3.1 s, stops 15 m before a person crossing, drives on 2.5 s later; no collision |
+| `show_drive`, 7 runs | follows a car at 24 m for 14 s, changes lane in 3.1 s, stops 15 m before a person crossing, drives on 2.5 s later; no collision |
 | `show_park`, 4 runs | backs into a 2.72 m stall: 0.06 m beside its axis, 1 degree off, parking brake set |
 | `show_park_occupied` | a car in the stall: the park is given up before the vehicle moves |
 

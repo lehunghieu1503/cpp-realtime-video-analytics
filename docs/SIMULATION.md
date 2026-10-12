@@ -560,17 +560,17 @@ xe, không chuyển làn.
   trái sang lề phải. Cảm biến va chạm không thấy actor loại này, nên script
   đánh giá so hộp của xe với hộp của người.
 
-Đo trên 9 lần chạy đạt liên tiếp (7 lần có cửa sổ CARLA):
+Đo trên 7 lần chạy liên tiếp sau lần sửa cuối, đều có cửa sổ CARLA, đều đạt:
 
 | Hạng mục | Kết quả |
 |----------|---------|
-| Bám xe | 14,1 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 24,4 m |
-| Chuyển làn xong | tick 512 đến 515 (3,1 giây sau khi bắt đầu) |
-| Phanh trước người | giữ phanh từ tick 907–910; khoảng cách nhỏ nhất tới người 14,7 đến 15,8 m |
+| Bám xe | 14,1 đến 14,2 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 24,4 đến 24,5 m |
+| Chuyển làn xong | tick 512 đến 514 (3,1 giây sau khi bắt đầu) |
+| Phanh trước người | giữ phanh từ tick 908–910; khoảng cách nhỏ nhất tới người 14,7 đến 15,8 m |
 | Đi tiếp | tick 978 đến 988, 2,3 đến 2,7 giây sau khi bắt đầu phanh |
 | Tốc độ lớn nhất | 8,44 đến 8,47 m/s (30,4 km/h) |
 | Va chạm, hộp chồng nhau | 0 |
-| Độ trễ tick tới lệnh được áp | trung vị 100 đến 107 ms, P95 118 đến 172 ms |
+| Độ trễ tick tới lệnh được áp | trung vị 101 đến 110 ms, P95 109 đến 172 ms |
 
 ### Màn đỗ: `show_park`
 
@@ -634,10 +634,10 @@ Kết quả 4 lần chạy:
   0,8 kết quả/giây cạnh CARLA.
 - **Mô phỏng không đạt 30 tick/giây** khi có cửa sổ CARLA: 22,9 đến 29,3
   tick/giây. Mọi thời hạn tính theo thời gian mô phỏng nên kết quả không đổi.
-- **Chuyển làn chỉ thử trên đoạn thẳng, ở 5 m/s, sang trái.** Lần chạy đầu với
-  cửa sổ CARLA trượt 2 trong 4 lần vì thiết bị báo một làn mới chỉ thấy từ
-  19 m; đã sửa và 7 lần sau đều đạt, nhưng đó là 7 lần, không phải bằng chứng
-  cho mọi điều kiện.
+- **Chuyển làn chỉ thử trên đoạn thẳng, ở 5 m/s, sang trái.** Trước lần sửa
+  cuối, 3 trong 5 lần chạy có cửa sổ CARLA trượt vì thiết bị báo một làn mới
+  chỉ thấy từ 19 m; sau khi sửa, 7 lần liên tiếp đều đạt. Đó là 7 lần, không
+  phải bằng chứng cho mọi điều kiện.
 - **Một stall, một hàng, một bãi.** Thử trên một ô, một hướng tiến. Không có
   camera sau: sau khi quyết định ô trống, không gì phát hiện vật đi vào ô.
 - **Người đi ngang không có vật lý** và xuất hiện theo tick định sẵn, không
