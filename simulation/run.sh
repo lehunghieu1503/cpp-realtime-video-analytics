@@ -25,7 +25,8 @@
 #   --config FILE      default simulation/config/carla.yaml
 #   --scenarios FILE   default simulation/config/carla-scenarios.yaml
 #   --run-dir DIR      default .cache/carla/<run id>; must not exist
-#   --local-backend B  backend of a local device (default: cpu)
+#   --local-backend B  backend of a local device instead of the config's
+#                      (cpu is too slow to keep up with 30 frames a second)
 # Environment:
 #   CARLA_ROOT   CARLA 0.9.16 (default ~/opt/carla-0.9.16); its server is
 #                started (off-screen without --gui) when nothing listens on port 2000, and
@@ -41,7 +42,7 @@ set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
 TICKS=0 CONFIG=simulation/config/carla.yaml SCENARIOS=simulation/config/carla-scenarios.yaml
-RUN_DIR="" LOCAL_BACKEND=cpu GUI="" OFFSCREEN=-RenderOffScreen
+RUN_DIR="" LOCAL_BACKEND="" GUI="" OFFSCREEN=-RenderOffScreen
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="$2"; shift 2 ;;
@@ -55,11 +56,11 @@ while [ $# -gt 0 ]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -173,10 +174,11 @@ done
 if [ "$DEVICE" = none ]; then
   :
 elif [ "$DEVICE" = local ]; then
-  sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
+  [ -z "$LOCAL_BACKEND" ] || sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
   VA_RUN_ID=$RUN_ID build/src/video_analytics --config "$RUN_DIR/device.yaml" \
     --headless --port 9011 >"$RUN_DIR/device.log" 2>&1 &
   PIDS+=($!)
+  echo "   boxes and lane lines: http://127.0.0.1:9011"
 else
   MODELS=$(sed -n 's/^ *model: *//p' "$CONFIG")
   for model in $MODELS; do
