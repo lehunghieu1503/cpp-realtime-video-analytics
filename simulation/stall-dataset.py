@@ -18,17 +18,28 @@ make  The rear camera of simulation/config/carla.yaml (rear_calibration), on
       the ego vehicle, at poses a vehicle has while it passes a row, turns in
       backwards and stands in a stall, and at random ones. Cars are put in
       some of the stalls, the map's own parked cars are shown or hidden, the
-      sun and the clouds change. Each image gets one label per stall that is
-      large enough in it, in Ultralytics pose format:
+      sun and the clouds change. Each image gets its labels in Ultralytics
+      pose format:
 
         class cx cy w h  x0 y0 v0  x1 y1 v1  x2 y2 v2  x3 y3 v3     (normalised)
 
-      class 0 is an empty stall, 1 one with a vehicle in it. The box is that
-      of the part of the stall inside the image. The four points are the
+      Stalls, one label per stall that is large enough in the image: class
+      0 is an empty stall, 1 one with a vehicle in it. The box is that of
+      the part of the stall inside the image. The four points are the
       stall's corners in the order of parking.Stall.corners(): the two of
       the mouth, then the two of the back. v is 2 for a corner that is in
       the image and not hidden (the depth image of the same frame says so),
-      0 otherwise. Writes OUT/images, OUT/labels and OUT/data.yaml.
+      0 otherwise.
+
+      Ends of dividers, one label per end that is in the image and not
+      hidden: class 2 where a divider ends at the mouth of the stalls, 3
+      where it meets the line across at their back. The box is that of
+      0.8 m of ground around the end; the four points are all the end
+      itself. A stall says whether it is empty and roughly where it is; an
+      end is a small thing with a sharp place, which is what a stall is
+      measured by.
+
+      Writes OUT/images, OUT/labels and OUT/data.yaml.
 
 The stalls file is truth: it labels these images and the evaluation reads it.
 Nothing in the control path does.
@@ -52,6 +63,8 @@ STALLS = os.path.join(HERE, "config", "carla-stalls.yaml")
 # Smaller than this in the image, a stall gets no label: the model is not
 # asked for what it cannot see
 MIN_BOX = (24, 10)
+END_GROUND_M = 0.8      # the ground around a divider's end that is its box
+MIN_END_BOX = (10, 5)
 CAR_LABELS = ("Car", "Truck", "Bus", "Motorcycle", "Bicycle", "Vehicles")
 
 
@@ -252,12 +265,28 @@ def boxes_overlap(a, b):
     return True
 
 
-def label_stall(stall, occupied, capture, rig, depth_m, ground_z):
-    """One label line for this stall in the image taken from capture, or None."""
+def divider_ends(stalls):
+    """Where the dividers end: every corner of every stall, once (two stalls
+    share a divider), as (x, y, class)."""
+    ends = []
+    for stall in stalls:
+        for k, corner in enumerate(stall.corners()[:, :2]):
+            cls = 2 if k < 2 else 3
+            if not any(c == cls and np.hypot(x - corner[0], y - corner[1]) < 0.5
+                       for x, y, c in ends):
+                ends.append((float(corner[0]), float(corner[1]), cls))
+    return ends
+
+
+def label(cls, outline, points, needed, min_box, capture, rig, depth_m):
+    """One label line, or None: the box of the ground polygon `outline`
+    (world, (n, 3)) as far as it is in the image, and the four `points`
+    (world, (4, 3)), of which `needed` must be seen."""
     import cv2
-    corners = capture.from_parent(stall.corners(ground_z))
-    camera = rig.pose.from_parent(corners)  # x forward, y right, z up
     f, w, h = rig.focal, rig.width, rig.height
+
+    def camera(world):  # x forward, y right, z up
+        return rig.pose.from_parent(capture.from_parent(world))
 
     def project(points):
         return np.stack([f * points[:, 1] / points[:, 0] + w / 2.0,
@@ -265,9 +294,9 @@ def label_stall(stall, occupied, capture, rig, depth_m, ground_z):
 
     # The part in front of the camera, then the part inside the image
     near = 0.15
-    polygon = []
-    for i in range(4):
-        a, b = camera[i], camera[(i + 1) % 4]
+    polygon, ring = [], camera(outline)
+    for i in range(len(ring)):
+        a, b = ring[i], ring[(i + 1) % len(ring)]
         if a[0] >= near:
             polygon.append(a)
         if (a[0] >= near) != (b[0] >= near):
@@ -282,12 +311,12 @@ def label_stall(stall, occupied, capture, rig, depth_m, ground_z):
     inside = inside.reshape(-1, 2)
     x0, y0 = inside.min(axis=0)
     x1, y1 = inside.max(axis=0)
-    if x1 - x0 < MIN_BOX[0] or y1 - y0 < MIN_BOX[1]:
+    if x1 - x0 < min_box[0] or y1 - y0 < min_box[1]:
         return None
 
-    points = []
+    numbers = [(x0 + x1) / 2.0 / w, (y0 + y1) / 2.0 / h, (x1 - x0) / w, (y1 - y0) / h]
     visible = 0
-    for point in camera:
+    for point in camera(points):
         seen = False
         if point[0] >= near:
             u, v = project(point[None])[0]
@@ -299,14 +328,26 @@ def label_stall(stall, occupied, capture, rig, depth_m, ground_z):
                 seen = depth_m[int(v), int(u)] > point[0] - tolerance
         if seen:
             visible += 1
-            points += [u / w, v / h, 2]
+            numbers += [u / w, v / h, 2]
         else:
-            points += [0.0, 0.0, 0]
-    if visible < 2:
+            numbers += [0.0, 0.0, 0]
+    if visible < needed:
         return None
-    numbers = [(x0 + x1) / 2.0 / w, (y0 + y1) / 2.0 / h, (x1 - x0) / w, (y1 - y0) / h] + points
-    return "%d " % (1 if occupied else 0) + " ".join(
+    return "%d " % cls + " ".join(
         "%d" % n if isinstance(n, int) else "%.6f" % n for n in numbers)
+
+
+def labels_of(stalls, occupied, ends, capture, rig, depth_m, ground_z):
+    lines = [label(1 if taken else 0, stall.corners(ground_z), stall.corners(ground_z),
+                   2, MIN_BOX, capture, rig, depth_m)
+             for stall, taken in zip(stalls, occupied)]
+    half = END_GROUND_M / 2.0
+    for x, y, cls in ends:
+        around = np.array([[x + a * half, y + b * half, ground_z]
+                           for a, b in ((1, 1), (1, -1), (-1, -1), (-1, 1))])
+        lines.append(label(cls, around, np.tile([x, y, ground_z], (4, 1)), 4, MIN_END_BOX,
+                           capture, rig, depth_m))
+    return [line for line in lines if line]
 
 
 def ego_pose(rng, stalls, free, wheelbase):
@@ -353,6 +394,7 @@ def make(args):
     with open(STALLS) as f:
         park = yaml.safe_load(f)[town]
     stalls = [Stall.from_dict(s) for s in park["stalls"]]
+    ends = divider_ends(stalls)
     ground_z, area = park["ground_z"], park["area"]
     rng = np.random.default_rng(args.seed)
     for part in ("images/train", "images/val", "labels/train", "labels/val", "preview"):
@@ -372,7 +414,8 @@ def make(args):
         static_boxes = [box_corners(o.bounding_box.location.x, o.bounding_box.location.y,
                                     o.bounding_box.rotation.yaw, o.bounding_box.extent.x,
                                     o.bounding_box.extent.y) for o in statics]
-        print("%d stalls, %d cars of the map in the car park" % (len(stalls), len(statics)))
+        print("%d stalls, %d ends of dividers, %d cars of the map in the car park" % (
+            len(stalls), len(ends), len(statics)))
         cars = [b for b in library.filter("vehicle.*")
                 if b.get_attribute("number_of_wheels").as_int() == 4
                 and not any(n in b.id for n in ("firetruck", "ambulance", "carlacola",
@@ -467,9 +510,7 @@ def make(args):
             image = rgb.image(frame)[:, :, :3]
             depth_m = decode_depth(depth.image(frame))
             capture = Pose(x, y, height, settled.rotation.roll, settled.rotation.pitch, yaw)
-            lines = [label_stall(stall, taken, capture, rig, depth_m, ground_z)
-                     for stall, taken in zip(stalls, occupied)]
-            lines = [line for line in lines if line]
+            lines = labels_of(stalls, occupied, ends, capture, rig, depth_m, ground_z)
             part = "val" if (made // args.scene) % 10 == 9 else "train"
             name = "%s_%05d" % (town.lower(), made)
             # As the device gets them: JPEG, at the qualities the runs use
@@ -481,7 +522,7 @@ def make(args):
                 drawn = image.copy()
                 for line in lines:
                     n = [float(v) for v in line.split()]
-                    colour = (0, 0, 255) if n[0] else (0, 255, 0)
+                    colour = ((0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255))[int(n[0])]
                     cv2.rectangle(drawn, (int((n[1] - n[3] / 2) * rig.width),
                                           int((n[2] - n[4] / 2) * rig.height)),
                                   (int((n[1] + n[3] / 2) * rig.width),
@@ -502,7 +543,8 @@ def make(args):
                             "val": "images/val", "kpt_shape": [4, 3],
                             # Mirrored, the corners at +v and -v change places
                             "flip_idx": [1, 0, 3, 2],
-                            "names": {0: "empty", 1: "occupied"}}, f, sort_keys=False)
+                            "names": {0: "empty", 1: "occupied", 2: "mouth", 3: "back"}},
+                           f, sort_keys=False)
         print("%d images in %s" % (made, args.out))
     finally:
         for camera in cameras:
