@@ -121,6 +121,7 @@ echo "== Run $RUN_ID in $RUN_DIR"
 
 PIDS=()
 REMOTE_STARTED=0
+LOCAL_DEVICE=""
 cleanup() {
   for pid in "${PIDS[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
   sleep 1
@@ -161,8 +162,9 @@ echo "== Starting the simulator"
 "$CARLA_PYTHON" -m video_analytics_simulation.simulator --config "$CONFIG" \
   --scenarios "$SCENARIOS" --scenario "$SCENARIO" --run-dir "$RUN_DIR" \
   --run-id "$RUN_ID" --ticks "$TICKS" --controller-pid "$CONTROLLER" \
-  --wait-client "$WAIT_CLIENT" $ARM $GUI 2>&1 | tee "$RUN_DIR/simulator.log" &
+  --wait-client "$WAIT_CLIENT" $ARM $GUI > >(tee "$RUN_DIR/simulator.log") 2>&1 &
 SIMULATOR=$!
+PIDS+=("$SIMULATOR")
 # The simulator listens once it has written the manifest
 for _ in $(seq 120); do
   [ -f "$RUN_DIR/manifest.json" ] && break
@@ -177,7 +179,8 @@ elif [ "$DEVICE" = local ]; then
   [ -z "$LOCAL_BACKEND" ] || sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
   VA_RUN_ID=$RUN_ID build/src/video_analytics --config "$RUN_DIR/device.yaml" \
     --headless --port 9011 >"$RUN_DIR/device.log" 2>&1 &
-  PIDS+=($!)
+  LOCAL_DEVICE=$!
+  PIDS+=("$LOCAL_DEVICE")
   echo "   boxes and lane lines: http://127.0.0.1:9011"
 else
   MODELS=$(sed -n 's/^ *model: *//p' "$CONFIG")
@@ -196,7 +199,17 @@ else
   echo "   (the first run with a model builds its TensorRT engine: several minutes)"
 fi
 
-wait "$SIMULATOR"
+# A local device that stops (a model that does not load) ends the run: the
+# simulator would wait ten minutes for it
+while kill -0 "$SIMULATOR" 2>/dev/null; do
+  if [ -n "$LOCAL_DEVICE" ] && ! kill -0 "$LOCAL_DEVICE" 2>/dev/null; then
+    echo "The device stopped:" >&2
+    tail -n 3 "$RUN_DIR/device.log" >&2
+    exit 1
+  fi
+  sleep 1
+done
+wait "$SIMULATOR" || echo "The simulator stopped with an error" >&2
 echo "== Evaluating"
 simulation/evaluate.py "$RUN_DIR" || true
 echo "Run directory: $RUN_DIR"
