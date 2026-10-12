@@ -157,8 +157,24 @@ else
   SIM_HOST="${SIM_HOST:-$(ip -4 route get "$(getent ahostsv4 "$BOARD" | awk 'NR==1{print $1}')" | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
   DEVICE_URL=http://$BOARD:9002
 fi
-# The device's copy of the config: the camera stream comes from this PC
-sed "s/SIM_HOST/$SIM_HOST/" "$CONFIG" >"$RUN_DIR/device.yaml"
+# The device's copy of the config: the camera streams come from this PC. The
+# rear camera and the stall model are for the scenarios that park; the others
+# neither send its images nor load its model.
+"$CARLA_PYTHON" - "$CONFIG" "$SCENARIOS" "$SCENARIO" "$SIM_HOST" >"$RUN_DIR/device.yaml" <<'PY'
+import sys
+import yaml
+config_path, scenarios_path, name, host = sys.argv[1:]
+with open(config_path) as f:
+    config = yaml.safe_load(f.read().replace("SIM_HOST", host))
+with open(scenarios_path) as f:
+    scenarios = yaml.safe_load(f)
+if name not in scenarios["scenarios"]:
+    raise SystemExit("unknown scenario " + name)
+if not dict(scenarios.get("defaults", {}), **scenarios["scenarios"][name]).get("park"):
+    config["sources"] = [s for s in config["sources"] if not s.get("stall")]
+    config.pop("stall", None)
+yaml.safe_dump(config, sys.stdout, sort_keys=False)
+PY
 
 echo "== Starting the controller and the bridge"
 "$CARLA_PYTHON" -m video_analytics_simulation.controller --config "$CONFIG" \
@@ -191,7 +207,7 @@ elif [ "$DEVICE" = local ]; then
   start_local_device
   echo "   boxes and lane lines: http://127.0.0.1:9011"
 else
-  MODELS=$(sed -n 's/^ *model: *//p' "$CONFIG")
+  MODELS=$(sed -n 's/^ *model: *//p' "$RUN_DIR/device.yaml")
   for model in $MODELS; do
     [ -f "$model" ] || { echo "Missing $model" >&2; exit 1; }
   done

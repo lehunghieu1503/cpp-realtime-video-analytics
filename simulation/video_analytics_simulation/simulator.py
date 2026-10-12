@@ -12,10 +12,15 @@ Each tick, in this order:
      (appsrc ! gdppay ! tcpserversink), publish depth, camera info, the ego
      state and /clock on ROS 2, and write the run's records
 
+A scenario that parks has a second camera, looking back (rear_calibration):
+its image of the same tick goes to the device the same way, on a port of
+its own, as source carla-rear. It has no depth image.
+
 What the controller may use: RGB (through the device), depth, the camera
 calibration and the ego vehicle's own pose and velocity. The positions of
-the other actors and the map's lane centre go to truth.jsonl only, for the
-evaluation; nothing in the control path reads them.
+the other actors and the map's lane centre go to truth.jsonl only, and the
+car park's stalls to the manifest's `truth`, for the evaluation; nothing in
+the control path reads them.
 
 Records in the run directory:
   manifest.json   versions, map, rig, vehicle, settings of this run
@@ -43,8 +48,10 @@ import yaml
 
 from . import protocol
 from .calibration import Rig, decode_depth
+from .parking import Stall
 
 SOURCE = "carla-front"
+REAR_SOURCE = "carla-rear"
 
 
 def mono_ns():
@@ -317,6 +324,9 @@ class Simulator:
         self.run_dir = args.run_dir
         os.makedirs(self.run_dir, exist_ok=True)
         self.rig = Rig.from_config(self.config["calibration"])
+        self.rear_rig = Rig.from_config(self.config["rear_calibration"]) \
+            if self.scenario.get("park") else None
+        self.rear_queue = queue.Queue(maxsize=int(self.c.get("callback_queue", 8)))
         self.dt = 1.0 / float(self.c.get("fps", 30))
         # A scenario may lower it: a scene with more detail makes larger frames
         self.jpeg_quality = int(self.scenario.get("jpeg_quality",
@@ -362,7 +372,8 @@ class Simulator:
         self.controller_frames = 0
         self.arm_sent = 0.0  # when ARM was last sent
         self.stats = {"ticks": 0, "sent": 0, "dropped": 0, "jpeg_bytes": 0,
-                      "encode_ms": 0.0, "tick_ms": 0.0, "wait_images_ms": 0.0}
+                      "encode_ms": 0.0, "tick_ms": 0.0, "wait_images_ms": 0.0,
+                      "rear_sent": 0, "rear_dropped": 0}
 
     # ── ROS ──────────────────────────────────────────────────────────────────
 
@@ -482,12 +493,10 @@ class Simulator:
         self.ego = self.world.spawn_actor(blueprint, transform)
         self.actors.append(self.ego)
 
-        rig = self.rig
-        mount = carla.Transform(carla.Location(rig.x, rig.y, rig.z),
-                                carla.Rotation(roll=rig.roll_deg, pitch=rig.pitch_deg,
-                                               yaw=rig.yaw_deg))
-
-        def camera(kind, extra):
+        def camera(kind, extra, rig=self.rig):
+            mount = carla.Transform(carla.Location(rig.x, rig.y, rig.z),
+                                    carla.Rotation(roll=rig.roll_deg, pitch=rig.pitch_deg,
+                                                   yaw=rig.yaw_deg))
             bp = library.find(kind)
             bp.set_attribute("image_size_x", str(rig.width))
             bp.set_attribute("image_size_y", str(rig.height))
@@ -504,13 +513,16 @@ class Simulator:
             return sensor
 
         # A pinhole image: the calibration has no distortion terms
-        rgb = camera("sensor.camera.rgb", {
+        pinhole = {
             "lens_k": "0.0", "lens_kcube": "0.0", "lens_circle_multiplier": "0.0",
             "lens_circle_falloff": "0.0", "chromatic_aberration_intensity": "0.0",
-            "motion_blur_intensity": "0.0"})
+            "motion_blur_intensity": "0.0"}
+        rgb = camera("sensor.camera.rgb", pinhole)
         depth = camera("sensor.camera.depth", {})
         rgb.listen(lambda image: self.on_image("rgb", image))
         depth.listen(lambda image: self.on_image("depth", image))
+        if self.rear_rig:
+            camera("sensor.camera.rgb", pinhole, self.rear_rig).listen(self.on_rear_image)
 
         for kind in ("sensor.other.collision", "sensor.other.lane_invasion"):
             sensor = self.world.spawn_actor(library.find(kind), carla.Transform(),
@@ -539,6 +551,28 @@ class Simulator:
             "mass_kg": physics.mass,
         }
 
+    def stall_truth(self):
+        """The stalls of this map (simulation/config/carla-stalls.yaml), each
+        with whether a vehicle stands in it when the run starts: one of the
+        map's own parked cars, or one of the scenario's."""
+        path = os.path.join(os.path.dirname(os.path.abspath(self.args.config)),
+                            "carla-stalls.yaml")
+        town = self.map.name.split("/")[-1]
+        if not self.rear_rig or not os.path.exists(path):
+            return []
+        with open(path) as f:
+            park = (yaml.safe_load(f) or {}).get(town)
+        if not park:
+            return []
+        cars = [[a.actor.get_location().x, a.actor.get_location().y] for a in self.scripted
+                if a.cls != "person"]
+        label = self.carla.CityObjectLabel
+        for name in ("Car", "Truck", "Bus", "Motorcycle", "Bicycle"):
+            cars += [[o.bounding_box.location.x, o.bounding_box.location.y]
+                     for o in self.world.get_environment_objects(getattr(label, name))]
+        return [dict(spec, occupied=any(Stall.from_dict(spec).contains(car) for car in cars))
+                for spec in park["stalls"]]
+
     def on_image(self, kind, image):
         """Sensor thread. The ledger entry comes first: whatever happens to
         the image next, the frame was produced and is counted."""
@@ -554,6 +588,36 @@ class Simulator:
         except queue.Full:
             self.ledger.update(image.frame, "dropped", reason="callback_queue_full",
                                kind=kind)
+
+    def on_rear_image(self, image):
+        """Sensor thread. The rear camera has no ledger: its frames are
+        counted, sent and dropped, in the run's summary."""
+        data = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
+            image.height, image.width, 4).copy()
+        try:
+            self.rear_queue.put_nowait((image.frame, data))
+        except queue.Full:
+            # Nobody is taking them (the run has not started): the newest
+            # stays, so that the first tick finds its own image
+            try:
+                self.rear_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.rear_queue.put_nowait((image.frame, data))
+            self.stats["rear_dropped"] += 1
+
+    def collect_rear(self, frame):
+        """The rear image of this tick's frame, or None."""
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                image_frame, data = self.rear_queue.get(
+                    timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if image_frame == frame:
+                return data
+        return None
 
     def on_event(self, kind, event):
         record = {"event": kind.split(".")[-1], "frame": event.frame}
@@ -720,7 +784,7 @@ class Simulator:
                   0.0, 0.0, 1.0, 0.0]
         self.pub_info.publish(info)
 
-    def output_loop(self, sender):
+    def output_loop(self, sender, rear_sender=None):
         """Output thread: one paired frame at a time, in the order produced.
         Depth first, so that it is on the host before the device's result
         for the same frame can come back."""
@@ -735,7 +799,13 @@ class Simulator:
             item = self.output_queue.get()
             if item is None:
                 return
-            frame, sim_ns, rgb, depth_raw, drop_rgb, drop_depth = item
+            frame, sim_ns, rgb, depth_raw, drop_rgb, drop_depth, rear = item
+            if rear is not None:
+                ok, jpeg = cv2.imencode(".jpg", rear[:, :, :3], quality)
+                if ok and rear_sender.send(jpeg.tobytes(), sim_ns):
+                    self.stats["rear_sent"] += 1
+                else:
+                    self.stats["rear_dropped"] += 1
             if not drop_depth:
                 self.publish_depth(sim_ns, decode_depth(depth_raw))
                 self.depth_writer.offer(frame, sim_ns, depth_raw)
@@ -841,6 +911,7 @@ class Simulator:
         # 3. This tick's images
         wait = time.monotonic()
         images = self.collect_images(frame)
+        rear = self.collect_rear(frame) if self.rear_rig else None
         self.stats["wait_images_ms"] += (time.monotonic() - wait) * 1e3
         self.publish_state(sim_ns, ego)
         if images is None:
@@ -855,7 +926,7 @@ class Simulator:
             # short: a frame that cannot get in is dropped whole, and counted.
             item = (frame, sim_ns, images[0], images[1],
                     bool(self.fault("drop_rgb", tick)),
-                    bool(self.fault("drop_depth", tick)))
+                    bool(self.fault("drop_depth", tick)), rear)
             try:
                 self.output_queue.put_nowait(item)
             except queue.Full:
@@ -897,6 +968,12 @@ class Simulator:
             "max_substep_delta_time": 0.01,
             "calibration": self.config["calibration"],
             "calibration_id": self.rig.calibration_id,
+            "rear_source": REAR_SOURCE if self.rear_rig else None,
+            "rear_calibration": self.config["rear_calibration"] if self.rear_rig else None,
+            "stall": self.config.get("stall") if self.rear_rig else None,
+            # For the evaluation only: the controller reads scenario_config,
+            # vehicle and the source names, and finds its stalls itself
+            "truth": {"stalls": self.stall_truth()},
             "focal_px": self.rig.focal,
             "ground_z_measured": ground_measured,
             "vehicle": self.vehicle,
@@ -916,7 +993,7 @@ class Simulator:
     def run(self):
         signal.signal(signal.SIGINT, lambda *_: setattr(self, "stop_requested", True))
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "stop_requested", True))
-        sender = None
+        sender = rear_sender = None
         try:
             self.connect()
             self.spawn()
@@ -925,6 +1002,11 @@ class Simulator:
             sender = JpegSender(s.get("bind", "0.0.0.0"), int(s.get("port", 5000)),
                                 int(s.get("max_queued", 2)),
                                 int(s.get("client_max_buffers", 30)))
+            if self.rear_rig:
+                rear_sender = JpegSender(s.get("bind", "0.0.0.0"),
+                                         int(s.get("rear_port", 5001)),
+                                         int(s.get("max_queued", 2)),
+                                         int(s.get("client_max_buffers", 30)))
             self.last_ego = None
             self.ego.apply_control(self.carla.VehicleControl(throttle=0.0, brake=1.0))
             # Let the vehicle settle on its wheels before anything is measured
@@ -969,8 +1051,8 @@ class Simulator:
             for frame in sorted(self.ledger.registered):
                 self.ledger.update(frame, "dropped", reason="waiting_for_the_device")
             self.ledger.registered.clear()
-            output = threading.Thread(target=self.output_loop, args=(sender,),
-                                      daemon=True)
+            output = threading.Thread(target=self.output_loop,
+                                      args=(sender, rear_sender), daemon=True)
             output.start()
             # Before the run: the same loop, vehicle braked, until the first
             # result has come all the way back (the device may still be
@@ -1003,6 +1085,8 @@ class Simulator:
                 "wait_images_mean_ms": self.stats["wait_images_ms"] / n,
                 "commands_rejected": self.lease.rejected,
                 "live_cache_evicted": self.sent.evicted,
+                "rear_frames_sent": self.stats["rear_sent"],
+                "rear_frames_dropped": self.stats["rear_dropped"],
                 "depth_artifact_bytes": self.depth_writer.bytes,
                 "depth_artifact_write_seconds": self.depth_writer.seconds,
             }
@@ -1010,9 +1094,9 @@ class Simulator:
                                 summary)
             print(json.dumps(summary), flush=True)
         finally:
-            self.close(sender)
+            self.close(sender, rear_sender)
 
-    def close(self, sender):
+    def close(self, sender, rear_sender=None):
         """Only what this run created; the world gets its settings back."""
         if self.world is not None:
             try:
@@ -1032,8 +1116,9 @@ class Simulator:
                     pass
             if self.original_settings is not None:
                 self.world.apply_settings(self.original_settings)
-        if sender:
-            sender.close()
+        for open_sender in (sender, rear_sender):
+            if open_sender:
+                open_sender.close()
         self.depth_writer.close()
         for f in (self.ego_log, self.truth_log, self.control_log):
             f.close()

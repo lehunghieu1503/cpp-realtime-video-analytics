@@ -2,8 +2,8 @@
 # laptop. One file for both sides, so they cannot disagree:
 #
 #   the device (video_analytics --config) reads the top-level keys, `lane`,
-#   `calibration`, `simulation` and `sources`
-#   the laptop (simulation/) reads `calibration`, `lane`,
+#   `stall`, `calibration`, `simulation` and `sources`
+#   the laptop (simulation/) reads `calibration`, `rear_calibration`, `lane`,
 #   `carla`, `metric`, `control` and `routes`
 #
 # simulation/run.sh copies it to the device for every run, with
@@ -64,10 +64,24 @@ lane:
   width_min_m: 2.5
   width_max_m: 4.6
 
+# The parking stall model, on the rear camera: two classes (empty, occupied)
+# and the four corners of each stall, in pixels. Trained on images of the
+# car park the runs use (simulation/stall-dataset.py,
+# scripts/train-stall-model.py); not committed, like the other models.
+stall:
+  model: models/stall-town05.onnx
+  precision: fp16
+  confidence: 0.5
+
 sources:
   - id: carla-front
     gst: "tcpclientsrc host=SIM_HOST port=5000 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
     lane: true
+  # Only in the scenarios that park: simulation/run.sh leaves this source
+  # and the stall model out of the device's copy for the others
+  - id: carla-rear
+    gst: "tcpclientsrc host=SIM_HOST port=5001 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+    stall: true
 
 # ── Laptop side ──────────────────────────────────────────────────────────────
 
@@ -84,7 +98,7 @@ carla:
   # Quality 20 fits with more room but the detector then misses cars beyond
   # 60 m that it finds at 30.
   jpeg_quality: 30
-  sender: {bind: 0.0.0.0, port: 5000, max_queued: 2, client_max_buffers: 30}
+  sender: {bind: 0.0.0.0, port: 5000, rear_port: 5001, max_queued: 2, client_max_buffers: 30}
   callback_queue: 8
   live_cache_entries: 90   # 3 s of frames a late result can be joined with
   depth_artifact_frames: 1000  # lossless depth kept per run, about 1 MB each;
