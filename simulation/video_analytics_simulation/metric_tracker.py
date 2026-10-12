@@ -111,6 +111,9 @@ class _Track:
         self.accel = None
         self.accel_updates = 0
         self.velocity_prev = None
+        # Of the last measurement: what a prediction is still an obstacle as
+        self.cls = None
+        self.edge_world = None  # near edge, left and right end, world frame
 
 
 def _predict(state, P, dt, q):
@@ -176,12 +179,19 @@ class MetricTracker:
                 obs["position_world_m"] = [float(z[0]), float(z[1])]
                 if track_id is not None:
                     self._filter((key[0], key[1], track_id), z, m, sim_ns, obs)
+                    track = self.tracks[(key[0], key[1], track_id)]
+                    track.cls = obs["class"]
+                    track.edge_world = pose.to_parent(
+                        [[m["near_x_m"], y, self.rig.ground_z]
+                         for y in m["lateral_extent_m"]])
                     seen.add(track_id)
                     self._relative(obs, R, ego_velocity, yaw_rate)
             observations.append(obs)
 
         # Tracks not measured in this frame: predicted for a while, flagged,
-        # then retired. A prediction never shows that the road is clear.
+        # then retired. A prediction never shows that the road is clear: it
+        # keeps the class and the near edge of the last measurement, where
+        # that was, so that one missed detection does not open the road.
         for track_key in [k for k in self.tracks if k[:2] == key]:
             track = self.tracks[track_key]
             if track_key[2] in seen:
@@ -192,10 +202,14 @@ class MetricTracker:
                 continue
             state, P = _predict(track.state, track.P, gap, c["q_accel"])
             ego_xy = pose.from_parent([state[0], state[1], pose.z])[:2]
-            obs = {"class": None, "track_id": track_key[2], "valid": True,
+            edge = pose.from_parent(track.edge_world)
+            obs = {"class": track.cls, "track_id": track_key[2], "valid": True,
                    "reason": "", "predicted_only": True,
                    "measurement_sim_ns": track.last_ns,
                    "position_ego_m": [float(ego_xy[0]), float(ego_xy[1])],
+                   "near_x_m": float(edge[:, 0].min()),
+                   "lateral_extent_m": [float(edge[:, 1].min()),
+                                        float(edge[:, 1].max())],
                    "position_world_m": [float(state[0]), float(state[1])],
                    "kinematics_valid": False, "acceleration_valid": False,
                    "velocity_world_mps": None, "velocity_relative_mps": None,

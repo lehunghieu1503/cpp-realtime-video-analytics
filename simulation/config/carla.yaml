@@ -88,7 +88,8 @@ metric:
   max_gap_s: 0.5
 
 control:
-  target_speed_kmh: 9.0    # the limit of this stage is 10; the rest is margin
+  target_speed_kmh: 9.0    # of every scenario that does not set its own
+  speed_cap_kmh: 30.0      # no scenario drives faster, whatever it asks for
   # Budgets, version 2. Version 1 was 200 ms of simulation and 300 ms of wall
   # time, the targets of the plan. They cannot be met on the link used so
   # far: from a tick to its result takes 216 ms at the median, 235 ms at the
@@ -109,6 +110,13 @@ control:
   # plus the measured 0.1 s from brake command to first deceleration.
   brake: {a_min_mps2: 2.5, tau_s: 0.6, margin_m: 2.0}
   ttc_min_s: 2.0
+  # After a brake for an object, this many results in a row must show the
+  # path clear before the vehicle drives on: 1 s, longer than the 0.5 s
+  # (metric.max_gap_s) a track that is no longer measured is still predicted
+  clear_frames: 30
+  # An object beyond the lane that was seen is placed against the lane
+  # continued by up to this much, when the lane is nearly straight
+  extrapolate_m: 20.0
   corridor_margin_m: 0.3
   unknown_closing_mps: 2.0
   pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}

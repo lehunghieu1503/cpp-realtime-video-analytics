@@ -14,8 +14,8 @@ from test_metric_tracker import render  # noqa: E402
 from video_analytics_simulation import lane, protocol  # noqa: E402
 from video_analytics_simulation.calibration import Pose, Rig  # noqa: E402
 from video_analytics_simulation.controller import (  # noqa: E402
-    RUNNING, STOP_LATCHED, WAIT_DATA, ControlCore, lane_config_from, pure_pursuit,
-    stopping_distance)
+    HOLDING, LANE_LATCH_FRAMES, RUNNING, STOP_LATCHED, WAIT_DATA, ControlCore,
+    lane_config_from, pure_pursuit, stopping_distance)
 
 with open(os.path.join(os.path.dirname(__file__), "..", "config", "carla.yaml")) as f:
     CONFIG = yaml.safe_load(f)
@@ -275,12 +275,47 @@ class Stopping(unittest.TestCase):
         self.assertEqual(world.last["brake"], 1.0)
         self.assertEqual(world.arm(), "state_STOP_LATCHED")
 
-    def test_lane_lost(self):
+    def test_lane_lost_for_a_frame_holds_then_drives_on(self):
+        world = World().running()
+        world.frame()
+        good = world.lane
+        world.lane = lane_envelope(markings=(-1.75,))
+        world.frame()
+        self.assertEqual(world.core.state, HOLDING)
+        self.assertEqual(world.core.stop_reason, "lane:missing_boundary")
+        self.assertEqual(world.last["reason"], "lane:missing_boundary")
+        self.assertEqual((world.last["throttle"], world.last["brake"]), (0.0, 1.0))
+        self.assertTrue(world.core.debug["hold"])
+        world.lane = good
+        world.frame()  # the next valid lane: no second of waiting
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertGreater(world.last["throttle"], 0.0)
+        self.assertEqual(world.last["reason"], "")
+
+    def test_lane_lost_for_five_frames_latches(self):
+        world = World().running()
+        good = world.lane
+        world.lane = lane_envelope(markings=(-1.75,))
+        for _ in range(LANE_LATCH_FRAMES - 1):
+            world.frame()
+            self.assertEqual(world.core.state, HOLDING)
+        world.frame()
+        self.assertEqual(world.core.state, STOP_LATCHED)
+        self.assertEqual(world.core.stop_reason, "lane:missing_boundary")
+        world.lane = good
+        for _ in range(40):
+            world.frame()
+            self.assertEqual((world.last["throttle"], world.last["brake"]), (0.0, 1.0))
+        self.assertEqual(world.core.state, STOP_LATCHED)
+
+    def test_one_bad_lane_result_used_for_many_ticks_counts_once(self):
         world = World().running()
         world.lane = lane_envelope(markings=(-1.75,))
         world.frame()
-        self.assertEqual(world.core.stop_reason, "lane:missing_boundary")
-        self.assertEqual(world.last["brake"], 1.0)
+        for _ in range(LANE_LATCH_FRAMES + 2):  # no newer result arrives
+            world.frame(deliver=False)
+        self.assertEqual(world.core.state, HOLDING)
+        self.assertEqual(world.core.lane_bad, 1)
 
     def test_frames_that_cannot_be_joined(self):
         world = World().running()
@@ -328,6 +363,8 @@ class Obstacles(unittest.TestCase):
         world.frame()
         self.assertEqual(world.core.stop_reason, "obstacle:distance:car")
         self.assertEqual((world.last["throttle"], world.last["brake"]), (0.0, 1.0))
+        self.assertEqual(world.core.state, HOLDING)
+        self.assertTrue(world.core.debug["hold"])
         decision = world.core.debug["obstacles"][0]
         self.assertAlmostEqual(decision["gap_m"], 6.5 - VEHICLE["front_bumper_m"],
                                delta=0.1)
@@ -422,6 +459,168 @@ class Obstacles(unittest.TestCase):
         self.assertEqual(command["brake"], 1.0)
 
 
+class HoldAndResume(unittest.TestCase):
+    CLEAR = CONFIG["control"]["clear_frames"]
+
+    def held(self):
+        """Stopped behind a car that then drives away."""
+        world = World().running()
+        world.speed = 2.5
+        world.objects = [("car", 6.5, -0.9, 0.9, 1.5, 7)]
+        world.frame()
+        self.assertEqual(world.core.state, HOLDING)
+        world.speed = 0.0
+        return world
+
+    def test_obstacle_holds_and_the_vehicle_drives_on_when_it_is_gone(self):
+        world = self.held()
+        for _ in range(20):
+            world.frame()
+            self.assertEqual(world.last["reason"], "obstacle:distance:car")
+            self.assertEqual((world.last["throttle"], world.last["brake"]), (0.0, 1.0))
+            self.assertTrue(world.core.debug["hold"])
+        world.objects = []
+        # Predicted for max_gap_s, then clear_frames results really clear
+        ticks = 0
+        while world.core.state == HOLDING and ticks < 200:
+            world.frame()
+            ticks += 1
+        gap_ticks = int(CONFIG["metric"]["max_gap_s"] * 30)
+        self.assertGreaterEqual(ticks, gap_ticks + self.CLEAR)
+        self.assertLessEqual(ticks, gap_ticks + self.CLEAR + 2)
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertEqual(world.core.stop_reason, "")
+        self.assertGreater(world.last["throttle"], 0.0)
+        self.assertNotIn("hold", world.core.debug)
+
+    def test_an_obstacle_that_stays_is_not_crept_up_to(self):
+        # Standing still its gap is larger than the stopping distance from
+        # 0 m/s; it is not larger than the one from the cruising speed
+        world = self.held()
+        for _ in range(4 * self.CLEAR):
+            world.frame()
+        self.assertEqual(world.core.state, HOLDING)
+        self.assertEqual(world.last["brake"], 1.0)
+
+    def test_a_missed_detection_is_still_the_obstacle(self):
+        world = self.held()
+        for _ in range(3):
+            world.frame()
+        world.objects = []  # the detector misses it for a while
+        world.frame()
+        predicted = world.core.basis["metric"]["observations"]
+        # What the tracker really gives for a track it did not measure
+        self.assertEqual([(o["predicted_only"], o["class"]) for o in predicted],
+                         [(True, "car")])
+        self.assertAlmostEqual(predicted[0]["near_x_m"], 6.5, delta=0.1)
+        self.assertEqual(world.last["reason"], "obstacle:predicted:car")
+        self.assertEqual(world.last["brake"], 1.0)
+        for _ in range(8):
+            world.frame()
+            self.assertEqual(world.core.clear_count, 0)  # a prediction is not "clear"
+        self.assertEqual(world.core.state, HOLDING)
+        # Seen again before the prediction ran out: the wait starts over
+        world.objects = [("car", 6.5, -0.9, 0.9, 1.5, 7)]
+        world.frame()
+        self.assertEqual(world.last["reason"], "obstacle:distance:car")
+
+    def test_a_prediction_ends_with_max_gap(self):
+        world = self.held()
+        world.objects = []
+        gap_ticks = int(CONFIG["metric"]["max_gap_s"] * 30)
+        for _ in range(gap_ticks):
+            world.frame()
+            self.assertEqual(world.last["reason"], "obstacle:predicted:car")
+        world.frame()
+        world.frame()
+        self.assertEqual(world.core.basis["metric"]["observations"], [])
+        self.assertGreater(world.core.clear_count, 0)
+        self.assertEqual(world.last["brake"], 1.0)  # still waiting for clear_frames
+
+    def test_clear_frames_outlast_a_prediction(self):
+        self.assertGreater(self.CLEAR, CONFIG["metric"]["max_gap_s"] * 30)
+
+    def test_a_result_used_twice_is_one_clear_frame(self):
+        world = self.held()
+        world.objects = []
+        for _ in range(int(CONFIG["metric"]["max_gap_s"] * 30) + 2):
+            world.frame()
+        count = world.core.clear_count
+        self.assertGreater(count, 0)
+        for _ in range(5):
+            world.frame(deliver=False)
+        self.assertEqual(world.core.clear_count, count)
+
+    def test_stale_perception_still_latches_while_holding(self):
+        world = self.held()
+        for _ in range(STALE_TICKS + 1):
+            world.frame(deliver=False)
+        self.assertEqual(world.core.state, STOP_LATCHED)
+        self.assertEqual(world.core.stop_reason, "stale_perception")
+        world.objects = []
+        for _ in range(3 * self.CLEAR):
+            world.frame()
+        self.assertEqual(world.core.state, STOP_LATCHED)
+
+
+class BeyondTheLaneSeen(unittest.TestCase):
+    """An object farther than the lane was observed."""
+
+    def scene(self, curvature):
+        world = World()
+        world.lane = lane_envelope(curvature=curvature)
+        world.running()
+        world.speed = 13.0  # stopping distance 43.6 m: 40 m ahead is inside it
+        return world
+
+    def test_straight_lane_is_continued_and_the_next_lane_does_not_brake(self):
+        world = self.scene(0.0)
+        world.objects = [("car", 40.0, 2.6, 4.4, 1.5, 1)]
+        world.frame()
+        decision = world.core.debug["obstacles"][0]
+        self.assertGreater(40.0, world.core.debug["lane"]["x_max_m"])
+        self.assertEqual(decision["decision"], "outside_path")
+        self.assertEqual(world.core.state, RUNNING)
+        # In the ego lane at the same distance it does
+        world.objects = [("car", 40.0, -0.9, 0.9, 1.5, 2)]
+        world.frame()
+        self.assertEqual(world.last["reason"], "obstacle:distance:car")
+        # The lane reported is the lane seen, not the lane continued
+        self.assertLess(world.core.debug["lane"]["x_max_m"], 31.0)
+
+    def test_curved_lane_is_not_continued(self):
+        world = self.scene(0.002)
+        world.objects = [("car", 40.0, 2.6, 4.4, 1.5, 1)]
+        world.frame()
+        self.assertEqual(world.core.debug["obstacles"][0]["decision"],
+                         "brake_uncertain_path")
+        self.assertEqual(world.last["reason"], "obstacle:uncertain_path:car")
+
+    def test_beyond_the_continuation_the_old_rule_holds(self):
+        world = self.scene(0.0)
+        world.speed = 20.0  # stopping distance 94 m
+        world.objects = [("car", 60.0, 2.6, 4.4, 1.5, 1)]
+        world.frame()
+        self.assertEqual(world.core.debug["obstacles"][0]["decision"],
+                         "brake_uncertain_path")
+
+
+class SpeedLimit(unittest.TestCase):
+    def test_cap_and_shared_target(self):
+        self.assertEqual(CONFIG["control"]["target_speed_kmh"], 9.0)
+        self.assertEqual(CONFIG["control"]["speed_cap_kmh"], 30.0)
+        fast = copy.deepcopy(CONFIG)
+        fast["control"]["target_speed_kmh"] = 80.0
+        world = World(fast).running()
+        world.speed = 30.0 / 3.6 + 1.0  # above the cap, far below 80 km/h
+        world.frame()
+        self.assertEqual(world.last["throttle"], 0.0)
+        self.assertGreater(world.last["brake"], 0.0)
+        world.speed = 30.0 / 3.6 - 1.0
+        world.frame()
+        self.assertGreater(world.last["throttle"], 0.0)
+
+
 class DelayedSource(unittest.TestCase):
     """The result of a frame arrives after the vehicle has moved on."""
 
@@ -494,7 +693,8 @@ class DelayedSource(unittest.TestCase):
         world.core.basis["metric"]["observations"] = []
         command = world.core.step(ego)
         self.assertEqual(command["reason"], "lane:insufficient_support")
-        self.assertEqual(world.core.state, STOP_LATCHED)
+        self.assertEqual(command["brake"], 1.0)
+        self.assertEqual(world.core.state, HOLDING)
 
     def test_a_pose_that_is_not_usable(self):
         world = self.world

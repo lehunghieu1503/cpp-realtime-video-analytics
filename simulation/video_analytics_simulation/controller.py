@@ -12,7 +12,7 @@ Per tick, with the ego pose of that tick:
   lane and objects are moved from the pose they were seen from to the
   current pose, then
     steering   pure pursuit on the lane's centreline
-    speed      PI on the vehicle's own speed, at most 10 km/h
+    speed      PI on the vehicle's own speed, at most speed_cap_kmh
     brake      an object of a hazard class in the vehicle's path, closer than
                v * tau + v^2 / (2 * a_min) + margin
 
@@ -22,7 +22,15 @@ States:
                 still, all hazard classes delivered). Nothing arms by itself.
   RUNNING       drives. Any doubt stops it: no fresh perception, no lane,
                 no pose, an object in the path, an unreadable hazard.
-  STOP_LATCHED  brake, until the episode is restarted with a new run id.
+  HOLDING       brake, for a reason that can pass: an object in the path, or
+                a lane lost for a frame or two. Back to RUNNING once the lane
+                is valid again and, after an object, clear_frames results in a
+                row have shown the path clear as far as the vehicle would need
+                to stop from its cruising speed. A prediction of a track that
+                was not measured is not such a result.
+  STOP_LATCHED  brake, until the episode is restarted with a new run id:
+                perception too old, no usable pose, no lane ahead to steer on,
+                or the lane lost for five results in a row.
 
 This module never reads another actor's true state or the map: it does not
 import the simulator's API at all.
@@ -42,7 +50,10 @@ from . import protocol
 from .calibration import Pose, Rig
 from .metric_tracker import MetricTracker
 
-WAIT_DATA, RUNNING, STOP_LATCHED = "WAIT_DATA", "RUNNING", "STOP_LATCHED"
+WAIT_DATA, RUNNING, HOLDING, STOP_LATCHED = (
+    "WAIT_DATA", "RUNNING", "HOLDING", "STOP_LATCHED")
+# Results in a row without a valid lane before the stop is final
+LANE_LATCH_FRAMES = 5
 
 
 def lane_config_from(section):
@@ -105,6 +116,12 @@ class ControlCore:
         self.rejected = {}
         self.last_step_ns = None
         self.debug = {}
+        self.clear_frames = int(self.c.get("clear_frames", 30))
+        self.clear_needed = 0   # clear results still asked for before driving on
+        self.clear_count = 0
+        self.clear_ns = None    # the last result counted as clear
+        self.lane_bad = 0       # results in a row without a valid lane
+        self.lane_bad_ns = None
 
     # ── Inputs ───────────────────────────────────────────────────────────────
 
@@ -225,21 +242,28 @@ class ControlCore:
             "reason": reason,
         }
 
-    def obstacles_now(self, pose_now, lane_now, age_s, speed):
+    def obstacles_now(self, pose_now, lane_now, age_s, envelope):
         """Every object of the basis frame in the current ego frame, with the
-        decision taken on it. Returns (brake reason or "", list for the log)."""
+        decision taken on it. envelope is the gap an object in the path must
+        keep. Returns (brake reason or "", whether a track that was only
+        predicted is in the path, list for the log)."""
         capture = self.basis["pose"]
         half = self.vehicle["width_m"] / 2.0 + self.c.get("corridor_margin_m", 0.3)
         bumper = self.vehicle["front_bumper_m"]
-        envelope = stopping_distance(speed, self.c["brake"])
         centre = lane_now["centerline"]
+        extrapolate = float(self.c.get("extrapolate_m", 20.0))
         decisions = []
         brake_reason = ""
+        predicted_in_path = False
 
         def in_path(x, left, right):
             """True / False / None (the lane was not observed that far)."""
             if x > centre["x_max_m"]:
-                return None
+                # A lane that is nearly straight is continued a little, for
+                # this decision only: the lane itself is reported as seen
+                if x > centre["x_max_m"] + extrapolate \
+                        or abs(centre["coefficients"][0]) >= 1e-3:
+                    return None
             if x >= centre["x_min_m"]:
                 y = lane_geometry.evaluate(centre["coefficients"], x)
                 low, high = y - half, y + half
@@ -251,9 +275,10 @@ class ControlCore:
             return right >= low and left <= high
 
         for obs in self.basis["metric"]["observations"]:
-            if obs.get("predicted_only"):
-                continue
+            predicted = bool(obs.get("predicted_only"))
             record = {"class": obs["class"], "track_id": obs.get("track_id")}
+            if predicted:
+                record["predicted"] = True
             hazard = obs["class"] in self.hazards
             if obs["valid"]:
                 x, (left, right) = obs["near_x_m"], obs["lateral_extent_m"]
@@ -263,8 +288,12 @@ class ControlCore:
                 if obs.get("velocity_world_mps") is not None:
                     world[:, :2] += np.array(obs["velocity_world_mps"]) * age_s
                 else:
-                    # Velocity not known yet: it may be coming closer
-                    moved = self.c.get("unknown_closing_mps", 2.0) * age_s
+                    # Velocity not known (yet, or the track was not measured
+                    # in this frame): it may be coming closer since it was
+                    # last measured
+                    since = age_s + (self.basis["sim_ns"]
+                                     - obs["measurement_sim_ns"]) * 1e-9
+                    moved = self.c.get("unknown_closing_mps", 2.0) * since
                 now = pose_now.from_parent(world)
                 near = float(now[:, 0].min()) - moved
                 left, right = float(now[:, 1].min()), float(now[:, 1].max())
@@ -290,6 +319,10 @@ class ControlCore:
                         decision = "in_path_far"
                 else:
                     decision = "outside_path"
+                if predicted and hazard and path is not False:
+                    predicted_in_path = True
+                    if decision.startswith("brake"):
+                        decision = "brake_predicted"
             else:
                 # No usable depth in the box. Where its bottom edge meets the
                 # road says whether it could be in the way.
@@ -319,7 +352,7 @@ class ControlCore:
             decisions.append(record)
             if decision.startswith("brake") and not brake_reason:
                 brake_reason = "obstacle:%s:%s" % (decision[6:], obs["class"])
-        return brake_reason, decisions
+        return brake_reason, predicted_in_path, decisions
 
     def step(self, ego_now):
         """The command for the tick that follows this ego state."""
@@ -329,7 +362,7 @@ class ControlCore:
             dt = max(1e-3, (ego_now["sim_ns"] - self.last_step_ns) * 1e-9)
         self.last_step_ns = ego_now["sim_ns"]
 
-        if self.state != RUNNING:
+        if self.state in (WAIT_DATA, STOP_LATCHED):
             reason = self.stop_reason if self.state == STOP_LATCHED else "wait_data"
             self.steer = 0.0
             return self.command(ego_now, 0.0, 1.0, 0.0, reason)
@@ -338,6 +371,16 @@ class ControlCore:
             self.latch(reason)
             self.debug["state"] = self.state
             self.steer = 0.0
+            return self.command(ego_now, 0.0, 1.0, 0.0, reason)
+
+        def hold(reason):
+            """Brake for a reason that can pass; the reason stays the one
+            that is still true."""
+            self.state = HOLDING
+            self.stop_reason = reason
+            self.debug.update(state=HOLDING, hold=True)
+            self.steer = 0.0
+            self.integral = 0.0
             return self.command(ego_now, 0.0, 1.0, 0.0, reason)
 
         age_ns = ego_now["sim_ns"] - self.basis["sim_ns"]
@@ -356,19 +399,52 @@ class ControlCore:
         lane_now = lane_geometry.rebase_lane(self.basis["lane"], self.basis["pose"],
                                              pose_now, self.rig.ground_z,
                                              self.lane_config)
+        basis_ns = self.basis["sim_ns"]
         if not lane_now["valid"]:
-            return stop("lane:" + (self.basis["lane"].get("reason") or lane_now["reason"]))
+            reason = "lane:" + (self.basis["lane"].get("reason") or lane_now["reason"])
+            # Counted per result, not per tick: one result is used for
+            # several ticks when the next one is late
+            if basis_ns != self.lane_bad_ns:
+                self.lane_bad += 1
+                self.lane_bad_ns = basis_ns
+            self.clear_count = 0
+            if self.lane_bad >= LANE_LATCH_FRAMES:
+                return stop(reason)
+            return hold(reason)
+        self.lane_bad = 0
         centre = lane_now["centerline"]
         self.debug["lane"] = {"lateral_error_m": lane_now["lateral_error_m"],
                               "heading_rad": lane_now["heading_rad"],
                               "x_min_m": centre["x_min_m"], "x_max_m": centre["x_max_m"]}
 
-        brake_reason, decisions = self.obstacles_now(pose_now, lane_now, age_ns * 1e-9,
-                                                     speed)
+        target_speed = min(self.c["target_speed_kmh"],
+                           self.c.get("speed_cap_kmh", 30.0)) / 3.6
+        # Standing after a brake, the path must be clear as far as the vehicle
+        # would need from the speed it goes back to: otherwise it would creep
+        # up to an obstacle that has not moved
+        envelope = stopping_distance(
+            max(speed, target_speed) if self.state == HOLDING else speed,
+            self.c["brake"])
+        brake_reason, predicted_in_path, decisions = self.obstacles_now(
+            pose_now, lane_now, age_ns * 1e-9, envelope)
         self.debug["obstacles"] = decisions
-        self.debug["stopping_distance_m"] = stopping_distance(speed, self.c["brake"])
+        self.debug["stopping_distance_m"] = envelope
         if brake_reason:
-            return stop(brake_reason)
+            self.clear_count = 0
+            self.clear_needed = self.clear_frames
+            return hold(brake_reason)
+        if self.state == HOLDING:
+            if predicted_in_path:
+                self.clear_count = 0
+            elif basis_ns != self.clear_ns:
+                self.clear_count += 1
+            self.clear_ns = basis_ns
+            if self.clear_count < self.clear_needed:
+                return hold(self.stop_reason)
+            self.state = RUNNING
+            self.stop_reason = ""
+            self.clear_needed = self.clear_count = 0
+            self.debug["state"] = RUNNING
 
         # Steering: a point on the centreline, inside what was observed
         pursuit = self.c["pure_pursuit"]
@@ -387,11 +463,10 @@ class ControlCore:
         self.debug["target"] = [target_x, target_y]
 
         # Speed: PI on the vehicle's own speed
-        target_speed = min(self.c["target_speed_kmh"], 10.0) / 3.6
         error = target_speed - speed
         gains = self.c["speed"]
         # Only near the target: while the vehicle is still getting up to
-        # speed the integral would wind up and carry it past 10 km/h
+        # speed the integral would wind up and carry it past the target
         if abs(error) < gains.get("integral_band_mps", 0.5):
             self.integral = max(-2.0, min(2.0, self.integral + error * dt))
         throttle = gains["kp"] * error + gains["ki"] * self.integral

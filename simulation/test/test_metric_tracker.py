@@ -236,13 +236,23 @@ class Tracking(unittest.TestCase):
         pose = Pose(0, 0, 0)
         depth, boxes = render([(21.5, -0.9, 0.9, 1.5)])
         for i in range(5):
-            tracker.update(perception(i * DT_NS, boxes, [3]), depth,
-                           ego_state(i * DT_NS, pose))
+            measured = tracker.update(perception(i * DT_NS, boxes, [3]), depth,
+                                      ego_state(i * DT_NS, pose))["observations"][0]
         o = tracker.update(perception(5 * DT_NS, [], []), depth,
                            ego_state(5 * DT_NS, pose))["observations"]
         self.assertEqual(len(o), 1)
         self.assertTrue(o[0]["predicted_only"])
         self.assertEqual(o[0]["measurement_sim_ns"], 4 * DT_NS)
+        # It is still the object last measured, where it was measured
+        self.assertEqual(o[0]["class"], "car")
+        self.assertAlmostEqual(o[0]["near_x_m"], 21.5, delta=0.1)
+        np.testing.assert_allclose(o[0]["lateral_extent_m"],
+                                   measured["lateral_extent_m"], atol=1e-9)
+        # ... in the frame of the vehicle now, which has moved 2 m forward
+        moved = Pose(2.0, 0, 0)
+        o = tracker.update(perception(6 * DT_NS, [], []), depth,
+                           ego_state(6 * DT_NS, moved))["observations"]
+        self.assertAlmostEqual(o[0]["near_x_m"], 19.5, delta=0.1)
         late = 5 * DT_NS + int(1e9)
         o = tracker.update(perception(late, [], []), depth,
                            ego_state(late, pose))["observations"]
