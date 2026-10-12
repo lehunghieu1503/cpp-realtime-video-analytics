@@ -20,8 +20,10 @@
 #                      vehicle stays braked for the whole run.
 #   --ticks N          run N ticks instead of the scenario's number
 #   --gui              show the CARLA window, with its camera behind the
-#                      vehicle. An off-screen server left by an earlier run
-#                      is stopped and started again with a window.
+#                      vehicle, and a second window with the vehicle's own
+#                      cameras and what the device finds in them: boxes, lane
+#                      lines, parking stalls. An off-screen server left by an
+#                      earlier run is stopped and started again with a window.
 #   --config FILE      default simulation/config/carla.yaml
 #   --scenarios FILE   default simulation/config/carla-scenarios.yaml
 #   --run-dir DIR      default .cache/carla/<run id>; must not exist
@@ -52,17 +54,17 @@ while [ $# -gt 0 ]; do
     --remote-dir) REMOTE_DIR="$2"; shift 2 ;;
     --sim-host) SIM_HOST="$2"; shift 2 ;;
     --arm) ARM=--arm; shift ;;
-    --gui) GUI=--follow OFFSCREEN=""; shift ;;
+    --gui) GUI="--follow --view" OFFSCREEN=""; shift ;;
     --ticks) TICKS="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -205,7 +207,7 @@ if [ "$DEVICE" = none ]; then
 elif [ "$DEVICE" = local ]; then
   [ -z "$LOCAL_BACKEND" ] || sed -i "s/^backend: .*/backend: $LOCAL_BACKEND/; s/^  backend: .*/  backend: $LOCAL_BACKEND/" "$RUN_DIR/device.yaml"
   start_local_device
-  echo "   boxes and lane lines: http://127.0.0.1:9011"
+  [ -n "$GUI" ] || echo "   boxes and lane lines: http://127.0.0.1:9011 (or run with --gui)"
 else
   MODELS=$(sed -n 's/^ *model: *//p' "$RUN_DIR/device.yaml")
   for model in $MODELS; do

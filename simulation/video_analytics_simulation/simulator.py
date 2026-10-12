@@ -47,7 +47,7 @@ import numpy as np
 import yaml
 
 from . import protocol
-from .calibration import Rig, decode_depth
+from .calibration import Pose, Rig, decode_depth
 from .parking import Stall
 
 SOURCE = "carla-front"
@@ -327,6 +327,7 @@ class Simulator:
         self.rear_rig = Rig.from_config(self.config["rear_calibration"]) \
             if self.scenario.get("park") else None
         self.rear_queue = queue.Queue(maxsize=int(self.c.get("callback_queue", 8)))
+        self.viewer = None
         self.dt = 1.0 / float(self.c.get("fps", 30))
         # A scenario may lower it: a scene with more detail makes larger frames
         self.jpeg_quality = int(self.scenario.get("jpeg_quality",
@@ -405,6 +406,13 @@ class Simulator:
         self.node.create_subscription(
             String, names["arm"], lambda m: self.pending_arm.append(m.data), 10)
         self.node.create_subscription(String, names["status"], self.on_status, 10)
+        if self.viewer:
+            # Only to draw them: the simulator makes nothing of a result
+            for name, source in (("front", SOURCE), ("rear", REAR_SOURCE)):
+                if name in self.viewer.rigs:
+                    self.node.create_subscription(
+                        String, protocol.topics(self.run_id, source)["perception"],
+                        lambda m, name=name: self.viewer.result(name, json.loads(m.data)), 20)
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
 
@@ -417,6 +425,8 @@ class Simulator:
             return
         self.controller_ready = status.get("ready") is True
         self.controller_frames = int(status.get("perception_frames", 0))
+        if self.viewer:
+            self.viewer.status(status)
 
     def spin(self):
         # Everything that is waiting, without blocking the tick
@@ -913,6 +923,12 @@ class Simulator:
         images = self.collect_images(frame)
         rear = self.collect_rear(frame) if self.rear_rig else None
         self.stats["wait_images_ms"] += (time.monotonic() - wait) * 1e3
+        if self.viewer:
+            if images is not None:
+                self.viewer.frame("front", images[2], images[0])
+            if rear is not None:
+                self.viewer.frame("rear", sim_ns, rear)
+            self.viewer.show(tick, ego["speed_mps"], applied)
         self.publish_state(sim_ns, ego)
         if images is None:
             if frame in self.ledger.registered:
@@ -997,6 +1013,13 @@ class Simulator:
         try:
             self.connect()
             self.spawn()
+            if self.args.view:
+                from .viewer import Viewer
+                rigs = {"front": self.rig}
+                if self.rear_rig:
+                    rigs["rear"] = self.rear_rig
+                self.viewer = Viewer(rigs, lambda ns: Pose.from_dict(
+                    self.ego_states.get(ns)["pose"]) if ns in self.ego_states else None)
             self.start_ros()
             s = self.c.get("sender", {})
             sender = JpegSender(s.get("bind", "0.0.0.0"), int(s.get("port", 5000)),
@@ -1047,6 +1070,8 @@ class Simulator:
                 self.world.tick()
                 while not self.image_queue.empty():
                     self.image_queue.get_nowait()
+                if self.viewer:
+                    self.viewer.pump()
                 time.sleep(0.1)
             for frame in sorted(self.ledger.registered):
                 self.ledger.update(frame, "dropped", reason="waiting_for_the_device")
@@ -1119,6 +1144,8 @@ class Simulator:
         for open_sender in (sender, rear_sender):
             if open_sender:
                 open_sender.close()
+        if self.viewer:
+            self.viewer.close()
         self.depth_writer.close()
         for f in (self.ego_log, self.truth_log, self.control_log):
             f.close()
@@ -1147,6 +1174,9 @@ def main():
                         help="seconds to wait, ticking, for the first result")
     parser.add_argument("--follow", action="store_true",
                         help="keep the server's spectator camera behind the ego vehicle")
+    parser.add_argument("--view", action="store_true",
+                        help="a window with the run's cameras and what the device "
+                             "found in them")
     parser.add_argument("--no-pacing", action="store_true",
                         help="tick as fast as possible instead of in real time")
     args = parser.parse_args()
