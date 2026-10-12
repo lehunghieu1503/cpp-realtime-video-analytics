@@ -33,7 +33,10 @@ calibration:
   width: 1280
   height: 720
   fov_deg: 52.0
-  camera: {x: 0.6, y: 0.0, z: 1.5, pitch_deg: -2.0}
+  # Pitched down so that the road is in the image from about 3 m ahead of the
+  # camera: the lower edge looks 25 degrees below the horizon, the horizon is
+  # at row 129
+  camera: {x: 0.6, y: 0.0, z: 1.5, pitch_deg: -10.0}
   ground_z: 0.0
   distortion: [0, 0, 0, 0, 0]
 
@@ -41,7 +44,7 @@ lane:
   model: models/ufld-tusimple18.onnx
   backend: tensorrt-native
   precision: fp16
-  roi_x_min_m: 5.0
+  roi_x_min_m: 3.0
   roi_x_max_m: 30.0
   reference_x_m: 8.0
   min_points: 5
