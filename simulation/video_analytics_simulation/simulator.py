@@ -472,6 +472,10 @@ class Simulator:
         settings.max_substep_delta_time = 0.01
         settings.max_substeps = 10
         self.world.apply_settings(settings)
+        # What was destroyed above is gone only after a tick: a world left
+        # waiting for ticks by a killed run still had its vehicle standing
+        # where this run's is spawned
+        self.world.tick()
         self.world.set_weather(getattr(carla.WeatherParameters,
                                        self.scenario.get("weather", "ClearNoon")))
         self.map = self.world.get_map()
