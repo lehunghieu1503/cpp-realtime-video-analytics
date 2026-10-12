@@ -36,6 +36,8 @@
 #
 # Every run gets a new run id and its own directory. The device is restarted
 # with that id, so nothing of an earlier run can be joined with this one.
+# Exit code: that of simulation/evaluate.py for the run (0 pass, 1 fail,
+# 2 a file is missing), or 1 when the run could not be made.
 # On exit the script stops the processes it started and, on a remote device,
 # the container it started; nothing else is touched.
 set -euo pipefail
@@ -56,11 +58,11 @@ while [ $# -gt 0 ]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -211,5 +213,9 @@ while kill -0 "$SIMULATOR" 2>/dev/null; do
 done
 wait "$SIMULATOR" || echo "The simulator stopped with an error" >&2
 echo "== Evaluating"
-simulation/evaluate.py "$RUN_DIR" || true
+# The script's exit code is the evaluation's: 0 every expectation holds, 1
+# one fails, 2 a file of the run is missing
+CODE=0
+simulation/evaluate.py "$RUN_DIR" || CODE=$?
 echo "Run directory: $RUN_DIR"
+exit "$CODE"
