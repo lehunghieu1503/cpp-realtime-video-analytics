@@ -34,10 +34,16 @@ States:
                 or the lane lost for five results in a row.
 
 What a scenario asks for comes from the run's manifest, never from the
-device: its own target speed, follow_gap_m, one lane change
-(lane_change: {at_tick, side}) and that it parks (park: true, or the park
-settings it changes). Without these keys the vehicle keeps the shared target
-speed and its lane.
+device: its own target speed, follow_gap_m, that it may overtake (overtake:
+true, or the settings it changes) and that it parks (park: true, likewise).
+Without these keys the vehicle keeps the shared target speed and its lane.
+A scenario says what the vehicle may do, never when or where: no tick, no
+side, no place.
+
+Overtaking: after after_s behind a vehicle that keeps it under its target
+speed, the vehicle moves to the next lane, on the first side of `sides` on
+which the image shows that lane's far marking and no road user is measured
+in it. Once.
 
 A park (parking.py has the geometry, stalls.py the stalls), backwards into a
 stall nobody told it about. The stalls are those the device's stall model
@@ -132,8 +138,12 @@ class ControlCore:
         self.target_speed_kmh = float(scenario.get("target_speed_kmh",
                                                    self.c["target_speed_kmh"]))
         self.follow_gap_m = scenario.get("follow_gap_m")
-        change = scenario.get("lane_change")
-        self.lane_change = dict(change, state="pending") if change else None
+        overtake = scenario.get("overtake")
+        self.lane_change = dict(self.c.get("overtake", {}),
+                                **(overtake if isinstance(overtake, dict) else {}),
+                                state="pending") if overtake else None
+        self.followed_s = 0.0    # behind a vehicle that keeps it under its target speed
+        self.unfollowed_s = 0.0  # ... and since it last was
         park = scenario.get("park")
         self.parking = bool(park)
         # A scenario may change park settings; it never names a stall
@@ -612,8 +622,7 @@ class ControlCore:
         if change:
             self.debug["lane_change"] = change["state"]
             if change["state"] == "pending":
-                self.start_lane_change(ego_now.get("tick"), lane_now, pose_now,
-                                       decisions, speed)
+                self.start_lane_change(lane_now, pose_now, decisions, speed)
         wanted = self.c["steer"].get("gain", 1.0) * pure_pursuit(
             target_x, target_y, self.vehicle["wheelbase_m"],
             -self.vehicle["wheelbase_m"] / 2.0,
@@ -625,7 +634,17 @@ class ControlCore:
 
         # Speed: PI on the vehicle's own speed
         if self.follow_gap_m:
+            free = target_speed
             target_speed = self.follow(target_speed, speed, envelope, decisions)
+            # How long it has been held back; a second without a vehicle
+            # ahead (a missed detection is shorter) starts the count again
+            if target_speed < free - 0.5:
+                self.followed_s += dt
+                self.unfollowed_s = 0.0
+            else:
+                self.unfollowed_s += dt
+                if self.unfollowed_s > 1.0:
+                    self.followed_s = 0.0
         if change and change["state"] == "active":
             # Between two lanes: not the moment to speed up
             target_speed = min(target_speed, max(change["speed_mps"], 2.0))
@@ -823,37 +842,44 @@ class ControlCore:
         self.lane_change.update(state="skipped", reason=reason)
         self.debug.update(lane_change="skipped", lane_change_skipped=reason)
 
-    def start_lane_change(self, tick, lane_now, pose_now, decisions, speed):
-        """The scenario's lane change begins at its tick, and only when the
-        image shows the marking beyond the ego lane's own on that side: the
-        width of the next lane is measured, never assumed. Without it, or
-        with a road user in that lane, the vehicle stays where it is."""
+    def start_lane_change(self, lane_now, pose_now, decisions, speed):
+        """Behind a slower vehicle for after_s, the vehicle moves over: to
+        the first side on which the image shows the marking beyond the ego
+        lane's own (the width of the next lane is measured, never assumed)
+        and no road user is measured in that lane. With no such side for
+        window_ticks it stays where it is."""
         change = self.lane_change
-        if not isinstance(tick, int) or tick < change["at_tick"]:
+        if self.followed_s < change.get("after_s", 10.0):
             return
-        name = "left" if change["side"] == "left" else "right"
-        side = -1.0 if name == "left" else 1.0
-        y_inner = self.marking_at(lane_now[name])
-        widths = [side * (self.marking_at(m) - y_inner)
-                  for _, m in self.markings_now(pose_now)]
-        widths = [w for w in widths if self.lane_config["width_min_m"] <= w
-                  <= self.lane_config["width_max_m"]]
-        reason = "" if widths else "no_marking"
-        if widths:
+        change["tries"] = change.get("tries", 0) + 1
+        reasons = []
+        for name in change.get("sides", ["left", "right"]):
+            side = -1.0 if name == "left" else 1.0
+            y_inner = self.marking_at(lane_now[name])
+            widths = [side * (self.marking_at(m) - y_inner)
+                      for _, m in self.markings_now(pose_now)]
+            widths = [w for w in widths if self.lane_config["width_min_m"] <= w
+                      <= self.lane_config["width_max_m"]]
+            if not widths:
+                reasons.append("no_marking")
+                continue
             low, high = sorted((y_inner, y_inner + side * min(widths)))
             if any(d["class"] in self.hazards and "left_m" in d
                    and d["right_m"] >= low and d["left_m"] <= high
                    and d["gap_m"] < change.get("clear_m", 40.0) for d in decisions):
-                reason = "lane_occupied"
-        if not reason:
+                reasons.append("lane_occupied")
+                continue
             # The marking to cross, as the device fitted it in this result
-            change.update(state="active", width_m=min(widths), shift_m=0.0, ticks=0,
-                          speed_mps=speed, marking=self.basis["lane"][name],
+            change.update(state="active", side=name, width_m=min(widths), shift_m=0.0,
+                          ticks=0, speed_mps=speed, marking=self.basis["lane"][name],
                           marking_pose=self.basis["pose"],
                           marking_ns=self.basis["sim_ns"])
             self.debug["lane_change"] = "active"
-        elif tick >= change["at_tick"] + change.get("window_ticks", 30):
-            self.give_up_lane_change(reason)
+            return
+        if change["tries"] > change.get("window_ticks", 30):
+            # A lane that is there but taken says more than one that is not
+            self.give_up_lane_change("lane_occupied" if "lane_occupied" in reasons
+                                     else reasons[0])
 
     def lookahead_limit(self, speed):
         """A path must begin no farther ahead than this to be steered on."""

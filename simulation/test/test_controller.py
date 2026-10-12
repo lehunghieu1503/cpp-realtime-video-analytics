@@ -713,13 +713,98 @@ class Following(unittest.TestCase):
         self.assertEqual(world.last["brake"], 0.0)
 
 
+class Overtaking(unittest.TestCase):
+    """When the vehicle moves over is its own to see: after after_s behind a
+    vehicle that keeps it under its target speed."""
+    CRUISE = 30.0 / 3.6
+    LINES = (-5.25, -1.75, 1.75)
+
+    def behind(self, scenario=None, lead_speed=5.0, markings=LINES, frames=45, gone=()):
+        """Ego wants 30 km/h and is 25 m behind a car driving at lead_speed,
+        at that car's speed. Returns the lane change's state after every
+        frame."""
+        scenario = {"target_speed_kmh": 30.0, "follow_gap_m": 30.0,
+                    "overtake": {"after_s": 0.5}} if scenario is None else scenario
+        world = World(scenario=scenario)
+        world.lane = lane_envelope(markings=markings)
+        world.running()
+        world.speed = lead_speed
+        states = []
+        for i in range(frames):
+            world.pose = Pose(lead_speed * i / 30.0, 0, 0)
+            world.objects = [] if i in gone else [("car", 25.5, -0.9, 0.9, 1.5, 4)]
+            world.frame()
+            states.append(world.core.debug.get("lane_change"))
+        self.world = world
+        return states
+
+    def test_half_a_second_behind_a_slower_car_and_it_moves_to_the_left(self):
+        states = self.behind()
+        # The car's speed is known a few results in; 15 ticks after that
+        first = states.index("active")
+        self.assertTrue(15 <= first <= 22, first)
+        self.assertEqual(set(states[:first]), {"pending"})
+        self.assertEqual(self.world.core.lane_change["side"], "left")
+        self.assertAlmostEqual(self.world.core.lane_change["width_m"], 3.5, delta=0.1)
+
+    def test_no_lane_on_the_left_and_it_takes_the_one_on_the_right(self):
+        states = self.behind(markings=(-1.75, 1.75, 5.25))
+        self.assertIn("active", states)
+        self.assertEqual(self.world.core.lane_change["side"], "right")
+
+    def test_only_the_sides_it_was_given(self):
+        scenario = {"target_speed_kmh": 30.0, "follow_gap_m": 30.0,
+                    "overtake": {"after_s": 0.5, "sides": ["left"], "window_ticks": 10}}
+        states = self.behind(scenario, markings=(-1.75, 1.75, 5.25))
+        self.assertEqual(states[-1], "skipped")
+        self.assertEqual(self.world.core.lane_change["reason"], "no_marking")
+
+    def test_a_car_as_fast_as_it_wants_to_go_is_not_overtaken(self):
+        self.assertEqual(set(self.behind(lead_speed=self.CRUISE)), {"pending"})
+
+    def test_nobody_ahead_and_it_keeps_its_lane(self):
+        self.assertEqual(set(self.behind(gone=range(45))), {"pending"})
+
+    def test_the_count_starts_again_after_a_second_with_nobody_ahead(self):
+        scenario = {"target_speed_kmh": 30.0, "follow_gap_m": 30.0,
+                    "overtake": {"after_s": 1.5}}
+        # Behind it for a second, a second and a half of clear road, behind
+        # it again for a second: never 1.5 s at a stretch
+        states = self.behind(scenario, frames=110, gone=range(32, 78))
+        self.assertEqual(set(states), {"pending"})
+        # A result or two without the car is still behind the car
+        states = self.behind(scenario, frames=70, gone=(20, 21, 40))
+        self.assertIn("active", states)
+
+    def test_without_the_scenario_saying_so_it_never_overtakes(self):
+        states = self.behind({"target_speed_kmh": 30.0, "follow_gap_m": 30.0})
+        self.assertEqual(set(states), {None})
+        self.assertIsNone(self.world.core.lane_change)
+
+    def test_the_scenario_names_no_tick_and_no_side(self):
+        with open(os.path.join(os.path.dirname(__file__), "..", "config",
+                               "carla-scenarios.yaml")) as f:
+            scenarios = yaml.safe_load(f)["scenarios"]
+        self.assertIs(scenarios["show_drive"]["overtake"], True)
+        self.assertFalse(any("lane_change" in s for s in scenarios.values()))
+        core = World(scenario=scenarios["show_drive"]).core
+        self.assertEqual(core.lane_change["sides"], ["left", "right"])
+        self.assertEqual(core.lane_change["after_s"], CONFIG["control"]["overtake"]["after_s"])
+
+
 class LaneChange(unittest.TestCase):
-    """lane_change: {at_tick, side} of a scenario. Lane markings 3.5 m apart;
+    """The lane change itself, once the vehicle has been behind a slower one
+    for long enough: here the test says it has, in the controller's place
+    (class Overtaking has the vehicle ahead). Lane markings 3.5 m apart;
     `offset` moves them all to the right, as when the vehicle moves left."""
     LINES = (-5.25, -1.75, 1.75)
 
     def world(self, markings, at_tick=6, side="left", **more):
-        world = World(scenario={"lane_change": dict(at_tick=at_tick, side=side, **more)})
+        # Armed after tick 2; held back from its first tick on: at at_tick
+        # that has lasted (at_tick - 3) ticks
+        world = World(scenario={"follow_gap_m": 30.0, "overtake": dict(
+            after_s=(at_tick - 3.5) / 30.0, sides=[side], **more)})
+        world.core.follow = lambda target, *rest: target - 1.0
         world.lane = lane_envelope(markings=markings)
         return world.running()
 

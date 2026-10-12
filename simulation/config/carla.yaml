@@ -147,6 +147,10 @@ control:
   pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
   steer: {gain: 1.0, rate_per_s: 2.0}
   speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
+  # Overtaking (scenarios with `overtake`): after this long behind a vehicle
+  # that keeps it under its target speed, it moves to the next lane, on the
+  # first of these sides that the image shows and that is free
+  overtake: {after_s: 10.0, sides: [left, right]}
   # One park, backwards into a stall the rear camera finds (scenarios with
   # `park`). Nothing here says where a stall is.
   park:
