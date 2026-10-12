@@ -331,7 +331,11 @@ class ControlCore:
                 xy, ok = self.rig.uv_to_ground(box["x"] + box["w"] / 2.0,
                                                min(bottom, self.rig.height - 1))
                 record["measurement"] = obs["reason"]
-                if bottom >= self.rig.height - 2:
+                if obs["reason"] == "only_road":
+                    # The depth was read and nothing in the box stands above
+                    # the road: a shadow or a marking taken for a road user
+                    decision = "flat_on_road"
+                elif bottom >= self.rig.height - 2:
                     decision = "brake_unreadable_near"
                 elif not ok:
                     decision = "unreadable_far"

@@ -458,6 +458,25 @@ class Obstacles(unittest.TestCase):
         self.assertEqual(command["reason"], "obstacle:unreadable:person")
         self.assertEqual(command["brake"], 1.0)
 
+    def test_a_box_with_nothing_above_the_road_is_not_braked_for(self):
+        # A shadow in the corner of the image taken for a person: the depth
+        # inside the box is the road's
+        world = World().running()
+        world.speed = 2.7
+        ego = world.ego()
+        world.core.on_ego(ego)
+        envelope, depth = world.envelope()
+        height = RIG.height
+        envelope["detections"] = [{"class": "person", "confidence": 0.4, "bbox": {
+            "x": 0.0, "y": height - 110.0, "w": 100.0, "h": 109.0}}]
+        world.core.on_depth(world.tick * TICK, depth)
+        self.assertEqual(world.core.on_perception(envelope, ego["sim_ns"])[1], "")
+        command = world.core.step(ego)
+        self.assertEqual(world.core.debug["obstacles"][0]["measurement"], "only_road")
+        self.assertEqual(world.core.debug["obstacles"][0]["decision"], "flat_on_road")
+        self.assertEqual(command["reason"], "")
+        self.assertEqual(world.core.state, RUNNING)
+
 
 class HoldAndResume(unittest.TestCase):
     CLEAR = CONFIG["control"]["clear_frames"]
