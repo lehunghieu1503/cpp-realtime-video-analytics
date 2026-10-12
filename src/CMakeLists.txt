@@ -42,6 +42,7 @@ add_library(va_core STATIC
     output/mqtt-publisher.cpp
     inference/inference-engine.cpp
     inference/lane-engine.cpp
+    inference/stall-engine.cpp
     inference/pre-process.cpp
     inference/post-process.cpp
     inference/backends/backend-factory.cpp

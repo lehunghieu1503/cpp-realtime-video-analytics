@@ -40,6 +40,7 @@ bool readSource(const YAML::Node& node, size_t index, SourceConfig& out) {
   read(node["height"], out.capture.height);
   read(node["fps"], out.capture.fps);
   read(node["lane"], out.lane);
+  read(node["stall"], out.stall);
 
   for (const auto& zoneNode : node["zones"]) {
     ZoneConfig zone;
@@ -131,6 +132,11 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     read(lane["max_residual_m"], config.lane.geometry.maxResidual);
     read(lane["width_min_m"], config.lane.geometry.widthMin);
     read(lane["width_max_m"], config.lane.geometry.widthMax);
+    const YAML::Node stall = root["stall"];
+    read(stall["model"], config.stall.model);
+    read(stall["backend"], config.stall.backend);
+    read(stall["precision"], config.stall.precision);
+    read(stall["confidence"], config.stall.confidence);
 
     if (const YAML::Node rig = root["calibration"]) {
       read(rig["width"], config.calibration.width);
@@ -205,6 +211,15 @@ std::string checkSimulation(const AppConfig& config) {
   }
   return "";
 #endif
+}
+
+std::string checkStall(const AppConfig& config) {
+  for (const auto& source : config.sources) {
+    if (source.stall && config.stall.model.empty()) {
+      return "a source has stall: true but stall.model is not set";
+    }
+  }
+  return "";
 }
 
 std::string checkLane(const AppConfig& config) {

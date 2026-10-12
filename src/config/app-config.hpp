@@ -12,6 +12,7 @@ struct SourceConfig {
   std::vector<ZoneConfig> zones;
   std::vector<LineConfig> lines;
   bool lane = false;  // run the lane model on this source
+  bool stall = false;  // run the parking stall model on this source
 };
 
 // The lane model; used by the sources that set `lane: true`
@@ -20,6 +21,14 @@ struct LaneConfig {
   std::string backend;  // empty: the detector's backend
   std::string precision = "fp16";
   LaneGeometryConfig geometry;
+};
+
+// The parking stall model; used by the sources that set `stall: true`
+struct StallConfig {
+  std::string model;
+  std::string backend;  // empty: the detector's backend
+  std::string precision = "fp16";
+  float confidence = 0.5f;
 };
 
 struct MqttConfig {
@@ -77,6 +86,7 @@ struct AppConfig {
   std::string tlsKey;
   SimulationConfig simulation;
   LaneConfig lane;
+  StallConfig stall;
   // The camera of the sources that run the lane model
   CameraRig calibration;
 };
@@ -84,6 +94,10 @@ struct AppConfig {
 // Empty when no source asks for lanes or when everything they need is
 // there: a model and a usable calibration. The reason otherwise.
 std::string checkLane(const AppConfig& config);
+
+// Empty when no source asks for stalls or the stall model is named; the
+// reason otherwise
+std::string checkStall(const AppConfig& config);
 
 // Empty when the simulation settings can be used; the reason otherwise.
 // A simulation needs a run id and, for every source, a GStreamer pipeline

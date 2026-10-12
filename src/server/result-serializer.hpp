@@ -2,6 +2,7 @@
 
 #include "analytics/event.hpp"
 #include "analytics/lane-result.hpp"
+#include "inference/stall-engine.hpp"
 #include "pipeline/frame-data.hpp"
 
 #include <nlohmann/json.hpp>
@@ -119,4 +120,33 @@ inline nlohmann::json serializeLane(const LaneResult& lane,
   json["heading_rad"] = valid ? nlohmann::json(lane.heading) : nlohmann::json();
   json["curvature_inv_m"] = valid ? nlohmann::json(lane.curvature) : nlohmann::json();
   return json;
+}
+
+// The parking stalls of a frame, added to the result as "stalls": pixels of
+// the frame, nothing in metres. corners are [x, y, confidence]: the two of
+// the mouth, then the two of the back, around the stall.
+// Example output:
+// [{"class":"empty","confidence":0.93,"bbox":{"x":150,"y":207,"w":460,"h":103},
+//   "corners":[[150.2,302.1,0.98],[508.4,310.0,0.97],[606.3,207.2,0.91],
+//              [466.0,205.4,0.9]]}]
+inline nlohmann::json serializeStalls(const std::vector<StallDetection>& stalls) {
+  nlohmann::json list = nlohmann::json::array();
+  for (const auto& stall : stalls) {
+    nlohmann::json corners = nlohmann::json::array();
+    for (size_t k = 0; k < stall.corners.size(); k++) {
+      corners.push_back({std::round(stall.corners[k].x * 10) / 10.0,
+                         std::round(stall.corners[k].y * 10) / 10.0,
+                         std::round(stall.cornerConfidence[k] * 100) / 100.0});
+    }
+    list.push_back(
+        {{"class", stall.occupied ? "occupied" : "empty"},
+         {"confidence", std::round(stall.confidence * 100) / 100.0},
+         {"bbox",
+          {{"x", static_cast<int>(stall.bbox.x)},
+           {"y", static_cast<int>(stall.bbox.y)},
+           {"w", static_cast<int>(stall.bbox.width)},
+           {"h", static_cast<int>(stall.bbox.height)}}},
+         {"corners", std::move(corners)}});
+  }
+  return list;
 }

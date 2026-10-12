@@ -6,6 +6,7 @@
 #include "config/app-config.hpp"
 #include "inference/detection.hpp"
 #include "inference/lane-engine.hpp"
+#include "inference/stall-engine.hpp"
 #include "output/mqtt-publisher.hpp"
 #include "pipeline/pipeline.hpp"
 #include "server/result-serializer.hpp"
@@ -32,6 +33,23 @@ static std::atomic<bool> gShutdown{false};
 void signalHandler(int) { gShutdown = true; }
 
 // Draw detection bounding boxes and labels on frame
+// Green for an empty stall, red for one with a vehicle in it; only the
+// corners the model says it sees are joined
+void drawStalls(cv::Mat& frame, const std::vector<StallDetection>& stalls) {
+  for (const auto& stall : stalls) {
+    cv::Scalar color = stall.occupied ? cv::Scalar(0, 0, 255)
+                                      : cv::Scalar(0, 255, 0);
+    for (size_t k = 0; k < stall.corners.size(); k++) {
+      size_t next = (k + 1) % stall.corners.size();
+      if (stall.cornerConfidence[k] < 0.5f) continue;
+      cv::circle(frame, stall.corners[k], 5, color, 2, cv::LINE_AA);
+      if (stall.cornerConfidence[next] < 0.5f) continue;
+      cv::line(frame, stall.corners[k], stall.corners[next], color, 2,
+               cv::LINE_AA);
+    }
+  }
+}
+
 void drawDetections(cv::Mat& frame,
                     const std::vector<Detection>& detections) {
   for (const auto& det : detections) {
@@ -531,6 +549,23 @@ int runLive(const AppConfig& app) {
       return -1;
     }
   }
+  // The same for the parking stall model
+  std::unique_ptr<StallEngine> stallEngine;
+  for (const auto& source : app.sources) {
+    if (!source.stall || stallEngine) continue;
+    StallEngineConfig stallConfig;
+    stallConfig.modelPath = app.stall.model;
+    stallConfig.backend =
+        app.stall.backend.empty() ? app.backend : app.stall.backend;
+    stallConfig.precision = app.stall.precision;
+    stallConfig.confidence = app.stall.confidence;
+    stallEngine = std::make_unique<StallEngine>(stallConfig);
+    if (!stallEngine->isLoaded()) {
+      // No fallback: a controller would park on stalls nobody looked for
+      std::cerr << "Failed to load the stall model\n";
+      return -1;
+    }
+  }
   const std::string calibrationId =
       app.calibration.isSet() ? app.calibration.calibrationId() : "";
 
@@ -695,6 +730,17 @@ int runLive(const AppConfig& app) {
       }
     }
 
+    std::vector<StallDetection> stalls;
+    if (app.sources[s].stall) {
+      try {
+        stalls = stallEngine->detect(result.cpuFrame());
+      } catch (const std::exception& e) {
+        std::cerr << "Stall model failed, stopping: " << e.what() << "\n";
+        failed = true;
+        break;
+      }
+    }
+
     // Drawing costs more than the rules; skip it when nobody will see it
     bool needFrame = !app.headless || sseServer.hasViewers(s) ||
                      (!events.empty() && !app.snapshotDir.empty());
@@ -708,6 +754,7 @@ int runLive(const AppConfig& app) {
         cv::polylines(result.frame, points, false, cv::Scalar(0, 255, 255), 2,
                       cv::LINE_AA);
       }
+      drawStalls(result.frame, stalls);
       if (stream.rules) drawRules(result.frame, *stream.rules);
       drawOverlay(result.frame, stream.fps.fps, result.inferenceLatencyMs,
                   static_cast<int>(result.detections.size()), result.frameId);
@@ -718,6 +765,7 @@ int runLive(const AppConfig& app) {
         app.simulation.enabled ? app.simulation.runId : std::string());
     json["stream"] = stream.id;
     if (app.sources[s].lane) json["lane"] = serializeLane(lane, calibrationId);
+    if (app.sources[s].stall) json["stalls"] = serializeStalls(stalls);
     if (!events.empty()) {
       // One snapshot per frame, shared by the events it raised
       std::string snapshot = snapshots.save(result.frame, events.front());
@@ -927,6 +975,10 @@ int main(int argc, char* argv[]) {
     return -1;
   }
   if (std::string reason = checkLane(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
+    return -1;
+  }
+  if (std::string reason = checkStall(app); !reason.empty()) {
     std::cerr << "Error: " << reason << "\n";
     return -1;
   }
