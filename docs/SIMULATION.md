@@ -488,24 +488,43 @@ vẫn dừng, nhưng những lần đó không chứng minh được quy tắc v
 
 Làm ngày 2026-10-12 theo `plans/261012-1633-carla-drive-and-park-show`. Mọi
 thứ chạy trên một máy: CARLA, inference (`tensorrt-native`, RTX 5060 8 GB) và
-controller. Không thêm model: vẫn YOLO11s và lane model của giai đoạn 1.
+controller. Màn lái dùng YOLO11s và lane model của giai đoạn 1. Màn đỗ được
+làm lại ngày 2026-10-13: thêm camera sau và một model thứ ba nhận ô đỗ, để xe
+tự tìm ô thay vì lùi vào toạ độ ghi sẵn.
 
 ### Cách chạy
 
 ```bash
 simulation/run.sh --scenario show_drive --arm --gui
 simulation/run.sh --scenario show_park --arm --gui
+simulation/run.sh --scenario show_park_next --arm --gui
 simulation/run.sh --scenario show_park_occupied --arm --gui
 ```
 
-Có hai cửa sổ, mỗi cửa sổ một việc:
+`--gui` mở hai cửa sổ:
 
-- **Cửa sổ CARLA** (`--gui`): thế giới mô phỏng, camera bám sau xe. Không vẽ
-  hộp hay vạch gì lên đó.
-- **Dashboard `http://127.0.0.1:9011`**: hình camera trước của xe với hộp
-  detection và các vạch làn nối thành đường. Script in địa chỉ này khi khởi
-  động thiết bị. Dashboard không ghi số mét: khoảng cách chỉ có ở controller,
-  trong `commands.jsonl`.
+- **Cửa sổ CARLA**: thế giới mô phỏng, camera bám sau xe. Không vẽ hộp hay
+  vạch gì lên đó.
+- **Cửa sổ camera** (`CARLA cameras`): ảnh các camera của xe đặt cạnh nhau,
+  lấy thẳng từ simulator, vẽ đè những gì thiết bị tìm thấy. Camera trước: hộp
+  detection, số track, vạch làn. Camera sau (chỉ có ở màn đỗ): ô đỗ model
+  thấy (xanh là trống, đỏ là có xe), đầu vạch chia ô (dấu cộng), các ô
+  controller đang theo dõi (viền trắng) và ô nó chọn (viền vàng). Dòng dưới
+  cùng ghi tick, trạng thái, pha đỗ, tốc độ và lệnh đang áp lên xe. Mỗi ảnh
+  hiện cùng kết quả của chính frame đó, nên hình trễ bằng độ trễ của thiết bị
+  (khoảng 0,1 giây). Bấm `q` để đóng cửa sổ; lần chạy vẫn tiếp tục.
+
+Không có `--gui` thì vẫn xem được qua dashboard `http://127.0.0.1:9011` của
+thiết bị (hộp, vạch làn, ô đỗ). Cả hai nơi đều không ghi số mét: khoảng cách
+chỉ có ở controller, trong `commands.jsonl` và `stalls.jsonl`.
+
+Model ô đỗ không nằm trong repo. Tạo lại bằng hai lệnh (cần server CARLA cho
+lệnh đầu, khoảng 27 phút; lệnh sau khoảng 50 phút trên RTX 5060):
+
+```bash
+simulation/stall-dataset.py make --out data/stalls
+scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onnx
+```
 
 Lần chạy đầu sau khi server CARLA vừa mở, thiết bị có thể không nạp được model
 vì thiếu bộ nhớ đồ họa; script tự khởi động lại thiết bị (tối đa 5 lần, cách
@@ -523,12 +542,14 @@ nhau 8 giây) trong lúc server nhả texture của map mặc định.
 | Hộp detection chỉ chứa mặt đường | coi là vật cản không đo được | không phanh (bóng xe bị nhận nhầm thành người) |
 | Tốc độ | cứng 10 km/h | `speed_cap_kmh` 30; mặc định vẫn 9, chỉ `show_drive` ghi 30 |
 | Lệnh | ga, phanh, lái | thêm `reverse` và `hand_brake`, mặc định false |
+| Camera sau | không có | 1280×720, FOV 120°, chỉ ở scenario đỗ xe; ảnh đi tới thiết bị thành nguồn `carla-rear` |
+| Model trên thiết bị | YOLO11s, lane model | thêm model ô đỗ, chạy trên nguồn có `stall: true` |
 | Server CARLA | nạp lại map mỗi lần chạy | giữ map đang có; đổi map thì nạp hai lần để nhả bộ nhớ |
 
 Scenario đọc từ `manifest.json` của lần chạy, không bao giờ từ thiết bị:
 `target_speed_kmh`, `follow_gap_m`, `lane_change: {at_tick, side}` và
-`park: {stall, handover}`. Scenario nào không ghi thì giữ 9 km/h, không bám
-xe, không chuyển làn.
+`park: true`. Scenario nào không ghi thì giữ 9 km/h, không bám xe, không
+chuyển làn. Không scenario nào ghi ô đỗ nằm ở đâu.
 
 ### Màn lái: `show_drive`
 
@@ -574,72 +595,183 @@ xe, không chuyển làn.
 
 ### Màn đỗ: `show_park`
 
-Bãi đỗ của Town05, 2 100 tick (70 giây). Xe chạy dọc lối đi ở 2 m/s, qua ô
-một bán kính quay thì dừng, lùi một phần tư đường tròn với vô lăng giữ ở 0,45
-lần góc tối đa cho tới khi còn lệch 12° so với hướng ô, rồi lùi gần thẳng về
-tâm ô, lái theo góc lệch và khoảng lệch khỏi trục ô. Đỗ xong: phanh chân,
-phanh tay, số tiến, mũi quay ra lối đi.
+Làm lại ngày 2026-10-13. Bản đầu (2026-10-12) lùi vào một ô có toạ độ ghi sẵn
+trong scenario; bản này không còn dòng nào nói ô nằm ở đâu. Scenario chỉ ghi
+`park: true` và điểm xuất phát.
 
-- **Ô đỗ là số đo, ghi trong scenario.** CARLA không có API liệt kê ô đỗ.
-  Town05 có làn kiểu `Parking`, nhưng đó là dải dọc lề phố (rộng 2–3 m, cách
-  bãi 107 m), không phải ô trong bãi. `simulation/probe-stall.py` đo vạch sơn
-  bằng tia chiếu: vạch chia ô, xe đang đỗ trong hàng, lối đi tới lề hoặc hàng
-  rào đầu tiên.
-- **Camera phía trước quyết định trước khi lùi.** Cả bốn góc ô phải từng nằm
-  trong ảnh, và không có vật thuộc sáu class cần phanh nào đo được trong ô.
-  Thiếu một trong hai thì hủy (`park_abort:stall_unseen`,
-  `park_abort:stall_occupied`) và không lùi. Từ lúc lùi không còn gì nhìn ô.
-- **Phanh vì vật cản trên lối đi** cũng hủy lần đỗ, không chờ rồi thử lại.
+Bãi đỗ của Town05, 2 700 tick (90 giây). Xe chạy dọc lối đi ở 2 m/s và nhìn
+ra sau. Ô đầu tiên vừa trống, vừa đủ rộng, và có ô liền trước nó cũng trống,
+là ô nó chọn. Sau đó xe lùi dọc lối đi tới điểm quay, lùi theo một cung tròn
+vào trục ô, rồi lùi gần thẳng về tâm ô. Đỗ xong: phanh chân, phanh tay, số
+tiến, mũi quay ra lối đi.
+
+**Camera sau.** 1280×720, góc nhìn ngang 120°, đặt trên biển số (x −2,45 m,
+cao 1,0 m), chúc 30°. Ảnh của nó đi tới thiết bị như ảnh camera trước, qua
+cổng 5001, thành nguồn `carla-rear`. Chỉ scenario đỗ xe mới có camera này:
+`run.sh` bỏ nguồn đó và model ô đỗ khỏi bản config của thiết bị ở các scenario
+khác. Camera sau không có ảnh depth.
+
+**Model ô đỗ** (`models/stall-town05.onnx`, YOLO11n-pose, đầu vào 960×544)
+chạy trên thiết bị, cạnh YOLO11s và lane model. Nó có bốn lớp:
+
+| Lớp | Là gì | Dùng để |
+|-----|-------|---------|
+| `empty`, `occupied` | một ô đỗ, kèm bốn góc | biết ô trống hay có xe |
+| `mouth`, `back` | đầu một vạch chia ô: phía lối đi, hoặc chỗ gặp vạch đáy | đo ô nằm ở đâu |
+
+Lý do tách hai việc: train để model ra thẳng bốn góc ô thì với ô ở gần, góc
+lệch trung vị 19 đến 35 px (tập validation, sau 14 epoch). Ô là vật lớn, góc
+nằm xa tâm ô. Đầu vạch là vật nhỏ, có vị trí rõ. Trên 440 ảnh validation,
+chạy file ONNX đúng như thiết bị chạy (ảnh co về 960×544, cùng ngưỡng, cùng
+NMS):
+
+| Đối tượng | Tìm thấy | Sai lệch |
+|-----------|----------|----------|
+| Ô đỗ (2 608 nhãn) | 87 %, trong đó 99 % đúng lớp trống/có xe | không dùng góc của ô để đo |
+| Đầu vạch cao 12 đến 50 px trong ảnh, cách camera khoảng 3 đến 9 m (1 070 nhãn) | 98 % | trung vị 1,8 px; 90 % dưới 4,4 px |
+| Đầu vạch cao hơn 50 px, trong khoảng 3 m (344 nhãn) | 99 % | trung vị 4,8 px; 90 % dưới 14,8 px (ở tầm này một pixel là khoảng 1 cm) |
+| Đầu vạch thấp hơn 12 px, xa hơn khoảng 9 m (1 381 nhãn) | 75 % | trung vị 1,4 px; controller không dùng đầu vạch xa hơn 10 m |
+
+**Dữ liệu train sinh từ CARLA, tự gán nhãn.** `simulation/stall-dataset.py map`
+đo 60 ô của bãi từ ảnh semantic chụp thẳng từ trên xuống (vạch chia ô và vạch
+đáy), ghi vào `simulation/config/carla-stalls.yaml`. `stall-dataset.py make`
+đặt xe với camera sau ở 4 400 tư thế quanh các ô (đi ngang hàng ô, đang quay
+vào, đã ở trong ô, và ngẫu nhiên), thay xe đỗ trong các ô và ánh sáng, rồi
+chiếu các ô và đầu vạch đã đo vào ảnh để ra nhãn. Góc hay đầu vạch bị che thì
+không được gán nhãn: ảnh depth cùng frame cho biết điều đó.
+`scripts/train-stall-model.py` train 50 epoch và xuất ONNX. File đo ô là số
+thật: chỉ bộ sinh nhãn và script đánh giá đọc nó, controller không đọc.
+
+**Từ pixel tới ô trên mặt đất** (`stalls.py`, chạy trên PC):
+
+- Mỗi đầu vạch được chiếu xuống mặt đất bằng calibration của camera sau (mặt
+  đất phẳng), rồi đưa về toạ độ thế giới bằng pose của xe ở đúng frame đó.
+- Ở xa, một pixel là nhiều centimet mặt đất: 3 cm ở 3 m, 23 cm ở 9 m. Mỗi đầu
+  vạch vì vậy là trung bình các lần thấy, lần nào gần hơn thì nặng hơn. Đầu
+  vạch đã ra khỏi ảnh giữ nguyên vị trí học được lúc còn gần.
+- Hai đầu vạch phía lối đi cách nhau một bề rộng ô (2,2 đến 3,6 m) là một ô.
+  Hướng ô vuông góc với đường thẳng qua mọi đầu vạch của cả hàng. Chiều dài ô
+  lấy từ hai đầu vạch phía đáy khi thấy được chúng, trước đó tạm coi là 5 m.
+- Ô trống hay có xe do các hộp `empty`/`occupied` bỏ phiếu: mỗi hộp bỏ cho ô
+  có hình chiếu trong ảnh trùng với nó nhất (IoU từ 0,5). So trong ảnh chứ
+  không so trên mặt đất, vì góc xa của hộp chiếu xuống đất lệch tới vài mét.
+
+**Controller chọn ô và lùi:**
+
+| Pha | Xe làm gì | Sang pha sau khi |
+|-----|-----------|------------------|
+| `search` | tiến 2 m/s trên đường thẳng qua điểm được ARM, theo hướng lúc đó | có ô đạt: trống (ít nhất 10 phiếu, không quá 20 % là `occupied`), rộng hơn xe 0,4 m, vuông góc với lối đi, ô liền trước nó cũng trống, và trục sau đã qua trục ô hơn một bán kính quay cộng 0,5 m |
+| `back` | lùi thẳng dọc lối đi | trục sau còn cách trục ô đúng một bán kính quay |
+| `align` | lùi theo cung tròn kết thúc trên trục ô; bán kính tính lại mỗi tick từ vị trí ô đang thấy | hướng xe lệch hướng ô dưới 12° |
+| `enter` | lùi gần thẳng, lái theo góc lệch và khoảng lệch khỏi trục ô | gốc xe tới tâm ô |
+| `parked` | phanh chân, phanh tay, số tiến | |
+
+- **Vì sao cần ô liền trước cũng trống.** Lúc quay vào, mũi xe quét ra ngoài
+  qua miệng ô vừa đi qua. Ô phía bên kia không cần trống: thân xe không tới đó.
+- **Hủy đỗ** (`park_abort:…`, phanh tới hết lần chạy): đi hết `search_m` (32 m)
+  mà không có ô nào đạt (`no_free_stall`); ô đã chọn chuyển sang `occupied`
+  trong hơn nửa số phiếu gần nhất (`stall_occupied`); không thấy đầu vạch nào
+  của ô trong 3 giây khi còn ở ngoài ô (`stall_lost`); quay quá đà
+  (`turn_overrun`); lệch khỏi ô (`off_the_stall`); phanh vì vật cản trên lối đi.
+- **Camera sau im lặng** quá giới hạn tuổi (500 ms) lúc đang lùi: xe đứng lại,
+  có kết quả mới thì lùi tiếp.
 - **Số lùi và phanh tay trong lệnh.** Lệnh có một trong hai cờ được coi là
   lệnh lái dù ga bằng 0 và phanh bằng 1: phải đúng `run_id`, dựa trên frame
   còn mới, đã ARM, còn hạn. Mọi lần simulator tự phanh đều chỉ là phanh chân.
   Chuỗi `reason` không quyết định gì. Số lùi chỉ đổi khi xe chậm hơn 0,15 m/s.
 - **Bán kính quay là số đo.** Lùi với `steer` +0,45 thì xe quay trái, trục sau
-  đi trên đường tròn bán kính 5,7 m, bằng 0,89 lần góc bánh danh định
-  (`vehicle_response`, khớp đường tròn vào quỹ đạo trục sau). Dùng công thức
-  thuần `wheelbase / tan(k · max_steer)` (4,9 m) thì cung lùi kết thúc lệch
-  trục ô.
+  đi trên đường tròn bán kính 5,7 m, bằng 0,88 lần góc bánh danh định
+  (`vehicle_response`, khớp đường tròn vào quỹ đạo trục sau). Controller dùng
+  hệ số đó để đổi bán kính cần có thành góc lái; ở lối đi này bán kính cần là
+  5,7 m, ứng với khoảng 0,45 lần góc lái tối đa.
 
-Kết quả 4 lần chạy:
+Script đánh giá chấm theo các ô đã đo trên vạch sơn (`truth.stalls` trong
+manifest): xe phải đứng trong một ô vốn trống từ đầu, ô liền trước nó cũng
+vốn trống, lệch hướng dưới 15°, phanh tay kéo, số lùi tắt. Nó cũng ghi ô mà
+controller tin là ô đỗ lệch bao nhiêu so với ô thật.
+
+Ba scenario:
+
+| Scenario | Trong bãi | Phải xảy ra |
+|----------|-----------|-------------|
+| `show_park` | như bản đồ có sẵn: hai ô đầu của hàng có xe | đỗ vào ô thứ tư (ô thứ ba trống nhưng nằm cạnh xe) |
+| `show_park_next` | thêm một xe ở ô thứ ba | ô thứ tư giờ nằm cạnh xe: đỗ vào ô thứ năm |
+| `show_park_occupied` | thêm xe ở ô thứ ba, thứ năm, thứ bảy | không còn ô nào đạt: hủy ở cuối đoạn tìm, không lùi |
+
+Đo ngày 2026-10-13 với model train đủ 50 epoch, 7 lần chạy không cửa sổ, tất
+cả đạt:
 
 | Hạng mục | Kết quả |
 |----------|---------|
-| Vị trí cuối | 0,03 đến 0,04 m dọc trục và 0,06 m ngang trục so với tâm ô |
-| Hướng cuối | lệch 1,0 đến 1,1° |
-| Lùi | 930 đến 944 tick (31 giây), nhanh nhất 0,50 đến 0,53 m/s |
+| `show_park`, 3 lần | cả ba lần chọn ô thứ tư của hàng; đứng yên từ tick 1 370 đến 1 384 (46 giây) |
+| Vị trí cuối so với ô thật | 0,03 đến 0,04 m dọc trục và 0,07 đến 0,08 m ngang trục so với tâm ô; lệch hướng 1,2° |
+| Ô theo model so với ô đo trên vạch sơn | tâm lệch 0,015 đến 0,018 m; hướng lệch 0,15°; hẹp hơn 0,02 đến 0,03 m; dài hơn 0,04 m |
+| Thời gian | tiến 12,4 giây rồi dừng; lùi 997 đến 1 011 tick (33 giây), nhanh nhất 0,50 đến 0,53 m/s |
+| `show_park_next`, 2 lần | cả hai lần đỗ vào ô thứ năm: 0,02 m dọc, 0,08 m ngang, lệch hướng 1,3° |
+| `show_park_occupied`, 2 lần | hủy (`no_free_stall`) ở tick 517 và 518, sau 32 m; không lùi, không vào ô nào |
 | Va chạm, hộp chồng nhau | 0 |
-| `show_park_occupied` (có xe trong ô) | hủy ở tick 2, xe không nhúc nhích; xe trong ô được phát hiện từ 22 m |
+| Kết quả của camera sau | mỗi tick một kết quả; trung bình 5,8 ô và 6,6 đầu vạch mỗi ảnh |
+| Độ trễ tick tới lệnh được áp | trung vị 107 đến 110 ms, P95 119 đến 130 ms |
+| Tốc độ mô phỏng | 27,0 đến 27,1 tick/giây không cửa sổ; 19,8 và 21,5 tick/giây với `--gui` (hai lần `show_park`, đều đạt) |
+
+Trước đó, với model mới train 16 epoch (đầu vạch lệch trung vị 3 px), bốn lần
+chạy thử cũng đạt (ba lần đỗ, một lần hủy): lệch ngang 0,05 đến 0,06 m.
 
 ### Khác với plan
 
-- **Ô hẹp hơn yêu cầu.** Plan đòi ô rộng hơn xe 1 m. Không ô nào của bãi đạt:
-  ô rộng 2,67 đến 2,89 m, hộp của xe rộng 2,16 m. `probe-stall.py` mặc định
-  vẫn đòi 1 m và trả mã 1; scenario dùng ô 2,72 m (dư 0,56 m), hai ô hai bên
-  trống, đo bằng `--margin 0.5`. Đó là ô duy nhất của hàng mà từ đầu lối đi
-  camera thấy đủ bốn góc.
+Plan viết cho bản đầu của màn đỗ. Ba điểm của bản đầu vẫn đúng với bản hiện
+tại; hai điểm đã thay đổi.
+
+- **Ô hẹp hơn plan đòi.** Plan đòi ô rộng hơn xe 1 m. Không ô nào của bãi đạt:
+  ô rộng 2,67 đến 2,93 m, hộp của xe rộng 2,16 m. Controller nhận ô rộng hơn xe
+  từ 0,4 m (`min_margin_m`), nên ô nào của bãi cũng đủ rộng.
 - **Không giữ làn được tới điểm quay.** Bãi là một sân lát cao hơn mặt phố
   0,16 m, có lề và hàng rào quanh: không làn nào dẫn vào, lối đi không có vạch.
-  Vì vậy điểm bàn giao (`handover`) của `show_park` chính là điểm xuất phát, và
-  cả đoạn tiến trên lối đi chạy theo pose của xe, không quá 2 m/s. Quy tắc vẫn
-  có trong code và trong test: trước điểm bàn giao, mất làn năm kết quả là
-  khóa.
+  Cả đoạn tiến chạy theo pose của xe, không quá 2 m/s, trên đường thẳng qua
+  điểm được ARM.
 - **Lùi tới 0,5 m/s, không phải 0,2.** Xe của CARLA không giữ được 0,2 m/s:
   ga tới 0,25 thì xe bò ở 0,07 m/s, cũng mức ga đó khi xe đã lăn cho 0,5 m/s.
   Ép ở 0,2 thì xe đi từng nhịp, có lúc tới 0,48 m/s, trung bình 0,09 m/s.
+- **Đã bỏ: ô đỗ và điểm bàn giao ghi trong scenario.** Plan cho phép đo ô một
+  lần rồi ghi toạ độ vào scenario, và cấm thêm model. Bản đầu làm đúng như
+  vậy; kết quả là xe lùi theo một đường đã biết trước chứ không nhìn thấy ô.
+  Bản hiện tại thêm camera sau và model ô đỗ, bỏ `stall`, `handover` và
+  `probe-stall.py`.
+- **Đã bỏ: camera trước quyết định ô có trống không.** Việc đó giờ do model ô
+  đỗ trên camera sau làm. Camera trước chỉ còn phát hiện vật cản lúc tiến.
 
 ### Giới hạn
 
+- **Model ô đỗ chỉ biết một bãi.** Ảnh train và ảnh lúc chạy là cùng bãi đỗ
+  của Town05, cùng kiểu vạch sơn. Các số đo cho biết model thuộc bãi này tới
+  đâu; chúng không nói gì về bãi khác, vạch khác, hay ảnh thật.
+- **Vị trí của xe lấy từ simulator, không có sai số.** Giữa hai frame, mọi
+  thứ đã thấy được giữ ở toạ độ thế giới bằng pose mà CARLA báo. Xe thật không
+  có pose như vậy; phần này chưa chứng minh gì về định vị.
+- **Lúc lùi không có gì phát hiện vật cản phía sau.** YOLO11s vẫn chạy trên
+  ảnh camera sau, nhưng camera sau không có depth nên controller không dùng
+  các hộp đó. Một người đi vào sau xe lúc lùi sẽ không làm xe dừng; chỉ một xe
+  hiện ra trong chính ô đang lùi vào mới hủy lần đỗ.
+- **Phiếu trống/có xe của ô ở xa không đáng tin.** Trong một lần chạy, ô có xe
+  pickup cách hai ô nhận 47 % phiếu `empty` lúc xe đang lùi vào ô của mình.
+  Controller chỉ đọc phiếu của ô nó chọn và ô liền trước, vào lúc đi ngang
+  qua, khi các ô đó ở gần.
+- **Một hàng ô, một lối đi, ô vuông góc.** Chưa thử ô chéo, ô song song, hàng
+  ô ở bên phải, hay lối đi hẹp hơn: bán kính quay tính ra phải ứng với 0,30
+  đến 0,65 lần góc lái tối đa, ngoài khoảng đó ô bị bỏ qua.
+- **Mặt đất coi là phẳng.** Đầu vạch được chiếu xuống mặt phẳng z = 0 của xe.
+  Bãi của Town05 phẳng; trên dốc thì vị trí sẽ lệch.
 - **Bộ nhớ đồ họa 8 GB là sát nút.** Server CARLA vừa mở chiếm khoảng 6 GB và
-  nhả dần khi render; hai engine TensorRT cần 0,5 GB. Backend `cpu` chỉ cho
-  0,8 kết quả/giây cạnh CARLA.
-- **Mô phỏng không đạt 30 tick/giây** khi có cửa sổ CARLA: 22,9 đến 29,3
-  tick/giây. Mọi thời hạn tính theo thời gian mô phỏng nên kết quả không đổi.
+  nhả dần khi render; ba engine TensorRT cần khoảng 0,6 GB. Backend `cpu` chỉ
+  cho 0,8 kết quả/giây cạnh CARLA.
+- **Mô phỏng không đạt 30 tick/giây.** Màn lái có cửa sổ CARLA: 22,9 đến 29,3
+  tick/giây. Màn đỗ render thêm một camera: 27,0 đến 27,1 tick/giây không cửa
+  sổ, 19,8 và 21,5 có cửa sổ. Mọi thời hạn tính theo thời gian mô phỏng nên kết
+  quả không đổi.
 - **Chuyển làn chỉ thử trên đoạn thẳng, ở 5 m/s, sang trái.** Trước lần sửa
   cuối, 3 trong 6 lần chạy có cửa sổ CARLA trượt vì thiết bị báo một làn mới
   chỉ thấy từ 19 m; sau khi sửa, 7 lần liên tiếp đều đạt. Đó là 7 lần, không
   phải bằng chứng cho mọi điều kiện.
-- **Một stall, một hàng, một bãi.** Thử trên một ô, một hướng tiến. Không có
-  camera sau: sau khi quyết định ô trống, không gì phát hiện vật đi vào ô.
 - **Người đi ngang không có vật lý** và xuất hiện theo tick định sẵn, không
   phản ứng với xe.
 - **Nắp capô nằm trong ảnh** ở vài hàng pixel dưới cùng (camera chúc 10°).
@@ -647,6 +779,9 @@ Kết quả 4 lần chạy:
   detection phủ đúng vùng đó sẽ đo ra một vật ở rất gần.
 - **Thiết bị crash (segmentation fault) khi không nạp được model** thay vì
   thoát gọn; chưa sửa.
+- **Jetson chưa chạy màn đỗ.** Image trên board có trước model ô đỗ và camera
+  sau. Màn đỗ gửi hai luồng ảnh; đường truyền tới board (khoảng 10 Mbit/s) đã
+  không đủ cho một luồng ở chất lượng JPEG 75.
 
 ## Nguồn
 

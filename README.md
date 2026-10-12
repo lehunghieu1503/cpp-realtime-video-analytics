@@ -675,14 +675,14 @@ and treats a missing frame as missing.
 
 ## CARLA simulation
 
-CARLA 0.9.16 runs on a PC; the device runs the detector, the tracker and a
-lane model; a ROS 2 controller on the PC steers and brakes the simulated
-car. [docs/SIMULATION.md](docs/SIMULATION.md) has the design, the run book
+CARLA 0.9.16 runs on a PC; the device runs the detector, the tracker, a lane
+model and, for parking, a stall model; a ROS 2 controller on the PC steers
+and brakes the simulated car. [docs/SIMULATION.md](docs/SIMULATION.md) has the design, the run book
 and every measurement (Vietnamese).
 
 ```mermaid
 flowchart LR
-    carla["CARLA, 30 ticks/s<br/>RGB + depth camera"] -->|"one JPEG per frame,<br/>timestamp = sim_ns (GDP/TCP)"| device["Device<br/>YOLO + ByteTrack + lane model"]
+    carla["CARLA, 30 ticks/s<br/>RGB + depth camera"] -->|"one JPEG per frame,<br/>timestamp = sim_ns (GDP/TCP)"| device["Device<br/>YOLO + ByteTrack + lane model<br/>stall model on the rear camera"]
     device -->|"/events: boxes, lane,<br/>run_id, sim_ns"| bridge["ROS 2 bridge"]
     bridge --> controller["Controller<br/>depth + ego pose of the same frame<br/>objects in metres, pure pursuit, brake"]
     carla -->|"depth, ego state"| controller
@@ -722,20 +722,37 @@ both FP16:
 | Braking for a car, a truck, a person, a cut-in | stopped 3.9 to 11.3 m short in 12 runs, no collision |
 | Data lost or controller killed | braked within the budget: 500 ms, 303 ms |
 
-Two scenarios on one PC show it driving and parking, with the same two
-models (`--gui` opens the CARLA window; boxes and lane lines are on the
-device's dashboard, `http://127.0.0.1:9011`):
+Scenarios on one PC show it driving and parking. `--gui` opens the CARLA
+window and a second one with the vehicle's cameras and what the device finds
+in them; without it, boxes, lane lines and stalls are on the device's
+dashboard, `http://127.0.0.1:9011`.
 
 ```bash
 simulation/run.sh --scenario show_drive --arm --gui   # Town04, up to 30 km/h
 simulation/run.sh --scenario show_park --arm --gui    # Town05's car park
 ```
 
+To park, the vehicle has a rear camera and a third model on the device: it
+finds the stalls in that camera's image, as the ends of their dividers and
+as empty or occupied. The scenario says where the vehicle starts, never
+where a stall is. The model is trained on images CARLA labels by itself:
+
+```bash
+simulation/stall-dataset.py make --out data/stalls    # 4400 images, needs CARLA
+scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onnx
+```
+
 | Show | Measured |
 |:-----|:---------|
 | `show_drive`, 7 runs | follows a car at 24 m for 14 s, changes lane in 3.1 s, stops 15 m before a person crossing, drives on 2.5 s later; no collision |
-| `show_park`, 4 runs | backs into a 2.72 m stall: 0.06 m beside its axis, 1 degree off, parking brake set |
-| `show_park_occupied` | a car in the stall: the park is given up before the vehicle moves |
+| `show_park`, 4 runs | passes two parked cars, takes the first stall it may, backs in: 0.07 to 0.08 m beside its axis, 1.2 degree off, parking brake set |
+| `show_park_next`, 2 runs | a car in that stall: it takes the next one |
+| `show_park_occupied`, 2 runs | no stall left that it may take: gives up at the end of the search without going backwards |
+| Stall model, 440 validation images | 87 % of the stalls found, 99 % of them with the right class; divider ends 3 to 9 m away: 98 % found, 1.8 pixels off at the median |
+
+The stall model has seen only this car park, and the vehicle's place between
+frames is its pose as CARLA reports it, without error: the park shows the
+chain from pixels to a parked car, not parking in general.
 
 A brake for an obstacle is now released when the path is clear again; old
 perception, a lost pose or a lane lost for five results still stop the car
@@ -755,7 +772,7 @@ src/
 ├── main.cpp          CLI, live loop, benchmark and evaluation modes
 ├── capture/          OpenCV capture, native GStreamer capture, NVMM frames
 ├── inference/        Shared pre-process and post-process + NMS; the lane
-│                     model's own engine
+│                     model's and the stall model's own engines
 │   └── backends/     ONNX Runtime (CPU/CUDA/TensorRT), native TensorRT with
 │                     a CUDA pre-processing kernel, OpenVINO
 ├── pipeline/         Capture threads, per-stream queue, inference workers
