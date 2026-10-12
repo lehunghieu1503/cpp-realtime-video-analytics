@@ -23,6 +23,8 @@ FRAME = {
                 "bbox": {"x": 150, "y": 207, "w": 460, "h": 103},
                 "corners": [[150.2, 302.1, 0.98], [508.4, 310.0, 0.97],
                             [606.3, 207.2, 0.91], [466.0, 205.4, 0.9]]}],
+    "stall_points": [{"class": "mouth", "confidence": 0.9, "x": 150.2, "y": 302.1},
+                     {"class": "back", "confidence": 0.8, "x": 466.0, "y": 205.4}],
     "latency_ms": 12.3, "fps": 30.0,
 }
 
@@ -51,6 +53,8 @@ class Envelope(unittest.TestCase):
         # A camera without the stall model, and one that found no stall
         self.assertEqual(envelope.check(changed(["stalls"], KeyError)), "")
         self.assertEqual(envelope.check(changed(["stalls"], [])), "")
+        self.assertEqual(envelope.check(changed(["stall_points"], KeyError)), "")
+        self.assertEqual(envelope.check(changed(["stall_points"], [])), "")
 
     def test_malformed_frames_are_named(self):
         cases = [
@@ -83,6 +87,10 @@ class Envelope(unittest.TestCase):
             (["stalls", 0, "corners"], [[1, 2, 0.9]] * 3, "bad stall corners"),
             (["stalls", 0, "corners", 2], [1.0, 2.0], "bad stall corners"),
             (["stalls", 0, "corners", 1, 0], float("nan"), "bad stall corners"),
+            (["stall_points"], "none", "bad stall points"),
+            (["stall_points", 0, "class"], "corner", "bad stall point"),
+            (["stall_points", 1, "x"], None, "bad stall point"),
+            (["stall_points", 1, "confidence"], float("inf"), "bad stall point"),
         ]
         for path, value, reason in cases:
             self.assertEqual(envelope.check(changed(path, value)), reason, path)
