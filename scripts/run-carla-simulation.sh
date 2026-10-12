@@ -19,13 +19,16 @@
 #   --arm              arm the controller once its gates pass. Without it the
 #                      vehicle stays braked for the whole run.
 #   --ticks N          run N ticks instead of the scenario's number
+#   --gui              show the CARLA window, with its camera behind the
+#                      vehicle. An off-screen server left by an earlier run
+#                      is stopped and started again with a window.
 #   --config FILE      default deploy/config/carla.yaml
 #   --scenarios FILE   default deploy/config/carla-scenarios.yaml
 #   --run-dir DIR      default .cache/carla/<run id>; must not exist
 #   --local-backend B  backend of a local device (default: cpu)
 # Environment:
 #   CARLA_ROOT   CARLA 0.9.16 (default ~/opt/carla-0.9.16); its server is
-#                started off-screen when nothing listens on port 2000, and
+#                started (off-screen without --gui) when nothing listens on port 2000, and
 #                left running for the next run
 #   CARLA_PYTHON python with the carla 0.9.16 client (default
 #                $CARLA_ROOT/venv/bin/python, else python3)
@@ -38,7 +41,7 @@ set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
 TICKS=0 CONFIG=deploy/config/carla.yaml SCENARIOS=deploy/config/carla-scenarios.yaml
-RUN_DIR="" LOCAL_BACKEND=cpu
+RUN_DIR="" LOCAL_BACKEND=cpu GUI="" OFFSCREEN=-RenderOffScreen
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="$2"; shift 2 ;;
@@ -46,16 +49,17 @@ while [ $# -gt 0 ]; do
     --remote-dir) REMOTE_DIR="$2"; shift 2 ;;
     --sim-host) SIM_HOST="$2"; shift 2 ;;
     --arm) ARM=--arm; shift ;;
+    --gui) GUI=--follow OFFSCREEN=""; shift ;;
     --ticks) TICKS="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -90,11 +94,16 @@ print("carla client %s, GStreamer %s" % (carla.Client("127.0.0.1", 1).get_client
                                         Gst.version_string()))
 PY
 
+if [ -n "$GUI" ] && pkill -f 'CarlaUE4.*-RenderOffScreen'; then
+  echo "== Stopping the off-screen CARLA server"
+  while (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; do sleep 1; done
+fi
 if ! (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; then
   [ -x "$CARLA_ROOT/CarlaUE4.sh" ] || { echo "No CARLA server on port 2000 and none at $CARLA_ROOT" >&2; exit 1; }
   echo "== Starting the CARLA server (left running after this script)"
   mkdir -p .cache/carla
-  nohup "$CARLA_ROOT/CarlaUE4.sh" -RenderOffScreen -nosound -prefernvidia \
+  # shellcheck disable=SC2086
+  nohup "$CARLA_ROOT/CarlaUE4.sh" $OFFSCREEN -nosound -prefernvidia \
     -carla-rpc-port=2000 >.cache/carla/server.log 2>&1 &
   for _ in $(seq 60); do
     (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null && break
@@ -151,7 +160,7 @@ echo "== Starting the simulator"
 "$CARLA_PYTHON" -m video_analytics_simulation.simulator --config "$CONFIG" \
   --scenarios "$SCENARIOS" --scenario "$SCENARIO" --run-dir "$RUN_DIR" \
   --run-id "$RUN_ID" --ticks "$TICKS" --controller-pid "$CONTROLLER" \
-  --wait-client "$WAIT_CLIENT" $ARM 2>&1 | tee "$RUN_DIR/simulator.log" &
+  --wait-client "$WAIT_CLIENT" $ARM $GUI 2>&1 | tee "$RUN_DIR/simulator.log" &
 SIMULATOR=$!
 # The simulator listens once it has written the manifest
 for _ in $(seq 120); do

@@ -322,6 +322,8 @@ scripts/run-carla-simulation.sh --scenario brake_person --arm \
     --device machineai@100.85.110.98 --remote-dir hieule/carla-sim
 ```
 
+- `--gui` mở cửa sổ CARLA với camera bám sau xe; không có thì server chạy
+  off-screen. Server off-screen còn lại từ lần chạy trước sẽ bị tắt và mở lại.
 - Không có `--arm` thì xe đứng yên, phanh suốt lần chạy, dù mọi điều kiện đã
   đạt. Có `--arm` mà điều kiện chưa đạt thì controller từ chối.
 - `--device local` chạy inference ngay trên laptop; `--device none` cho các

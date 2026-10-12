@@ -783,6 +783,14 @@ class Simulator:
                           **applied})
 
         ego_transform = snapshot.find(self.ego.id).get_transform()
+        if self.args.follow:
+            # Chase view for a person watching the server's window
+            yaw = math.radians(ego_transform.rotation.yaw)
+            at = ego_transform.location
+            self.world.get_spectator().set_transform(self.carla.Transform(
+                self.carla.Location(at.x - 8.0 * math.cos(yaw),
+                                    at.y - 8.0 * math.sin(yaw), at.z + 4.0),
+                self.carla.Rotation(pitch=-15.0, yaw=ego_transform.rotation.yaw)))
         with self.events_lock:
             events, self.events = self.events, []
         self.truth_log.write(json.dumps({
@@ -1003,6 +1011,8 @@ def main():
                         help="seconds to wait for the device to connect")
     parser.add_argument("--wait-result", type=float, default=120.0,
                         help="seconds to wait, ticking, for the first result")
+    parser.add_argument("--follow", action="store_true",
+                        help="keep the server's spectator camera behind the ego vehicle")
     parser.add_argument("--no-pacing", action="store_true",
                         help="tick as fast as possible instead of in real time")
     args = parser.parse_args()
