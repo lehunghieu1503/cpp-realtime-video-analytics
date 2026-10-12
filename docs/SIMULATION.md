@@ -753,17 +753,19 @@ tại; hai điểm đã thay đổi.
   các hộp đó. Một người đi vào sau xe lúc lùi sẽ không làm xe dừng; chỉ một xe
   hiện ra trong chính ô đang lùi vào mới hủy lần đỗ.
 - **Phiếu trống/có xe của ô ở xa không đáng tin.** Trong một lần chạy, ô có xe
-  pickup cách hai ô nhận 47 % phiếu `empty` lúc xe đang lùi vào ô của mình.
+  pickup cách hai ô nhận 53 % phiếu `empty` (trong 174 phiếu) lúc xe đang lùi
+  vào ô của mình.
   Controller chỉ đọc phiếu của ô nó chọn và ô liền trước, vào lúc đi ngang
   qua, khi các ô đó ở gần.
-- **Một hàng ô, một lối đi, ô vuông góc.** Chưa thử ô chéo, ô song song, hàng
-  ô ở bên phải, hay lối đi hẹp hơn: bán kính quay tính ra phải ứng với 0,30
-  đến 0,65 lần góc lái tối đa, ngoài khoảng đó ô bị bỏ qua.
+- **Một hàng ô, một lối đi, ô vuông góc.** Trên CARLA mới thử hàng ô nằm bên
+  trái xe; hàng ô bên phải chỉ có trong unit test. Chưa thử ô chéo, ô song
+  song, hay lối đi hẹp hơn: bán kính quay tính ra phải ứng với 0,30 đến 0,65
+  lần góc lái tối đa, ngoài khoảng đó ô bị bỏ qua.
 - **Mặt đất coi là phẳng.** Đầu vạch được chiếu xuống mặt phẳng z = 0 của xe.
   Bãi của Town05 phẳng; trên dốc thì vị trí sẽ lệch.
 - **Bộ nhớ đồ họa 8 GB là sát nút.** Server CARLA vừa mở chiếm khoảng 6 GB và
-  nhả dần khi render; ba engine TensorRT cần khoảng 0,6 GB. Backend `cpu` chỉ
-  cho 0,8 kết quả/giây cạnh CARLA.
+  nhả dần khi render; hai engine TensorRT của màn lái cần 0,5 GB, engine của
+  model ô đỗ chưa đo riêng. Backend `cpu` chỉ cho 0,8 kết quả/giây cạnh CARLA.
 - **Mô phỏng không đạt 30 tick/giây.** Màn lái có cửa sổ CARLA: 22,9 đến 29,3
   tick/giây. Màn đỗ render thêm một camera: 27,0 đến 27,1 tick/giây không cửa
   sổ, 19,8 và 21,5 có cửa sổ. Mọi thời hạn tính theo thời gian mô phỏng nên kết
