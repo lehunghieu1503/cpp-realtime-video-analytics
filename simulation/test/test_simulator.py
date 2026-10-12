@@ -240,5 +240,126 @@ class LeaseTest(unittest.TestCase):
                          (1.0, "obstacle:distance:car"))
 
 
+class ReverseAndParkingBrake(unittest.TestCase):
+    """reverse and hand_brake: optional, false when left out, and counted as
+    driving whatever the pedals say."""
+    STANDING = dict(throttle=0.0, brake=1.0)
+
+    def setUp(self):
+        self.lease = protocol.Lease("r1", "carla-front", LIMITS)
+        self.known = dict(known_basis=lambda ns: True,
+                          known_control=lambda ns, frame: True)
+
+    def offer(self, c, now=1000 * MS, mono=0, **known):
+        return self.lease.offer(c, now, mono, **dict(self.known, **known))
+
+    def arm(self):
+        self.assertEqual(self.lease.arm({"run_id": "r1", "enable": True}), "")
+
+    def test_a_command_without_the_two_fields_is_valid_and_they_are_false(self):
+        self.assertEqual(check(command()), "")
+        self.arm()
+        self.offer(command())
+        applied = self.lease.control(1000 * MS, 0)
+        self.assertIs(applied["reverse"], False)
+        self.assertIs(applied["hand_brake"], False)
+        self.assertEqual(applied["throttle"], 0.3)
+
+    def test_they_must_be_booleans(self):
+        for field in ("reverse", "hand_brake"):
+            for bad in (1, 0, "true", None, 1.0):
+                self.assertEqual(check(command(**{field: bad})), "bad_" + field, bad)
+            self.assertEqual(check(command(**{field: True})), "")
+            self.assertEqual(check(command(**{field: False})), "")
+        # Reverse does not allow both pedals either
+        self.assertEqual(check(command(reverse=True, brake=0.5)), "throttle_and_brake")
+
+    def test_standing_with_either_flag_is_checked_like_a_command_that_drives(self):
+        for flag in ("reverse", "hand_brake"):
+            forged = command(**self.STANDING, **{flag: True}, reason="parked")
+            self.assertTrue(protocol.is_driving(forged))
+            # A brake needs no basis; this is not just a brake
+            self.assertEqual(check(dict(forged, basis_sim_ns=0, valid_until_sim_ns=0),
+                                   basis=False), "unknown_basis")
+            self.assertEqual(check(dict(forged, valid_until_sim_ns=1101 * MS)),
+                             "validity_too_long")
+            self.assertEqual(check(dict(forged, run_id="r0")), "wrong_run")
+            self.assertEqual(check(dict(forged, control_sim_ns=1101 * MS), now=1101 * MS),
+                             "expired")
+        self.assertFalse(protocol.is_driving(command(**self.STANDING)))
+        self.assertFalse(protocol.is_driving(command(**self.STANDING, reverse=False,
+                                                     hand_brake=False)))
+
+    def test_not_armed_neither_flag_reaches_the_vehicle(self):
+        for flag in ("reverse", "hand_brake"):
+            self.setUp()
+            self.assertEqual(self.offer(command(**self.STANDING, **{flag: True},
+                                                reason="parked")), "")
+            applied = self.lease.control(1000 * MS, 0)
+            self.assertEqual(applied["reason"], "not_armed")
+            self.assertEqual((applied["throttle"], applied["brake"]), (0.0, 1.0))
+            self.assertIs(applied["reverse"], False)
+            self.assertIs(applied["hand_brake"], False)
+
+    def test_a_parking_brake_from_another_run_is_rejected(self):
+        self.arm()
+        self.assertEqual(self.offer(command(**self.STANDING, hand_brake=True,
+                                            run_id="r0", reason="parked")), "wrong_run")
+        applied = self.lease.control(1000 * MS, 0)
+        self.assertEqual(applied["reason"], "no_command")
+        self.assertIs(applied["hand_brake"], False)
+
+    def test_armed_and_in_date_reverse_reaches_the_vehicle(self):
+        self.arm()
+        self.assertEqual(self.offer(command(throttle=0.2, reverse=True, steer=-0.45)), "")
+        applied = self.lease.control(1000 * MS, 0)
+        self.assertEqual((applied["throttle"], applied["brake"], applied["steer"]),
+                         (0.2, 0.0, -0.45))
+        self.assertIs(applied["reverse"], True)
+        self.assertIs(applied["hand_brake"], False)
+        self.assertEqual(applied["reason"], "")
+        # Standing in reverse gear, between two moves: still reverse, not "held"
+        self.offer(command(**self.STANDING, reverse=True, command_seq=6))
+        applied = self.lease.control(1000 * MS, 0)
+        self.assertIs(applied["reverse"], True)
+        self.assertEqual(applied["reason"], "")
+
+    def test_parked_is_held_with_the_parking_brake(self):
+        self.arm()
+        self.offer(command(**self.STANDING, hand_brake=True, reason="parked"))
+        applied = self.lease.control(1000 * MS, 0)
+        self.assertEqual((applied["throttle"], applied["brake"]), (0.0, 1.0))
+        self.assertIs(applied["hand_brake"], True)
+        self.assertIs(applied["reverse"], False)
+        self.assertEqual(applied["reason"], "parked")  # not a driving tick in the log
+
+    def test_every_brake_the_lease_decides_on_has_both_flags_false(self):
+        reverse = command(throttle=0.2, reverse=True, hand_brake=True)
+        cases = {}
+        cases["no_command"] = self.lease.control(0, 0)
+        self.offer(reverse)
+        cases["not_armed"] = self.lease.control(1000 * MS, 0)
+        self.arm()
+        cases["command_expired"] = self.lease.control(1100 * MS + 1, 0)
+        cases["controller_silent"] = self.lease.control(1000 * MS, 301 * MS)
+        self.offer(command(**self.STANDING, command_seq=6, reason="obstacle:distance:car"))
+        cases["obstacle:distance:car"] = self.lease.control(1000 * MS, 0)
+        self.offer(dict(reverse, command_seq=7))
+        self.lease.arm({"run_id": "r1", "stop": True})
+        cases["stopped"] = self.lease.control(1000 * MS, 0)
+        for reason, applied in cases.items():
+            self.assertEqual(applied["reason"], reason)
+            self.assertEqual((applied["throttle"], applied["brake"]), (0.0, 1.0), reason)
+            self.assertIs(applied["reverse"], False, reason)
+            self.assertIs(applied["hand_brake"], False, reason)
+
+    def test_the_reason_is_not_authority(self):
+        # "parked" as a reason, without the flag: an ordinary brake
+        self.offer(command(**self.STANDING, reason="parked"))
+        applied = self.lease.control(1000 * MS, 0)
+        self.assertIs(applied["hand_brake"], False)
+        self.assertEqual(applied["reason"], "parked")
+
+
 if __name__ == "__main__":
     unittest.main()

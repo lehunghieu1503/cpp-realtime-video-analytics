@@ -173,6 +173,16 @@ class Pairer:
 COMMAND_FIELDS = ("run_id", "source", "command_seq", "basis_sim_ns",
                   "control_sim_ns", "control_frame", "valid_until_sim_ns",
                   "throttle", "brake", "steer", "reason")
+# May be left out, and are then false
+OPTIONAL_FLAGS = ("reverse", "hand_brake")
+
+
+def is_driving(command):
+    """Whether a command does more than brake. Reverse gear and the parking
+    brake count whatever the pedals say: a command with either of them goes
+    through every check a command that moves the vehicle goes through."""
+    return (command["throttle"] > 0.0 or command["brake"] < 1.0
+            or command.get("reverse") is True or command.get("hand_brake") is True)
 
 
 def _is_int(value):
@@ -215,6 +225,9 @@ def check_command(command, run_id, source, last_seq, now_sim_ns, limits,
         return "out_of_range"
     if command["throttle"] > 0.0 and command["brake"] > 0.0:
         return "throttle_and_brake"
+    for field in OPTIONAL_FLAGS:
+        if field in command and not isinstance(command[field], bool):
+            return "bad_" + field
     if not isinstance(command["reason"], str):
         return "bad_reason"
     if command["command_seq"] <= last_seq:
@@ -225,8 +238,7 @@ def check_command(command, run_id, source, last_seq, now_sim_ns, limits,
         return "unknown_control_pose"
     if now_sim_ns - command["control_sim_ns"] > limits["pose_budget_ns"]:
         return "stale_control_pose"
-    driving = command["throttle"] > 0.0 or command["brake"] < 1.0
-    if driving:
+    if is_driving(command):
         # A command that lets the vehicle move must rest on a camera frame
         # this simulator produced, and recent enough
         if not known_basis(command["basis_sim_ns"]):
@@ -238,7 +250,8 @@ def check_command(command, run_id, source, last_seq, now_sim_ns, limits,
     return ""
 
 
-BRAKE = {"throttle": 0.0, "brake": 1.0, "steer": 0.0}
+BRAKE = {"throttle": 0.0, "brake": 1.0, "steer": 0.0, "reverse": False,
+         "hand_brake": False}
 
 
 class Lease:
@@ -248,6 +261,10 @@ class Lease:
     run, a valid command that is still in force in simulation time, and a
     command received recently in wall time, it brakes. A rejected command
     does not extend anything.
+
+    Every brake it decides on itself is the foot brake alone: reverse gear
+    and the parking brake are applied only from a command that passed as
+    one that drives. What a command gives as its reason decides nothing.
     """
 
     def __init__(self, run_id, source, limits):
@@ -300,17 +317,23 @@ class Lease:
         seq = command["command_seq"]
         if mono_ns - self.received_mono_ns > self.limits["wall_lease_ns"]:
             return brake("controller_silent", seq)
-        driving = command["throttle"] > 0.0 or command["brake"] < 1.0
-        if not driving:
-            return dict(throttle=0.0, brake=1.0, steer=command["steer"],
+        if not is_driving(command):
+            return dict(BRAKE, steer=command["steer"],
                         reason=command["reason"] or "commanded_brake",
                         command_seq=seq)
         if not self.armed:
             return brake("not_armed", seq)
         if now_sim_ns > command["valid_until_sim_ns"]:
             return brake("command_expired", seq)
+        reverse = command.get("reverse") is True
+        # Standing on the brake, in a forward gear: held, not driven. The
+        # log keeps the controller's word for why (it is "parked").
+        held = command["throttle"] == 0.0 and command["brake"] >= 1.0 and not reverse
         return dict(throttle=command["throttle"], brake=command["brake"],
-                    steer=command["steer"], reason="", command_seq=seq)
+                    steer=command["steer"], reverse=reverse,
+                    hand_brake=command.get("hand_brake") is True,
+                    reason=(command["reason"] or "held") if held else "",
+                    command_seq=seq)
 
 
 def write_json(path, data):
