@@ -157,17 +157,45 @@ def lane_from_boundaries(fits, config=DEFAULTS, calibration_id=""):
             "curvature_inv_m": 2 * a / (1 + slope * slope) ** 1.5}
 
 
-def estimate_lane(lanes_px, rig, config=DEFAULTS):
-    """Lane pixels of one image to the lane envelope, in the ego frame the
-    image was captured from."""
+def boundaries(lanes_px, rig, config=DEFAULTS):
+    """Every marking of one image that supports a curve, as fitted on the
+    road in the ego frame the image was captured from."""
     fits = []
     for points in lanes_px:
         if len(points) == 0:
             continue
         points = np.asarray(points, dtype=float)
         xy, valid = rig.uv_to_ground(points[:, 0], points[:, 1])
-        fits.append(fit_boundary(xy[valid], config))
-    return lane_from_boundaries(fits, config, rig.calibration_id)
+        fit = fit_boundary(xy[valid], config)
+        if fit is not None:
+            fits.append(fit)
+    return fits
+
+
+def estimate_lane(lanes_px, rig, config=DEFAULTS):
+    """Lane pixels of one image to the lane envelope, in the ego frame the
+    image was captured from."""
+    return lane_from_boundaries(boundaries(lanes_px, rig, config), config,
+                                rig.calibration_id)
+
+
+def rebase_boundary(boundary, capture_pose, control_pose, ground_z=0.0,
+                    config=DEFAULTS, step_m=1.0):
+    """A boundary seen from capture_pose, fitted again in the ego frame at
+    control_pose over the range it was observed on; None when what is left
+    of it does not support a curve."""
+    moved_config = dict(config)
+    # The points come from a curve, not from pixels: region and count checks
+    # were made at capture; what is left to check is the support that remains
+    moved_config["roi_x_min_m"] = 0.0
+    moved_config["min_points"] = 3
+    moved_config["min_support_m"] = min(config["min_support_m"], 3.0)
+    count = max(2, int(round((boundary["x_max_m"] - boundary["x_min_m"]) / step_m)) + 1)
+    x = np.linspace(boundary["x_min_m"], boundary["x_max_m"], count)
+    points = np.stack([x, evaluate(boundary["coefficients"], x),
+                       np.full_like(x, ground_z)], axis=1)
+    moved = control_pose.from_parent(capture_pose.to_parent(points))
+    return fit_boundary(moved[:, :2], moved_config), moved_config
 
 
 def rebase_lane(lane, capture_pose, control_pose, ground_z=0.0, config=DEFAULTS,
@@ -181,21 +209,11 @@ def rebase_lane(lane, capture_pose, control_pose, ground_z=0.0, config=DEFAULTS,
     """
     if not lane or not lane.get("valid"):
         return _invalid("no_lane", config, (lane or {}).get("calibration_id", ""))
-    moved_config = dict(config)
-    # The points come from a curve, not from pixels: region and count checks
-    # were made at capture; what is left to check is the support that remains
-    moved_config["roi_x_min_m"] = 0.0
-    moved_config["min_points"] = 3
-    moved_config["min_support_m"] = min(config["min_support_m"], 3.0)
     fits = []
     for side in ("left", "right"):
-        boundary = lane[side]
-        count = max(2, int(round((boundary["x_max_m"] - boundary["x_min_m"]) / step_m)) + 1)
-        x = np.linspace(boundary["x_min_m"], boundary["x_max_m"], count)
-        points = np.stack([x, evaluate(boundary["coefficients"], x),
-                           np.full_like(x, ground_z)], axis=1)
-        moved = control_pose.from_parent(capture_pose.to_parent(points))
-        fits.append(fit_boundary(moved[:, :2], moved_config))
+        fit, moved_config = rebase_boundary(lane[side], capture_pose, control_pose,
+                                            ground_z, config, step_m)
+        fits.append(fit)
     if fits[0] is None or fits[1] is None:
         return _invalid("insufficient_support", config, lane.get("calibration_id", ""))
     return lane_from_boundaries(fits, moved_config, lane.get("calibration_id", ""))

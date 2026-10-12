@@ -552,11 +552,13 @@ class Simulator:
 
     # ── One tick ─────────────────────────────────────────────────────────────
 
-    def ego_state(self, snapshot, frame, sim_ns):
+    def ego_state(self, snapshot, frame, sim_ns, tick):
         actor = snapshot.find(self.ego.id)
         velocity = actor.get_velocity()
         angular = actor.get_angular_velocity()  # degrees per second
         return {"run_id": self.run_id, "frame": frame, "sim_ns": sim_ns,
+                # The scenario's own count: what its from_tick and at_tick mean
+                "tick": tick,
                 "pose": pose_dict(actor.get_transform()),
                 "velocity_world_mps": [velocity.x, velocity.y, velocity.z],
                 "speed_mps": math.hypot(velocity.x, velocity.y),
@@ -789,7 +791,7 @@ class Simulator:
         sim_ns = protocol.sim_ns_of(snapshot.timestamp.elapsed_seconds)
         self.ledger.update(frame, "tick", sim_ns=sim_ns, tick=tick, mono_ns=tick_mono)
         self.stats["tick_ms"] += (mono_ns() - tick_mono) / 1e6
-        ego = self.ego_state(snapshot, frame, sim_ns)
+        ego = self.ego_state(snapshot, frame, sim_ns, tick)
         self.ego_states.put(sim_ns, ego)
         self.last_ego = ego
         self.ego_log.write(json.dumps(ego, separators=(",", ":")) + "\n")

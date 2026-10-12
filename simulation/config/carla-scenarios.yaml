@@ -240,6 +240,31 @@ scenarios:
          ahead_m: 38.0, lane: 1, lateral_m: 0.8}
     expect: {drives: true, no_stop_reason_prefix: obstacle, collisions: 0}
 
+  # ── The drive show. Needs --arm ───────────────────────────────────────────
+  # One run on the straight of Town04, at up to 30 km/h:
+  #   ticks   60 to 420   follows the car ahead (5 m/s), 24 m behind it
+  #   ticks  420 to 510   moves one lane to the left
+  #   ticks  510 to 800   passes that car at 30 km/h
+  #   ticks  900 to 950   a person walks across its lane 22 m ahead: it stops
+  #   from about 1000     the person has left the lane: it drives on
+  # The speed, the follow gap and the lane change are this scenario's own;
+  # the controller reads them from the run's manifest. The car ahead has
+  # physics (a collision with it is a collision); the person is placed, tick
+  # by tick, from the left shoulder to the right one, and has left the next
+  # lane 3 s before the passed car gets there.
+  show_drive:
+    ticks: 1300
+    jpeg_quality: 75       # one PC: there is no link to fit
+    target_speed_kmh: 30.0
+    follow_gap_m: 30.0     # the stopping distance from 30 km/h is 20.9 m
+    lane_change: {at_tick: 420, side: left}
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3, ahead_m: 25.0,
+         physics: true, speed_mps: 5.0}
+      - {name: walker, class: person, blueprint: walker.pedestrian.0001,
+         ahead_m: 212.0, lane: -2.6, yaw_deg: 90.0,
+         cut_in: {start_tick: 800, duration_ticks: 300, to_lane: 1.6}}
+
   # ── Faults. Need --arm ────────────────────────────────────────────────────
   # The vehicle is driving when the fault starts; it must be braked within
   # the budget of simulation/config/carla.yaml plus one tick: age_limit_ms of

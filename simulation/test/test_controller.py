@@ -38,14 +38,15 @@ def lane_envelope(offset=0.0, curvature=0.0, heading=0.0, markings=(-1.75, 1.75)
     to the right of the vehicle."""
     pixels = [fixtures.lane_pixels(RIG, m + offset, curvature, heading,
                                    xs=np.arange(5.5, 32.0, 1.0)) for m in markings]
-    return lane.estimate_lane(pixels, RIG, LANE_CONFIG)
+    # As the device sends it: the fitted lane and the pixels it came from
+    return dict(lane.estimate_lane(pixels, RIG, LANE_CONFIG), pixels=pixels)
 
 
 class World:
     """A scripted scene feeding a ControlCore as the ROS node would."""
 
-    def __init__(self, config=CONFIG, run="r1"):
-        self.core = ControlCore(config, VEHICLE, run)
+    def __init__(self, config=CONFIG, run="r1", scenario=None):
+        self.core = ControlCore(config, VEHICLE, run, scenario=scenario)
         self.run = run
         self.tick = 0
         self.pose = Pose(0, 0, 0)
@@ -59,6 +60,7 @@ class World:
         pose = pose or self.pose
         yaw = math.radians(pose.yaw)
         return {"run_id": run or self.run, "frame": 1000 + tick, "sim_ns": tick * TICK,
+                "tick": tick,
                 "pose": dict(x=pose.x, y=pose.y, z=pose.z, roll=0.0, pitch=0.0,
                              yaw=pose.yaw),
                 "velocity_world_mps": [self.speed * math.cos(yaw),
@@ -638,6 +640,246 @@ class SpeedLimit(unittest.TestCase):
         world.speed = 30.0 / 3.6 - 1.0
         world.frame()
         self.assertGreater(world.last["throttle"], 0.0)
+
+
+class Following(unittest.TestCase):
+    """A scenario that sets its own speed and a follow gap. 30 km/h is
+    8.33 m/s; the stopping distance from it is 20.9 m."""
+    CRUISE = 30.0 / 3.6
+    SHOW = {"target_speed_kmh": 30.0, "follow_gap_m": 30.0}
+
+    def scene(self, scenario, lead_x, lead_speed=5.0, name="car", frames=8):
+        """Ego at 30 km/h, a road user ahead driving at lead_speed."""
+        world = World(scenario=scenario).running()
+        world.speed = self.CRUISE
+        for i in range(frames):
+            world.pose = Pose(self.CRUISE * i / 30.0, 0, 0)
+            x = lead_x + lead_speed * i / 30.0 - world.pose.x
+            world.objects = [(name, x, -0.9, 0.9, 1.5, 4)]
+            world.frame()
+        return world
+
+    def test_follows_a_slower_car_between_stopping_distance_and_follow_gap(self):
+        world = self.scene(self.SHOW, 25.5)
+        follow = world.core.debug["follow"]
+        self.assertGreater(follow["gap_m"], world.core.debug["stopping_distance_m"])
+        self.assertLess(follow["gap_m"], 30.0)
+        self.assertAlmostEqual(follow["lead_speed_mps"], 5.0, delta=0.6)
+        self.assertAlmostEqual(follow["target_speed_mps"], follow["lead_speed_mps"])
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertEqual(world.last["reason"], "")
+        # Slower than the vehicle goes: no throttle, a brake, no full stop
+        self.assertEqual(world.last["throttle"], 0.0)
+        self.assertGreater(world.last["brake"], 0.0)
+
+    def test_blends_in_from_the_follow_gap(self):
+        world = self.scene(self.SHOW, 30.5)  # gap about 27 m: between 24 and 30
+        follow = world.core.debug["follow"]
+        self.assertGreater(follow["target_speed_mps"], follow["lead_speed_mps"] + 0.5)
+        self.assertLess(follow["target_speed_mps"], self.CRUISE - 0.5)
+
+    def test_without_follow_gap_the_car_ahead_is_not_followed(self):
+        world = self.scene({"target_speed_kmh": 30.0}, 25.5)
+        self.assertNotIn("follow", world.core.debug)
+        self.assertEqual(world.last["brake"], 0.0)
+        self.assertEqual(world.last["reason"], "")
+
+    def test_without_a_scenario_the_shared_speed_holds(self):
+        world = World().running()
+        self.assertEqual(world.core.target_speed_kmh, 9.0)
+        self.assertIsNone(world.core.follow_gap_m)
+        self.assertIsNone(world.core.lane_change)
+        world.speed = 3.5  # above 9 km/h
+        world.frame()
+        self.assertEqual(world.last["throttle"], 0.0)
+
+    def test_inside_the_stopping_distance_it_brakes_instead(self):
+        world = self.scene(self.SHOW, 20.0)  # gap 17.6 m < 20.9 m
+        self.assertEqual(world.core.state, HOLDING)
+        self.assertEqual(world.last["reason"], "obstacle:distance:car")
+        self.assertEqual(world.last["brake"], 1.0)
+        world = self.scene(self.SHOW, 15.0, lead_speed=0.0, name="person", frames=2)
+        self.assertEqual(world.last["reason"], "obstacle:distance:person")
+        self.assertNotIn("follow", world.core.debug)
+
+    def test_velocity_not_known_yet_keeps_the_target_speed(self):
+        world = self.scene(self.SHOW, 25.5, frames=1)
+        self.assertNotIn("follow", world.core.debug)
+        self.assertEqual(world.last["reason"], "")
+        self.assertEqual(world.last["brake"], 0.0)
+
+
+class LaneChange(unittest.TestCase):
+    """lane_change: {at_tick, side} of a scenario. Lane markings 3.5 m apart;
+    `offset` moves them all to the right, as when the vehicle moves left."""
+    LINES = (-5.25, -1.75, 1.75)
+
+    def world(self, markings, at_tick=6, side="left", **more):
+        world = World(scenario={"lane_change": dict(at_tick=at_tick, side=side, **more)})
+        world.lane = lane_envelope(markings=markings)
+        return world.running()
+
+    def moved(self, world, start, stop, markings=None, step=0.05):
+        """The vehicle moves sideways: every result shows the markings a
+        little further to the right."""
+        for offset in np.arange(start, stop + 1e-9, step):
+            world.lane = lane_envelope(offset=float(offset), markings=markings or self.LINES)
+            world.frame()
+
+    def test_moves_over_when_the_next_marking_is_seen_and_holds_until_the_pair_changes(self):
+        world = self.world(self.LINES)
+        while world.tick < 6:
+            world.frame()
+            self.assertEqual(world.core.debug["lane_change"], "pending")
+            self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
+        for _ in range(20):
+            world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "active")
+        self.assertAlmostEqual(world.core.lane_change["width_m"], 3.5, delta=0.1)
+        self.assertLess(world.last["steer"], -0.01)  # to the left
+        # 1 m to the left: the old lane's centre is now to the right. Without
+        # the shift the steering would go back to it.
+        self.moved(world, 0.0, 1.0)
+        for _ in range(90):
+            world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "active")
+        self.assertAlmostEqual(world.core.lane_change["shift_m"], 3.5, delta=0.1)
+        self.assertLess(world.last["steer"], -0.01)
+        plain = World()
+        plain.lane = lane_envelope(offset=1.0)
+        plain.running().frame()
+        self.assertGreater(plain.last["steer"], 0.0)
+        # Over the marking: the markings either side are now the next lane's
+        self.moved(world, 1.0, 1.7)
+        world.lane = lane_envelope(offset=1.8, markings=self.LINES)
+        world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "done")
+        self.assertEqual(world.core.state, RUNNING)
+        # From here on it is ordinary lane keeping, on the new lane
+        self.moved(world, 1.8, 3.5)
+        for _ in range(60):
+            world.frame()
+        self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
+        self.assertEqual(world.core.lane_change["state"], "done")
+        self.assertEqual(world.core.state, RUNNING)
+
+    def test_on_the_marking_the_device_has_no_lane_and_the_vehicle_keeps_going(self):
+        # As the lane model behaves: while the vehicle crosses, the marking
+        # beyond is gone, and the one being crossed is on neither side
+        world = self.world(self.LINES)
+        for _ in range(20):
+            world.frame()
+        self.moved(world, 0.0, 1.5)
+        self.moved(world, 1.5, 1.7, markings=(-1.75, 1.75))
+        # Over it. The vehicle stands still in this test, so the marking
+        # stays where the last result before had it, whatever comes now
+        world.lane = lane_envelope(offset=2.0, markings=(-1.75, 1.75))
+        for _ in range(10):
+            world.frame()
+        self.assertFalse(world.lane["valid"])
+        self.assertEqual(world.lane["reason"], "missing_boundary")
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertEqual(world.last["reason"], "")
+        self.assertEqual(world.core.debug["lane_change"], "active")
+        self.assertEqual(world.core.lane_bad, 0)
+        self.assertLess(world.last["steer"], -0.01)
+        # The device reports a lane again, with that marking on its right
+        world.lane = lane_envelope(offset=1.8, markings=self.LINES)
+        world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "done")
+
+    def test_losing_the_marking_being_crossed_is_losing_the_lane(self):
+        world = self.world(self.LINES)
+        for _ in range(20):
+            world.frame()
+        self.moved(world, 0.0, 1.5)
+        world.lane = dict(lane_envelope(markings=(1.75,)), pixels=[])
+        # Where the last result that had it as the lane's boundary puts it
+        # is good for coast_s, 2 s
+        for _ in range(60):
+            world.frame()
+            self.assertEqual(world.core.state, RUNNING)
+            self.assertEqual(world.last["reason"], "")
+        world.frame()
+        self.assertEqual(world.core.state, HOLDING)
+        self.assertEqual(world.last["reason"], "lane:marking_lost")
+        self.assertEqual(world.last["brake"], 1.0)
+        for _ in range(LANE_LATCH_FRAMES):
+            world.frame()
+        self.assertEqual(world.core.state, STOP_LATCHED)
+
+    def test_a_mixed_up_marking_does_not_take_over(self):
+        # The lane model, changing the slot of the marking being crossed,
+        # reports a line between it and its neighbour for a few results
+        world = self.world(self.LINES)
+        for _ in range(20):
+            world.frame()
+        self.moved(world, 0.0, 1.6)
+        for _ in range(60):
+            world.frame()
+        steer = world.last["steer"]
+        # A "lane" 3.5 m wide whose boundaries are neither where the marking is
+        world.lane = lane_envelope(markings=(-1.75 + 1.6 - 1.1, 1.75 + 1.6 - 1.1))
+        self.assertTrue(world.lane["valid"])
+        for _ in range(6):
+            world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "active")
+        self.assertEqual(world.last["reason"], "")
+        self.assertAlmostEqual(world.last["steer"], steer, delta=0.01)
+        world.lane = lane_envelope(offset=1.8, markings=self.LINES)
+        world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "done")
+
+    def test_to_the_right(self):
+        world = self.world((-1.75, 1.75, 5.25), side="right")
+        for _ in range(30):
+            world.frame()
+        self.assertEqual(world.core.debug["lane_change"], "active")
+        self.assertGreater(world.last["steer"], 0.01)
+
+    def test_without_the_next_marking_it_is_skipped_and_the_lane_is_kept(self):
+        for markings, pixels in (((-1.75, 1.75), None), (self.LINES, [])):
+            world = self.world(markings)
+            if pixels is not None:
+                world.lane["pixels"] = pixels  # the device sent no pixels
+            for _ in range(80):
+                world.frame()
+                self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
+            self.assertEqual(world.core.debug["lane_change"], "skipped")
+            self.assertEqual(world.core.lane_change["reason"], "no_marking")
+            self.assertEqual(world.core.state, RUNNING)
+        # The tick it gave up at carries the flag
+        world = self.world((-1.75, 1.75), at_tick=6)
+        flagged = []
+        for _ in range(60):
+            world.frame()
+            flagged.append(world.core.debug.get("lane_change_skipped"))
+        self.assertEqual([f for f in flagged if f], ["no_marking"])
+
+    def test_a_road_user_in_the_next_lane_keeps_it_in_its_own(self):
+        world = self.world(self.LINES)
+        world.objects = [("car", 14.0, -4.4, -2.6, 1.5, 3)]
+        for _ in range(80):
+            world.frame()
+        self.assertEqual(world.core.lane_change["reason"], "lane_occupied")
+        self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
+
+    def test_a_marking_that_is_too_far_is_not_the_next_lane(self):
+        world = self.world((-7.5, -1.75, 1.75))  # 5.75 m: not a lane's width
+        for _ in range(80):
+            world.frame()
+        self.assertEqual(world.core.lane_change["reason"], "no_marking")
+
+    def test_gives_up_when_the_pair_never_changes(self):
+        world = self.world(self.LINES, timeout_ticks=40)
+        for _ in range(80):
+            world.frame()
+        self.assertEqual(world.core.lane_change["reason"], "timeout")
+        self.assertEqual(world.core.debug["lane_change"], "skipped")
+        self.assertEqual(world.core.state, RUNNING)
+        for _ in range(30):  # back to its own lane, which is where it still is
+            world.frame()
+        self.assertAlmostEqual(world.last["steer"], 0.0, delta=0.01)
 
 
 class DelayedSource(unittest.TestCase):

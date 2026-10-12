@@ -12,7 +12,8 @@ Per tick, with the ego pose of that tick:
   lane and objects are moved from the pose they were seen from to the
   current pose, then
     steering   pure pursuit on the lane's centreline
-    speed      PI on the vehicle's own speed, at most speed_cap_kmh
+    speed      PI on the vehicle's own speed, at most speed_cap_kmh; with
+               follow_gap_m, not faster than a vehicle ahead in the lane
     brake      an object of a hazard class in the vehicle's path, closer than
                v * tau + v^2 / (2 * a_min) + margin
 
@@ -31,6 +32,11 @@ States:
   STOP_LATCHED  brake, until the episode is restarted with a new run id:
                 perception too old, no usable pose, no lane ahead to steer on,
                 or the lane lost for five results in a row.
+
+What a scenario asks for comes from the run's manifest, never from the
+device: its own target speed, follow_gap_m, and one lane change
+(lane_change: {at_tick, side}). Without these keys the vehicle keeps the
+shared target speed and its lane.
 
 This module never reads another actor's true state or the map: it does not
 import the simulator's API at all.
@@ -86,8 +92,14 @@ def pure_pursuit(target_x, target_y, wheelbase, rear_axle_x, max_steer_rad):
 class ControlCore:
     """The controller without ROS: fed with messages, asked for commands."""
 
-    def __init__(self, config, vehicle, run_id, source="carla-front"):
+    def __init__(self, config, vehicle, run_id, source="carla-front", scenario=None):
         self.c = config["control"]
+        scenario = scenario or {}
+        self.target_speed_kmh = float(scenario.get("target_speed_kmh",
+                                                   self.c["target_speed_kmh"]))
+        self.follow_gap_m = scenario.get("follow_gap_m")
+        change = scenario.get("lane_change")
+        self.lane_change = dict(change, state="pending") if change else None
         self.rig = Rig.from_config(config["calibration"])
         self.lane_config = lane_config_from(config.get("lane"))
         self.vehicle = vehicle
@@ -242,15 +254,15 @@ class ControlCore:
             "reason": reason,
         }
 
-    def obstacles_now(self, pose_now, lane_now, age_s, envelope):
+    def obstacles_now(self, pose_now, centre, age_s, envelope):
         """Every object of the basis frame in the current ego frame, with the
-        decision taken on it. envelope is the gap an object in the path must
-        keep. Returns (brake reason or "", whether a track that was only
-        predicted is in the path, list for the log)."""
+        decision taken on it. centre is the path the vehicle follows, envelope
+        the gap an object in it must keep. Returns (brake reason or "",
+        whether a track that was only predicted is in the path, list for the
+        log)."""
         capture = self.basis["pose"]
         half = self.vehicle["width_m"] / 2.0 + self.c.get("corridor_margin_m", 0.3)
         bumper = self.vehicle["front_bumper_m"]
-        centre = lane_now["centerline"]
         extrapolate = float(self.c.get("extrapolate_m", 20.0))
         decisions = []
         brake_reason = ""
@@ -404,8 +416,21 @@ class ControlCore:
                                              pose_now, self.rig.ground_z,
                                              self.lane_config)
         basis_ns = self.basis["sim_ns"]
-        if not lane_now["valid"]:
-            reason = "lane:" + (self.basis["lane"].get("reason") or lane_now["reason"])
+        # The path: the lane's centre, or, while the vehicle is between two
+        # lanes, a line beside the marking it is crossing
+        centre = None
+        reason = ""
+        change = self.lane_change
+        if change and change["state"] == "active":
+            centre = self.crossing_path(lane_now, pose_now, ego_now["sim_ns"], dt)
+            if centre is None and change["state"] == "active":
+                reason = "lane:marking_lost"
+        if centre is None and not reason:
+            if lane_now["valid"]:
+                centre = lane_now["centerline"]
+            else:
+                reason = "lane:" + (self.basis["lane"].get("reason") or lane_now["reason"])
+        if centre is None:
             # Counted per result, not per tick: one result is used for
             # several ticks when the next one is late
             if basis_ns != self.lane_bad_ns:
@@ -416,12 +441,11 @@ class ControlCore:
                 return stop(reason)
             return hold(reason)
         self.lane_bad = 0
-        centre = lane_now["centerline"]
         self.debug["lane"] = {"lateral_error_m": lane_now["lateral_error_m"],
                               "heading_rad": lane_now["heading_rad"],
                               "x_min_m": centre["x_min_m"], "x_max_m": centre["x_max_m"]}
 
-        target_speed = min(self.c["target_speed_kmh"],
+        target_speed = min(self.target_speed_kmh,
                            self.c.get("speed_cap_kmh", 30.0)) / 3.6
         # Standing after a brake, the path must be clear as far as the vehicle
         # would need from the speed it goes back to: otherwise it would creep
@@ -430,7 +454,7 @@ class ControlCore:
             max(speed, target_speed) if self.state == HOLDING else speed,
             self.c["brake"])
         brake_reason, predicted_in_path, decisions = self.obstacles_now(
-            pose_now, lane_now, age_ns * 1e-9, envelope)
+            pose_now, centre, age_ns * 1e-9, envelope)
         self.debug["obstacles"] = decisions
         self.debug["stopping_distance_m"] = envelope
         if brake_reason:
@@ -457,6 +481,11 @@ class ControlCore:
             return stop("no_lookahead_support")
         target_x = min(max(lookahead, centre["x_min_m"]), centre["x_max_m"])
         target_y = lane_geometry.evaluate(centre["coefficients"], target_x)
+        if change:
+            self.debug["lane_change"] = change["state"]
+            if change["state"] == "pending":
+                self.start_lane_change(ego_now.get("tick"), lane_now, pose_now,
+                                       decisions, speed)
         wanted = self.c["steer"].get("gain", 1.0) * pure_pursuit(
             target_x, target_y, self.vehicle["wheelbase_m"],
             -self.vehicle["wheelbase_m"] / 2.0,
@@ -467,12 +496,21 @@ class ControlCore:
         self.debug["target"] = [target_x, target_y]
 
         # Speed: PI on the vehicle's own speed
+        if self.follow_gap_m:
+            target_speed = self.follow(target_speed, speed, envelope, decisions)
+        if change and change["state"] == "active":
+            # Between two lanes: not the moment to speed up
+            target_speed = min(target_speed, max(change["speed_mps"], 2.0))
         error = target_speed - speed
         gains = self.c["speed"]
         # Only near the target: while the vehicle is still getting up to
-        # speed the integral would wind up and carry it past the target
-        if abs(error) < gains.get("integral_band_mps", 0.5):
-            self.integral = max(-2.0, min(2.0, self.integral + error * dt))
+        # speed the integral would wind up and carry it past the target.
+        # "Near" and the integral's limit grow with the target: at 30 km/h
+        # the proportional term alone settled 1.3 m/s short.
+        band = max(gains.get("integral_band_mps", 0.5), 0.2 * target_speed)
+        limit = max(2.0, 0.4 * target_speed)
+        if abs(error) < band:
+            self.integral = max(-limit, min(limit, self.integral + error * dt))
         throttle = gains["kp"] * error + gains["ki"] * self.integral
         brake = 0.0
         if error < -0.5:
@@ -480,6 +518,131 @@ class ControlCore:
             throttle, brake = 0.0, min(1.0, 0.3 * -error)
         throttle = max(0.0, min(gains.get("max_throttle", 0.6), throttle))
         return self.command(ego_now, throttle, brake, self.steer, "")
+
+    def follow(self, target_speed, speed, envelope, decisions):
+        """The target speed behind a vehicle in the lane: its speed once the
+        gap is down to 80 % of follow_gap_m, blended in from follow_gap_m.
+        Inside the stopping distance it is not followed, it is braked for,
+        before this is reached."""
+        lead = None
+        for d in decisions:
+            if d.get("in_path") is True and d["class"] in self.hazards \
+                    and "closing_mps" in d and not d.get("predicted") \
+                    and envelope < d["gap_m"] < self.follow_gap_m \
+                    and (lead is None or d["gap_m"] < lead["gap_m"]):
+                lead = d
+        if lead is None:
+            return target_speed
+        lead_speed = max(0.0, speed - lead["closing_mps"])
+        near = 0.8 * self.follow_gap_m
+        blend = min(1.0, max(0.0, (lead["gap_m"] - near) / (self.follow_gap_m - near)))
+        followed = lead_speed + blend * max(0.0, target_speed - lead_speed)
+        self.debug["follow"] = {"gap_m": lead["gap_m"], "lead_speed_mps": lead_speed,
+                                "target_speed_mps": min(target_speed, followed)}
+        return min(target_speed, followed)
+
+    def markings_now(self, pose_now):
+        """Every marking the device's lane pixels support, fitted on the road:
+        [(as seen at capture, in the current ego frame)]."""
+        out = []
+        for fit in lane_geometry.boundaries(self.basis["lane"].get("pixels") or [],
+                                            self.rig, self.lane_config):
+            moved = self.marking_now(fit, self.basis["pose"], pose_now)
+            if moved is not None:
+                out.append((fit, moved))
+        return out
+
+    def marking_now(self, fit, capture, pose_now):
+        return lane_geometry.rebase_boundary(fit, capture, pose_now, self.rig.ground_z,
+                                             self.lane_config)[0]
+
+    def marking_at(self, marking, x=None):
+        x = self.lane_config["reference_x_m"] if x is None else x
+        return lane_geometry.evaluate(
+            marking["coefficients"], min(max(x, marking["x_min_m"]), marking["x_max_m"]))
+
+    def give_up_lane_change(self, reason):
+        self.lane_change.update(state="skipped", reason=reason)
+        self.debug.update(lane_change="skipped", lane_change_skipped=reason)
+
+    def start_lane_change(self, tick, lane_now, pose_now, decisions, speed):
+        """The scenario's lane change begins at its tick, and only when the
+        image shows the marking beyond the ego lane's own on that side: the
+        width of the next lane is measured, never assumed. Without it, or
+        with a road user in that lane, the vehicle stays where it is."""
+        change = self.lane_change
+        if not isinstance(tick, int) or tick < change["at_tick"]:
+            return
+        name = "left" if change["side"] == "left" else "right"
+        side = -1.0 if name == "left" else 1.0
+        y_inner = self.marking_at(lane_now[name])
+        widths = [side * (self.marking_at(m) - y_inner)
+                  for _, m in self.markings_now(pose_now)]
+        widths = [w for w in widths if self.lane_config["width_min_m"] <= w
+                  <= self.lane_config["width_max_m"]]
+        reason = "" if widths else "no_marking"
+        if widths:
+            low, high = sorted((y_inner, y_inner + side * min(widths)))
+            if any(d["class"] in self.hazards and "left_m" in d
+                   and d["right_m"] >= low and d["left_m"] <= high
+                   and d["gap_m"] < change.get("clear_m", 40.0) for d in decisions):
+                reason = "lane_occupied"
+        if not reason:
+            # The marking to cross, as the device fitted it in this result
+            change.update(state="active", width_m=min(widths), shift_m=0.0, ticks=0,
+                          speed_mps=speed, marking=self.basis["lane"][name],
+                          marking_pose=self.basis["pose"],
+                          marking_ns=self.basis["sim_ns"])
+            self.debug["lane_change"] = "active"
+        elif tick >= change["at_tick"] + change.get("window_ticks", 30):
+            self.give_up_lane_change(reason)
+
+    def crossing_path(self, lane_now, pose_now, now_ns, dt):
+        """The path during a lane change: beside the marking being crossed,
+        from the centre of the lane the vehicle leaves to the centre of the
+        one it enters. None when that marking is lost, or when the change is
+        over.
+
+        While the vehicle is over the marking the lane model is of no use:
+        the device reports no lane, since the marking is on neither side,
+        and what the model gives for it lags the marking by half a metre and
+        then mixes it with its neighbour while it moves it to another slot.
+        So the marking is carried: where the last result in which it was the
+        ego lane's own boundary puts it now, by the vehicle's own motion, for
+        coast_s at most. The change is done when the device reports a lane
+        again whose boundary on the side the vehicle came from is where that
+        puts the marking.
+        """
+        change = self.lane_change
+        left = change["side"] == "left"
+        side = -1.0 if left else 1.0
+        marking = self.marking_now(change["marking"], change["marking_pose"], pose_now)
+        if marking is None or now_ns - change["marking_ns"] > \
+                change.get("coast_s", 2.0) * 1e9:
+            return None
+        y = self.marking_at(marking)
+        if lane_now["valid"]:
+            ahead, behind = ("left", "right") if left else ("right", "left")
+            if abs(self.marking_at(lane_now[behind]) - y) < 0.4:
+                change["state"] = "done"
+                return None
+            if abs(self.marking_at(lane_now[ahead]) - y) < 0.4 \
+                    and self.basis["sim_ns"] > change["marking_ns"]:
+                # Not over it yet: this result's own fit of it
+                change.update(marking=self.basis["lane"][ahead],
+                              marking_pose=self.basis["pose"],
+                              marking_ns=self.basis["sim_ns"])
+                marking = lane_now[ahead]
+        change["ticks"] += 1
+        if change["ticks"] > change.get("timeout_ticks", 450):
+            self.give_up_lane_change("timeout")
+            return None
+        change["shift_m"] = min(change["width_m"], change["shift_m"]
+                                + change.get("rate_mps", 1.0) * dt)
+        a, b, c = marking["coefficients"]
+        offset = side * (change["shift_m"] - change["width_m"] / 2.0)
+        return {"coefficients": [a, b, c + offset], "x_min_m": marking["x_min_m"],
+                "x_max_m": marking["x_max_m"]}
 
     def status(self, ego_now):
         reasons = self.gates(ego_now) if self.state == WAIT_DATA else []
@@ -518,7 +681,8 @@ def main():
     if manifest["run_id"] != args.run_id:
         raise SystemExit("the run directory belongs to run %s" % manifest["run_id"])
 
-    core = ControlCore(config, manifest["vehicle"], args.run_id, manifest["source"])
+    core = ControlCore(config, manifest["vehicle"], args.run_id, manifest["source"],
+                       manifest.get("scenario_config"))
     names = protocol.topics(args.run_id, manifest["source"])
     logs = {name: open(os.path.join(args.run_dir, name + ".jsonl"), "x")
             for name in ("perception", "metric", "commands")}
