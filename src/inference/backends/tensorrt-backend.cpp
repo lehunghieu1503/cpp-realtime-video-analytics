@@ -355,7 +355,8 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
                  fs::last_write_time(enginePath, stale) >=
                      fs::last_write_time(modelPath, stale);
   std::string plan = current ? readFile(enginePath) : std::string();
-  if (plan.empty()) {
+  const bool built = plan.empty();
+  if (built) {
     plan = impl_->build(config, cacheDir);
     std::error_code ec;
     fs::create_directories(cacheDir, ec);
@@ -421,7 +422,9 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   inspector->setExecutionContext(impl_->context.get());
   std::string layers = inspector->getEngineInformation(
       nvinfer1::LayerInformationFormat::kJSON);
-  if (!fs::exists(layersPath)) std::ofstream(layersPath) << layers;
+  // Of an engine just built it is written again: the file there may be of
+  // the engine this one replaced
+  if (built || !fs::exists(layersPath)) std::ofstream(layersPath) << layers;
   description_ = "TensorRT " + std::to_string(NV_TENSORRT_MAJOR) + "." +
                  std::to_string(NV_TENSORRT_MINOR) + " engine, " +
                  summarise(layers) + " (details in " + layersPath.string() +
