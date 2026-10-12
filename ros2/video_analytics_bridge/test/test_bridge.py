@@ -19,6 +19,10 @@ FRAME = {
              "centerline": {"coefficients": [0.0, 0.0, 0.0], "x_min_m": 8, "x_max_m": 30},
              "reference_x_m": 8.0, "lateral_error_m": 0.0, "heading_rad": 0.0,
              "curvature_inv_m": 0.0},
+    "stalls": [{"class": "empty", "confidence": 0.93,
+                "bbox": {"x": 150, "y": 207, "w": 460, "h": 103},
+                "corners": [[150.2, 302.1, 0.98], [508.4, 310.0, 0.97],
+                            [606.3, 207.2, 0.91], [466.0, 205.4, 0.9]]}],
     "latency_ms": 12.3, "fps": 30.0,
 }
 
@@ -44,6 +48,9 @@ class Envelope(unittest.TestCase):
                         "centerline": None, "lateral_error_m": None}
         self.assertEqual(envelope.check(changed(["lane"], invalid_lane)), "")
         self.assertEqual(envelope.check(changed(["simulation", "sim_ns"], 0)), "")
+        # A camera without the stall model, and one that found no stall
+        self.assertEqual(envelope.check(changed(["stalls"], KeyError)), "")
+        self.assertEqual(envelope.check(changed(["stalls"], [])), "")
 
     def test_malformed_frames_are_named(self):
         cases = [
@@ -70,6 +77,12 @@ class Envelope(unittest.TestCase):
             (["lane", "left", "coefficients"], [0.0, 0.0], "bad lane curve"),
             (["lane", "right", "coefficients", 1], float("nan"), "bad lane curve"),
             (["lane", "heading_rad"], None, "bad lane numbers"),
+            (["stalls"], {}, "bad stalls"),
+            (["stalls", 0, "class"], "free", "bad stall"),
+            (["stalls", 0, "confidence"], None, "bad stall"),
+            (["stalls", 0, "corners"], [[1, 2, 0.9]] * 3, "bad stall corners"),
+            (["stalls", 0, "corners", 2], [1.0, 2.0], "bad stall corners"),
+            (["stalls", 0, "corners", 1, 0], float("nan"), "bad stall corners"),
         ]
         for path, value, reason in cases:
             self.assertEqual(envelope.check(changed(path, value)), reason, path)

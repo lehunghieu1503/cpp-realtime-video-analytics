@@ -5,7 +5,7 @@ A result of a simulation carries the identity of the simulator's frame:
     {"stream": "carla-front", "frame_id": 42,
      "simulation": {"run_id": "r_20261011_ab12", "sim_ns": 1533333333},
      "image": {"width": 1280, "height": 720},
-     "detections": [...], "lane": {...}}
+     "detections": [...], "lane": {...}, "stalls": [...]}
 
 No ROS import here, so the checks can be tested without ROS.
 """
@@ -84,6 +84,19 @@ def check(frame):
                     "lateral_error_m", "heading_rad", "curvature_inv_m",
                     "reference_x_m")):
                 return "bad lane numbers"
+    stalls = frame.get("stalls")
+    if stalls is not None:
+        if not isinstance(stalls, list):
+            return "bad stalls"
+        for item in stalls:
+            if not isinstance(item, dict) or item.get("class") not in ("empty", "occupied") \
+                    or not is_number(item.get("confidence")):
+                return "bad stall"
+            corners = item.get("corners")
+            if not isinstance(corners, list) or len(corners) != 4 or not all(
+                    isinstance(c, list) and len(c) == 3 and all(is_number(v) for v in c)
+                    for c in corners):
+                return "bad stall corners"
     return ""
 
 
