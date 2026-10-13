@@ -187,7 +187,10 @@ fi
 # The device's copy of the config: the camera streams come from this PC. It
 # has what this scenario uses and nothing else. The rear camera and the stall
 # model are for the scenarios that park; the lane model is for the others (a
-# car park has no lanes); the dashboard is served only with --web.
+# car park has no lanes). A scenario that parks with `bev: true` also has the
+# cameras of the bird's-eye view, and the stall model is then that section's,
+# run on the view instead of the rear camera's image. The dashboard is served
+# only with --web.
 "$CARLA_PYTHON" - "$CONFIG" "$SCENARIOS" "$SCENARIO" "$SIM_HOST" "$WEB" >"$RUN_DIR/device.yaml" <<'PY'
 import sys
 import yaml
@@ -198,13 +201,28 @@ with open(scenarios_path) as f:
     scenarios = yaml.safe_load(f)
 if name not in scenarios["scenarios"]:
     raise SystemExit("unknown scenario " + name)
-if dict(scenarios.get("defaults", {}), **scenarios["scenarios"][name]).get("park"):
+scenario = dict(scenarios.get("defaults", {}), **scenarios["scenarios"][name])
+view = [camera["source"] for camera in (config.get("bev") or {}).get("cameras", [])]
+if scenario.get("park") and scenario.get("bev"):
+    if not view:
+        raise SystemExit("scenario %s wants a bird's-eye view: the config has no bev section" % name)
+    for source in config["sources"]:
+        source.pop("lane", None)
+        source.pop("stall", None)
+    config.pop("lane", None)
+    config["stall"]["model"] = config["bev"].pop("model")
+elif scenario.get("park"):
+    config["sources"] = [s for s in config["sources"]
+                         if s.get("stall") or s["id"] not in view]
     for source in config["sources"]:
         source.pop("lane", None)
     config.pop("lane", None)
+    config.pop("bev", None)
 else:
-    config["sources"] = [s for s in config["sources"] if not s.get("stall")]
+    config["sources"] = [s for s in config["sources"]
+                         if not s.get("stall") and s["id"] not in view]
     config.pop("stall", None)
+    config.pop("bev", None)
 config["dashboard"] = bool(web)
 yaml.safe_dump(config, sys.stdout, sort_keys=False)
 PY

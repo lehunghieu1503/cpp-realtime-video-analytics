@@ -51,10 +51,11 @@ rear_calibration:
   ground_z: 0.0
   distortion: [0, 0, 0, 0, 0]
 
-# The cameras under the two mirrors, of the scenarios that park: looking down
-# and turned 15 degrees to the rear. With the rear camera they have 93 % of
-# the ground within 4 m of the vehicle behind its front axle in view: the
-# stalls beside it, and the mouth of the one it backs into until it stands.
+# The cameras under the two mirrors, of the scenarios that park with
+# `bev: true`: looking down and turned 15 degrees to the rear. With the rear
+# camera they have 93 % of the ground within 4 m of the vehicle in view, from
+# 1 m ahead of its origin backwards: the stalls beside it, and the mouth of the
+# one it backs into until it is 0.9 m from where it stands.
 left_calibration:
   width: 1280
   height: 720
@@ -70,17 +71,21 @@ right_calibration:
   ground_z: 0.0
   distortion: [0, 0, 0, 0, 0]
 
-# The bird's-eye view, of the scenarios that park: the device puts the images
-# of these cameras on the ground as one image, forward up, the vehicle's
-# origin in the middle, 20 m by 20 m, and runs the stall model on that. Its
-# results come under `id`, as a source's do. A pixel is taken from the camera
-# nearest to its place on the ground. `port` is where the simulator sends that
+# The bird's-eye view, of the scenarios that park with `bev: true`: the device
+# puts the images of these cameras on the ground as one image, forward up, the
+# vehicle's origin in the middle, 20 m by 20 m, and looks for the stalls in
+# that instead of the rear camera's image. Its results come under `id`, as a
+# source's do. A pixel is taken from the camera nearest to its place on the
+# ground. `model` is the stall model trained on such views
+# (simulation/stall-dataset.py make --bev, scripts/train-stall-model.py); not
+# committed, like the other models. `port` is where the simulator sends a
 # camera's images; the source's `gst` below names the same one.
 bev:
   id: carla-bev
   width: 800
   height: 800
   metres_per_pixel: 0.025
+  model: models/stall-bev-town05.onnx
   cameras:
     - {source: carla-rear, calibration: rear_calibration, port: 5001}
     - {source: carla-left, calibration: left_calibration, port: 5002}
@@ -102,10 +107,12 @@ lane:
   width_min_m: 2.5
   width_max_m: 4.6
 
-# The parking stall model, on the rear camera: two classes (empty, occupied)
-# and the four corners of each stall, in pixels. Trained on images of the
-# car park the runs use (simulation/stall-dataset.py,
-# scripts/train-stall-model.py); not committed, like the other models.
+# The parking stall model, on the rear camera: a stall, empty or occupied,
+# with its four corners, and the ends of the dividers between stalls, in
+# pixels. Trained on images of the car park the runs use
+# (simulation/stall-dataset.py, scripts/train-stall-model.py); not committed,
+# like the other models. A scenario with `bev: true` uses the model of the
+# `bev` section, on the bird's-eye view, in its place.
 stall:
   model: models/stall-town05.onnx
   precision: fp16
@@ -120,6 +127,11 @@ sources:
   - id: carla-rear
     gst: "tcpclientsrc host=SIM_HOST port=5001 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
     stall: true
+  # Only in the scenarios that park with `bev: true`
+  - id: carla-left
+    gst: "tcpclientsrc host=SIM_HOST port=5002 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+  - id: carla-right
+    gst: "tcpclientsrc host=SIM_HOST port=5003 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
 
 # ── Laptop side ──────────────────────────────────────────────────────────────
 

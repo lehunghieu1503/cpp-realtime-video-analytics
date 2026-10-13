@@ -322,7 +322,7 @@ scenarios:
 
   # A car in the third stall. The fourth is now beside a car on the side
   # the front swings over; the fifth is not.
-  show_park_next:
+  show_park_next: &show_park_next
     <<: *show_park
     actors:
       - {name: in_the_third, class: car, blueprint: vehicle.tesla.model3,
@@ -332,7 +332,7 @@ scenarios:
   # Cars in the third, fifth and seventh stall; the last two hold the map's
   # own. No stall is left that it may take: the park must be given up at the
   # end of the search, without going backwards.
-  show_park_occupied:
+  show_park_occupied: &show_park_occupied
     <<: *show_park
     ticks: 1200
     actors:
@@ -346,6 +346,14 @@ scenarios:
     # stall at any time, a collision, a box over another car's, or going
     # backwards: fails.
     expect: {park_abort: no_free_stall, collisions: 0}
+
+  # The same three with the stalls found in the bird's-eye view: the device
+  # makes it of the rear camera and the two under the mirrors (the `bev`
+  # section of the configuration) and runs that section's stall model on it.
+  # The rest is the same: the controller, what it may take, what is expected.
+  show_park_bev: {<<: *show_park, bev: true}
+  show_park_next_bev: {<<: *show_park_next, bev: true}
+  show_park_occupied_bev: {<<: *show_park_occupied, bev: true}
 
   # ── Faults. Need --arm ────────────────────────────────────────────────────
   # The vehicle is driving when the fault starts; it must be braked within
