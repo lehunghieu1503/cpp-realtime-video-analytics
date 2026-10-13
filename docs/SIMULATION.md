@@ -882,6 +882,94 @@ cả đạt:
 Trước đó, với model mới train 16 epoch (đầu vạch lệch trung vị 3 px), bốn lần
 chạy thử cũng đạt (ba lần đỗ, một lần hủy): lệch ngang 0,05 đến 0,06 m.
 
+### Bird's-eye view cho màn đỗ (2026-10-13)
+
+**Trạng thái: code xong, chưa chạy được với model thật.** Lúc 15:41 driver GPU
+báo lỗi (`Xid 31`, `uvm encountered global fatal error ... requiring os reboot`)
+và từ đó CUDA không khởi động được cho tới khi reboot: không train được trên
+GPU, thiết bị không chạy được TensorRT. Phần dưới ghi cái đã làm, cái đã đo, và
+cái còn nợ.
+
+Vì sao làm: camera sau chỉ thấy 10 % mặt đất trong 4 m quanh xe, và từ cuối cung
+quay trở đi nó không còn thấy hai đầu vạch ở miệng ô, thứ tracker dùng để định
+vị ô. Với controller dead reckoning (chưa commit), 4 lần chạy màn đỗ sáng
+2026-10-13 kết thúc lệch 0,19 đến 0,56 m, 3 lần trượt cửa 0,40 m.
+
+Cái được thêm:
+
+| Phần | Làm gì | Ở đâu |
+|------|--------|-------|
+| Hai camera dưới gương | 1280×720, góc ngang 120°, chúc 45°, quay 15° về phía sau | `left_calibration`, `right_calibration` trong `simulation/config/carla.yaml` |
+| Ghép ảnh trên thiết bị | Frame của camera sau, trái, phải có cùng timestamp được chiếu xuống mặt đất thành một ảnh 800×800, 2,5 cm mỗi pixel, mũi xe hướng lên, gốc xe ở giữa. Mỗi pixel lấy từ camera gần chỗ đó nhất | `src/analytics/bev.cpp`, mục `bev` trong config |
+| Model ô đỗ trên ảnh ghép | Cùng kiến trúc và bốn lớp như model cũ, train trên ảnh ghép. Kết quả ra thành một luồng riêng, `carla-bev` | `src/main.cpp`, `simulation/stall-dataset.py make --bev` |
+| Controller | Kết quả camera sau và kết quả ảnh ghép của cùng frame được gộp làm một; tracker coi ảnh ghép là một camera (`BevRig`). Logic chọn ô và lùi không đổi | `bev.py`, hai chỗ trong `controller.py` |
+| Cửa sổ `--gui` | Thêm panel thứ ba: ảnh nhìn từ trên, ô và đầu vạch vẽ đè | `viewer.py` |
+
+Bản tham chiếu là `simulation/video_analytics_simulation/bev.py`; code C++ được
+kiểm với nó qua `tests/fixtures/bev.json` (`test_bev`).
+
+Bật theo scenario, mặc định tắt. Ba scenario đỗ cũ vẫn dùng camera sau:
+
+```bash
+simulation/run.sh --scenario show_park_bev --arm --gui
+simulation/run.sh --scenario show_park_next_bev --arm --gui
+simulation/run.sh --scenario show_park_occupied_bev --arm --gui
+```
+
+Model cho ảnh ghép không nằm trong repo và **chưa được train**; bộ ảnh đã có
+(lệnh đầu, 20,6 phút, cần server CARLA). Lệnh sau cần GPU, khoảng 50 phút, CARLA
+phải tắt:
+
+```bash
+simulation/stall-dataset.py make --bev --out data/stalls-bev
+scripts/train-stall-model.py --data data/stalls-bev --input 800 800 \
+    --work .cache/stall-bev-training --output models/stall-bev-town05.onnx
+```
+
+Đo được trước khi GPU hỏng, trên bãi Town05:
+
+| Hạng mục | Camera sau | Thêm hai camera gương |
+|----------|------------|-----------------------|
+| Mặt đất trong 4 m quanh xe, không tính dưới thân xe | 10 % | 76 % |
+| ... riêng phần từ 1 m trước gốc xe trở về sau | chưa tính | 93 % |
+| Đầu vạch miệng ô đích lúc tìm ô, ô còn phía trước | không thấy | một đầu, 2,8 cm mỗi pixel |
+| ... ô ngang hông | không thấy | cả hai, 3,1 và 4,7 cm |
+| ... giữa cung quay | cả hai, 1,1 và 3,1 cm | không thêm gì |
+| ... cuối cung quay | không thấy | cả hai, 0,6 và 0,8 cm |
+| ... đang vào ô, còn 2 m | không thấy | cả hai, 0,2 và 0,3 cm |
+| Tốc độ mô phỏng (chỉ render, không cửa sổ) | 28,6 tick/giây | 17,6 tick/giây |
+
+Miệng ô còn trong ảnh ghép tới khi xe cách chỗ đứng 0,9 m. Mỗi camera thêm tốn
+khoảng 11 ms mỗi tick, gần như không phụ thuộc độ phân giải.
+
+Thử thông đường ống khi không có CUDA: một model yếu train trên CPU (4 epoch,
+30 % ảnh; tìm được 89 % ô, 98 % đúng lớp, nhưng chỉ 29 % đầu vạch) và thiết bị
+chạy backend `cpu`. Kết quả ảnh ghép đi hết đường: thiết bị, bridge, bộ gộp,
+`on_rear` của controller, không bị từ chối. Thiết bị ở backend `cpu` chỉ ghép
+được 1 ảnh trên 47 thời điểm, vì nó không theo kịp và mỗi camera rớt những
+frame khác nhau. Lần thử này cũng bắt được hai lỗi của simulator, đã sửa: bộ đếm
+frame bị đặt lại sai kiểu, và xe của lần chạy bị kill không được dọn.
+
+Còn nợ:
+
+- **Train model thật và chạy ba scenario `_bev`** sau khi reboot. Chưa có số
+  nào về độ chính xác đỗ xe với ảnh ghép.
+- **Jetson.** Màn đỗ gửi bốn luồng ảnh; đường truyền hiện tại không đủ cho hai.
+
+Giới hạn đã biết của cách làm này:
+
+- **Ghép theo timestamp bằng nhau.** Camera của simulator có chung timestamp;
+  camera thật thì cần một khoảng dung sai. Thiết bị quá tải thì gần như không
+  ghép được ảnh nào (xem lần thử trên); nó in số ảnh ghép và số thời điểm bị
+  bỏ khi dừng.
+- **Vật đứng trên mặt đất bị kéo dài** theo hướng nhìn, ra xa camera; chỉ chân
+  của nó nằm đúng chỗ. Xe đỗ vì vậy phủ sang phần sau của ô bên cạnh trong ảnh.
+- **Mặt đất coi là phẳng**, như trước.
+- **Phía trước xe không có trong ảnh ghép**, và 7 % mặt đất trong 4 m, tính từ
+  1 m trước gốc xe trở về sau, là góc mù.
+- **Detector vẫn chạy trên hai camera gương** nhưng controller chưa dùng kết
+  quả đó.
+
 ### Khác với plan
 
 Plan viết cho bản đầu của màn đỗ. Ba điểm của bản đầu vẫn đúng với bản hiện
@@ -947,7 +1035,9 @@ tại; hai điểm đã thay đổi.
   Script đánh giá đã bỏ vùng đó khi kiểm depth của mặt đường; một hộp
   detection phủ đúng vùng đó sẽ đo ra một vật ở rất gần.
 - **Thiết bị crash (segmentation fault) khi không nạp được model** thay vì
-  thoát gọn; chưa sửa.
+  thoát gọn. Trường hợp CUDA không khởi động được đã sửa ngày 2026-10-13:
+  thiết bị báo `CUDA cannot start` và thoát mã 255. Trường hợp thiếu bộ nhớ đồ
+  họa chưa tái hiện lại được nên chưa sửa.
 - **Jetson chưa chạy màn đỗ.** Image trên board có trước model ô đỗ và camera
   sau. Màn đỗ gửi hai luồng ảnh; đường truyền tới board (khoảng 10 Mbit/s) đã
   không đủ cho một luồng ở chất lượng JPEG 75.

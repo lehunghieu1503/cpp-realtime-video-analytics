@@ -757,6 +757,12 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 | `show_park_occupied`, 2 runs | no stall left that it may take: gives up at the end of the search without going backwards |
 | Stall model, 440 validation images | 87 % of the stalls found, 99 % of them with the right class; divider ends 3 to 9 m away: 98 % found, 1.8 pixels off at the median |
 
+Scenarios ending in `_bev` (`show_park_bev`) look for the stalls in a
+bird's-eye view instead: two more cameras under the mirrors, and the device
+puts the three images on the ground as one and runs a stall model trained on
+such views. Built on 2026-10-13 and not yet run with its trained model; see
+`docs/SIMULATION.md`.
+
 The lane model is trained the same way, on 8000 images of Town04 with the
 lane sides its map gives; the input and output are those of the authors'
 TuSimple weights, which are no longer used. It has seen only CARLA's roads.
@@ -820,6 +826,7 @@ build/tests/test_sse_server       # SSE delivery, MJPEG stream, shutdown, auth, 
 build/tests/test_capture_timestamps  # a frame's timestamp through GDP and the JPEG decoder
 build/tests/test_lane             # lane decoder and geometry against the Python reference
 build/tests/test_stall            # stall model decoder: stalls, divider ends, NMS, JSON
+build/tests/test_bev              # bird's-eye view stitching against the Python reference
 
 # the simulation's Python code; no simulator, ROS or device needed
 python3 -m unittest discover -s simulation/test -p 'test_*.py'
