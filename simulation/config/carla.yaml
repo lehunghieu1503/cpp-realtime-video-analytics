@@ -213,7 +213,7 @@ control:
   # One park, backwards into a stall the rear camera finds (scenarios with
   # `park`). Nothing here says where a stall is.
   park:
-    approach_speed_mps: 3.0 # while it looks for a stall: 11 km/h
+    approach_speed_mps: 4.0 # while it looks for a stall: 14 km/h
     search_m: 32.0          # no stall it may take within this: the park is given up
     min_sightings: 10       # times a stall must have been judged before it is taken
     min_margin_m: 0.4       # a stall must be wider than the vehicle by this
@@ -231,10 +231,10 @@ control:
     # throttle up to 0.25 it creeps at 0.07 m/s, and once it runs the same
     # throttle gives 0.5 m/s. Held at 0.2 it moved in bursts of up to
     # 0.48 m/s around a mean of 0.09.
-    # 1.2 since 2026-10-13 (0.5 before): it then backs at 0.83 m/s, 3 km/h,
-    # and a park takes 25 s instead of 45.
-    reverse_speed_mps: 1.2
-    reverse_throttle: 0.30  # about what keeps it at three quarters of that
+    # 2.0 since 2026-10-13 (0.5 at first): it then backs at 1.4 m/s, 5 km/h,
+    # and a park takes 18 s instead of 45.
+    reverse_speed_mps: 2.0
+    reverse_throttle: 0.38  # about what keeps it at three quarters of that
     align_done_deg: 12.0    # from here the vehicle is steered onto the axis
     lost_s: 3.0             # the stall not found for this long, outside it: given up
   ready_frames: 3
