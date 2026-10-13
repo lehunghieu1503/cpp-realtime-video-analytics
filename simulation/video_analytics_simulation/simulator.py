@@ -489,6 +489,14 @@ class Simulator:
         # waiting for ticks by a killed run still had its vehicle standing
         # where this run's is spawned
         self.world.tick()
+        # And a client that joins such a world is not shown its actors
+        # before a tick: what the loop above did not see goes now
+        left = [actor for actor in self.world.get_actors()
+                if actor.type_id.startswith(("vehicle.", "walker.", "sensor."))]
+        for actor in left:
+            actor.destroy()
+        if left:
+            self.world.tick()
         self.world.set_weather(getattr(carla.WeatherParameters,
                                        self.scenario.get("weather", "ClearNoon")))
         self.map = self.world.get_map()
