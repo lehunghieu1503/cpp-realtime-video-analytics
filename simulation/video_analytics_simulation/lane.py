@@ -66,6 +66,43 @@ def decode_ufld(logits, width, height):
     return lanes
 
 
+def anchor_rows(height):
+    """The image row of each of the model's row anchors, as decode_ufld
+    places its points."""
+    return [int(height * (row / MODEL_HEIGHT)) - 1 for row in ROW_ANCHORS]
+
+
+def column_of(x, width):
+    """The place on the model's column axis (1 to GRID, as decode_ufld
+    counts) of the pixel column x of an image that wide: what a model must
+    give for the decoder to answer x. The decoder cuts to a whole pixel and
+    takes one off, which is 1.5 pixels on average."""
+    step = (MODEL_WIDTH - 1) / (GRID - 1)
+    return (np.asarray(x, dtype=float) + 1.5) * MODEL_WIDTH / (step * width)
+
+
+def boundary_at_rows(uv, rows, width):
+    """A line drawn in the image through the pixels uv ((n, 2), in order
+    along the line, nearest first): its column at each of the rows, or -1
+    where it does not cross that row inside the image. The nearest crossing
+    counts: over a crest a line comes back to a row it has left."""
+    uv = np.asarray(uv, dtype=float).reshape(-1, 2)
+    columns = np.full(len(rows), -1.0)
+    if len(uv) < 2:
+        return columns
+    u0, v0, u1, v1 = uv[:-1, 0], uv[:-1, 1], uv[1:, 0], uv[1:, 1]
+    for i, row in enumerate(rows):
+        crossing = np.nonzero((v0 - row) * (v1 - row) <= 0)[0]
+        if len(crossing) == 0:
+            continue
+        k = crossing[0]
+        t = (row - v0[k]) / (v1[k] - v0[k]) if v1[k] != v0[k] else 0.0
+        x = u0[k] + t * (u1[k] - u0[k])
+        if 0 <= x <= width - 1:
+            columns[i] = x
+    return columns
+
+
 def fit_boundary(xy, config=DEFAULTS):
     """Quadratic through ground points, or None when they do not support one."""
     xy = np.asarray(xy, dtype=float).reshape(-1, 2)
