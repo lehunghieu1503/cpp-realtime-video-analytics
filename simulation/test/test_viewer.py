@@ -39,15 +39,15 @@ class Window(unittest.TestCase):
         for name, function in self.real.items():
             setattr(cv2, name, function)
 
-    def test_cameras_side_by_side_with_what_was_found_in_them(self):
+    def test_cameras_one_under_the_other_with_what_was_found_in_them(self):
         view = self.view
         grey = np.full((720, 1280, 4), 90, np.uint8)
         view.frame("front", 100, grey)
         view.frame("rear", 100, grey)
         self.assertTrue(view.show(0, 0.0, {}))
         raw = self.shown[-1]
-        self.assertEqual(raw.shape, (360 + 28, 1280, 3))
-        self.assertTrue((raw[:360] == 90).all())  # no result yet: the images as they are
+        self.assertEqual(raw.shape, (360 + 360 + 46, 640, 3))
+        self.assertTrue((raw[:720] == 90).all())  # no result yet: the images as they are
 
         stall = Stall(0.0, 2.8, 0.0, 5.0, 2.8)
         found = {"simulation": {"sim_ns": 100}, "detections": [],
@@ -60,7 +60,7 @@ class Window(unittest.TestCase):
             "lane": {"pixels": [[[500, 700], [600, 400]], [[800, 700], [700, 400]]]}})
         view.result("rear", found)
         view.show(6, 0.0, {})
-        front, rear = self.shown[-1][:360, :640], self.shown[-1][:360, 640:]
+        front, rear = self.shown[-1][:360], self.shown[-1][360:720]
         self.assertGreater((front != 90).any(axis=2).sum(), 200)  # the box, two lane lines
         # The stall the model found, green for an empty one, and over its
         # corners the ends of its dividers: crosses
@@ -78,8 +78,8 @@ class Window(unittest.TestCase):
         self.assertTrue(view.show(7, 0.4, {"reverse": True, "throttle": 0.2, "brake": 0.0,
                                            "steer": 0.45, "reason": ""}))
         drawn = self.shown[-1]
-        self.assertGreater((drawn[:360, 640:] == (0, 255, 255)).all(axis=2).sum(), 200)
-        self.assertGreater((drawn[360:] > 0).sum(), 500)  # the line of text
+        self.assertGreater((drawn[360:720] == (0, 255, 255)).all(axis=2).sum(), 200)
+        self.assertGreater((drawn[720:] > 0).sum(), 500)  # the lines of text
 
     def test_the_view_from_above_is_a_third_panel(self):
         from video_analytics_simulation.bev import BevRig
@@ -104,10 +104,10 @@ class Window(unittest.TestCase):
                             "stall_points": fixtures.stall_points([stall], self.pose, above)})
         self.assertTrue(view.show(3, 0.0, {}))
         shown = self.shown[-1]
-        # Two cameras 360 high and the view 400 high, side by side, and the text
-        self.assertEqual(shown.shape, (400 + 28, 640 + 640 + 400, 3))
-        self.assertEqual(int(shown[360:400, :1280].sum()), 0)
-        panel = shown[:400, 1280:]
+        # Two cameras 640 wide and the view 400 wide, one under the other, and the text
+        self.assertEqual(shown.shape, (360 + 360 + 400 + 46, 640, 3))
+        self.assertEqual(int(shown[720:1120, 400:].sum()), 0)
+        panel = shown[720:1120, :400]
         # Its ends as crosses, and the stall the controller takes in yellow,
         # left of the middle: the stall is on the vehicle's left
         self.assertGreater((panel == (255, 255, 0)).all(axis=2).sum(), 5)

@@ -1,15 +1,18 @@
 """A window with the run's cameras, for a person watching: the simulator's
 own images, with what the device found in them drawn on top.
 
-    front camera                      rear camera (scenarios that park)
-    boxes, track ids, lane lines      stalls: green empty, red occupied
+    front camera                      boxes, track ids, lane lines
+    rear camera (scenarios that park) stalls: green empty, red occupied
                                       ends of dividers: crosses
                                       the stalls the controller follows, and
                                       in yellow the one it parks in
-    one line: tick, state, phase, speed, what is applied to the vehicle
+    two lines: tick, state, phase, speed; what is applied to the vehicle
+
+One under the other: side by side they were wider than half a screen. The
+window can be resized.
 
 With a bird's-eye view (the `bev` section of the configuration) there is a
-third panel, the view from above of the cameras around the vehicle, forward
+third panel, lowest, the view from above of the cameras around the vehicle, forward
 up; the stalls and the ends are then found in it and drawn on it.
 
 In a scenario that parks there are no lane lines: the device does not run
@@ -49,7 +52,7 @@ class Viewer:
         self.park = None
         self.state = ""
         self.closed = False
-        cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
 
     def frame(self, name, sim_ns, bgra):
         """A camera image of this tick, as the simulator got it."""
@@ -139,20 +142,23 @@ class Viewer:
         if self.closed:
             return False
         cv2 = self.cv2
-        # The panels are not of one height: the lower ones end in black
-        tallest = max(panel.shape[0] for panel in self.panels.values())
-        row = np.hstack([np.pad(self.with_vehicle(name, panel),
-                                ((0, tallest - panel.shape[0]), (0, 0), (0, 0)))
-                         for name, panel in self.panels.items()])
-        bar = np.zeros((28, row.shape[1], 3), np.uint8)
+        # The panels are not of one width: a narrower one has black beside it
+        widest = max(panel.shape[1] for panel in self.panels.values())
+        column = np.vstack([np.pad(self.with_vehicle(name, panel),
+                                   ((0, 0), (0, widest - panel.shape[1]), (0, 0)))
+                            for name, panel in self.panels.items()])
+        bar = np.zeros((46, widest, 3), np.uint8)
         gear = "R" if applied.get("reverse") else "D"
-        text = "tick %d  %s  %s%4.1f km/h  %s  throttle %.2f  brake %.2f  steer %+.2f  %s" % (
+        lines = ("tick %d  %s  %s%4.1f km/h  %s" % (
             tick, self.state, "park: %s  " % self.park["phase"] if self.park else "",
-            speed_mps * 3.6, gear, applied.get("throttle", 0.0), applied.get("brake", 0.0),
-            applied.get("steer", 0.0), applied.get("reason", ""))
-        cv2.putText(bar, text, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
-                    cv2.LINE_AA)
-        cv2.imshow(WINDOW, np.vstack([row, bar]))
+            speed_mps * 3.6, gear),
+            "throttle %.2f  brake %.2f  steer %+.2f  %s" % (
+            applied.get("throttle", 0.0), applied.get("brake", 0.0),
+            applied.get("steer", 0.0), applied.get("reason", "")))
+        for i, text in enumerate(lines):
+            cv2.putText(bar, text, (8, 18 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.imshow(WINDOW, np.vstack([column, bar]))
         if cv2.waitKey(1) & 0xFF == ord("q") \
                 or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             self.close()
