@@ -127,6 +127,23 @@ class Stitching(unittest.TestCase):
             made.paste(made.blank(), 0, np.zeros((360, 640, 3), np.uint8))
 
 
+class Control(unittest.TestCase):
+    def test_the_controller_follows_the_stalls_of_the_view_it_is_given(self):
+        import yaml
+        from video_analytics_simulation.controller import ControlCore
+        with open(os.path.join(os.path.dirname(__file__), "..", "config", "carla.yaml")) as f:
+            config = yaml.safe_load(f)
+        vehicle = {"wheelbase_m": 3.0, "max_steer_deg": 70.0, "width_m": 2.16,
+                   "front_bumper_m": 2.43}
+        view = BevRig.from_config(config["bev"])
+        core = ControlCore(config, vehicle, "r_test", scenario={"park": True}, stall_rig=view)
+        self.assertIs(core.stalls.rig, view)
+        # Not given one, it looks for them in the rear camera's image
+        core = ControlCore(config, vehicle, "r_test", scenario={"park": True})
+        self.assertIs(core.stalls.rig, core.rear_rig)
+        self.assertEqual(core.rear_rig.width, 1280)
+
+
 class Joining(unittest.TestCase):
     def test_the_rear_result_gets_the_stalls_of_the_view_of_its_frame(self):
         def result(stream, ns, **more):

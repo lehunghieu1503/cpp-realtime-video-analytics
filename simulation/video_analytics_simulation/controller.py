@@ -92,6 +92,7 @@ import yaml
 
 from . import lane as lane_geometry
 from . import protocol
+from .bev import BevRig, Joiner
 from .calibration import Pose, Rig
 from .metric_tracker import MetricTracker
 from .parking import Aisle, reverse_steer
@@ -134,7 +135,7 @@ class ControlCore:
     """The controller without ROS: fed with messages, asked for commands."""
 
     def __init__(self, config, vehicle, run_id, source="carla-front", scenario=None,
-                 rear_source="carla-rear"):
+                 rear_source="carla-rear", stall_rig=None):
         self.c = config["control"]
         scenario = scenario or {}
         self.target_speed_kmh = float(scenario.get("target_speed_kmh",
@@ -156,7 +157,9 @@ class ControlCore:
         self.aisle = None          # the line it drives on, from where it is armed
         self.rear_source = rear_source
         self.rear_rig = Rig.from_config(config["rear_calibration"]) if self.parking else None
-        self.stalls = StallTracker(self.rear_rig, self.c.get("stalls")) \
+        # The image the stalls are found in: the rear camera's, or the view
+        # the caller names (the bird's-eye view, as a camera)
+        self.stalls = StallTracker(stall_rig or self.rear_rig, self.c.get("stalls")) \
             if self.parking else None
         self.rear_ns = None        # the frame of the last result of the rear camera
         self.target = None         # id of the track of the stall it parks in
@@ -1011,9 +1014,12 @@ def main():
     if manifest["run_id"] != args.run_id:
         raise SystemExit("the run directory belongs to run %s" % manifest["run_id"])
 
+    # With a bird's-eye view the device finds the stalls in it
+    view = manifest.get("bev")
     core = ControlCore(config, manifest["vehicle"], args.run_id, manifest["source"],
                        manifest.get("scenario_config"),
-                       manifest.get("rear_source", "carla-rear"))
+                       manifest.get("rear_source", "carla-rear"),
+                       BevRig.from_config(view) if view else None)
     names = protocol.topics(args.run_id, manifest["source"])
     logs = {name: open(os.path.join(args.run_dir, name + ".jsonl"), "x")
             for name in ("perception", "metric", "commands", "stalls")}
@@ -1094,7 +1100,25 @@ def main():
                            history=HistoryPolicy.KEEP_LAST)
     node.create_subscription(Image, names["depth"], on_depth, depth_qos)
     node.create_subscription(String, names["perception"], on_perception, 20)
-    if core.parking:
+    if core.parking and view:
+        # The rear camera's result and the view's, of the same frame, as one:
+        # the first with the stalls of the second
+        joiner = Joiner()
+
+        def half(kind):
+            def on_half(message):
+                try:
+                    whole = joiner.offer(kind, json.loads(message.data))
+                except ValueError:
+                    return
+                if whole is not None:
+                    on_rear(String(data=json.dumps(whole)))
+            return on_half
+
+        for kind, source in (("rear", core.rear_source), ("bev", view["id"])):
+            node.create_subscription(
+                String, protocol.topics(args.run_id, source)["perception"], half(kind), 20)
+    elif core.parking:
         node.create_subscription(
             String, protocol.topics(args.run_id, core.rear_source)["perception"],
             on_rear, 20)
