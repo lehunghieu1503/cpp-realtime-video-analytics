@@ -884,11 +884,9 @@ chạy thử cũng đạt (ba lần đỗ, một lần hủy): lệch ngang 0,05
 
 ### Bird's-eye view cho màn đỗ (2026-10-13)
 
-**Trạng thái: code xong, chưa chạy được với model thật.** Lúc 15:41 driver GPU
-báo lỗi (`Xid 31`, `uvm encountered global fatal error ... requiring os reboot`)
-và từ đó CUDA không khởi động được cho tới khi reboot: không train được trên
-GPU, thiết bị không chạy được TensorRT. Phần dưới ghi cái đã làm, cái đã đo, và
-cái còn nợ.
+Màn đỗ có thêm một cách tìm ô: trong ảnh nhìn từ trên xuống, ghép từ camera
+sau và hai camera dưới gương. Với cách này 10 lần chạy đều đạt, xe đỗ lệch tâm
+ô 0,03 đến 0,15 m, kể cả khi controller tự tích phân vị trí.
 
 Vì sao làm: camera sau chỉ thấy 10 % mặt đất trong 4 m quanh xe, và từ cuối cung
 quay trở đi nó không còn thấy hai đầu vạch ở miệng ô, thứ tracker dùng để định
@@ -916,9 +914,9 @@ simulation/run.sh --scenario show_park_next_bev --arm --gui
 simulation/run.sh --scenario show_park_occupied_bev --arm --gui
 ```
 
-Model cho ảnh ghép không nằm trong repo và **chưa được train**; bộ ảnh đã có
-(lệnh đầu, 20,6 phút, cần server CARLA). Lệnh sau cần GPU, khoảng 50 phút, CARLA
-phải tắt:
+Model cho ảnh ghép (`models/stall-bev-town05.onnx`) không nằm trong repo. Tạo
+lại bằng hai lệnh: lệnh đầu cần server CARLA, 20,6 phút cho 4 400 ảnh; lệnh sau
+cần GPU, 38 phút cho 50 epoch, CARLA phải tắt:
 
 ```bash
 simulation/stall-dataset.py make --bev --out data/stalls-bev
@@ -926,7 +924,36 @@ scripts/train-stall-model.py --data data/stalls-bev --input 800 800 \
     --work .cache/stall-bev-training --output models/stall-bev-town05.onnx
 ```
 
-Đo được trước khi GPU hỏng, trên bãi Town05:
+Model, trên 440 ảnh validation, chạy file ONNX như thiết bị chạy:
+
+| Đối tượng | Model trên ảnh camera sau | Model trên ảnh ghép |
+|-----------|---------------------------|---------------------|
+| Ô đỗ tìm thấy | 87 % | 98 % (3 463 / 3 531) |
+| ... trong đó đúng lớp trống/có xe | 99 % | 99 % |
+| Đầu vạch tìm thấy | 98 % ở 3 đến 9 m, 75 % ở xa hơn | 95 % (5 689 / 6 014) |
+| Đầu vạch lệch, trung vị / 90 % | 1,8 / 4,4 px (pixel là 3 đến 23 cm tùy tầm) | 1,3 / 3,3 px (pixel luôn là 2,5 cm) |
+
+Chạy scenario ngày 2026-10-13, không cửa sổ. "Dead reckoning" là controller
+trong working tree (chưa commit), tự tích phân vị trí sau ARM; "pose thật" là
+code đã commit.
+
+| Lần chạy | Dọc trục | Ngang trục | Lệch hướng | Kết quả |
+|----------|----------|------------|------------|---------|
+| `show_park_bev`, dead reckoning, 3 lần | 0,05 đến 0,06 m | 0,11 đến 0,14 m | 0,6 đến 1,6° | 3 / 3 đạt |
+| `show_park` (camera sau), dead reckoning, 3 lần | 0,34 đến 0,57 m | 0,18 đến 0,21 m | 1,6 đến 2,0° | 2 / 3 đạt (cửa 0,40 m) |
+| `show_park_next_bev`, dead reckoning, 2 lần | 0,04 và 0,07 m | 0,14 và 0,15 m | 0,1 và 0,4° | 2 / 2 đạt, ô thứ năm |
+| `show_park_occupied_bev`, dead reckoning | | | | hủy `no_free_stall` ở tick 512, không lùi |
+| `show_park_bev`, pose thật, 2 lần | 0,03 m | 0,06 m | 1,0° | 2 / 2 đạt |
+| `show_park_next_bev`, pose thật | 0,03 m | 0,08 m | 1,1° | đạt |
+| `show_park_occupied_bev`, pose thật | | | | hủy ở tick 521 |
+
+| Hạng mục | Camera sau | Ảnh ghép |
+|----------|------------|----------|
+| Ảnh ghép được trên số thời điểm | | 2 704 / 2 704 ở mọi lần chạy, không thời điểm nào thiếu frame |
+| Tốc độ mô phỏng | 27,3 đến 27,5 tick/giây | 17,1 đến 17,3 tick/giây |
+| Độ trễ tick tới lệnh được áp, trung vị / P95 | 74 / 108 đến 110 ms | 117 / 129 đến 174 ms |
+
+Về tầm nhìn, đo trên bãi Town05:
 
 | Hạng mục | Camera sau | Thêm hai camera gương |
 |----------|------------|-----------------------|
@@ -942,18 +969,13 @@ scripts/train-stall-model.py --data data/stalls-bev --input 800 800 \
 Miệng ô còn trong ảnh ghép tới khi xe cách chỗ đứng 0,9 m. Mỗi camera thêm tốn
 khoảng 11 ms mỗi tick, gần như không phụ thuộc độ phân giải.
 
-Thử thông đường ống khi không có CUDA: một model yếu train trên CPU (4 epoch,
-30 % ảnh; tìm được 89 % ô, 98 % đúng lớp, nhưng chỉ 29 % đầu vạch) và thiết bị
-chạy backend `cpu`. Kết quả ảnh ghép đi hết đường: thiết bị, bridge, bộ gộp,
-`on_rear` của controller, không bị từ chối. Thiết bị ở backend `cpu` chỉ ghép
-được 1 ảnh trên 47 thời điểm, vì nó không theo kịp và mỗi camera rớt những
-frame khác nhau. Lần thử này cũng bắt được hai lỗi của simulator, đã sửa: bộ đếm
-frame bị đặt lại sai kiểu, và xe của lần chạy bị kill không được dọn.
+Thiết bị không theo kịp thì gần như không ghép được ảnh nào: ở backend `cpu`
+(thử lúc CUDA hỏng vì một lỗi driver, trước khi reboot) nó ghép được 1 ảnh trên
+47 thời điểm, vì mỗi camera rớt những frame khác nhau.
 
-Còn nợ:
+Chưa làm:
 
-- **Train model thật và chạy ba scenario `_bev`** sau khi reboot. Chưa có số
-  nào về độ chính xác đỗ xe với ảnh ghép.
+- **Chạy có `--gui`**, và ba scenario `_bev` mới chạy 1 đến 5 lần mỗi cái.
 - **Jetson.** Màn đỗ gửi bốn luồng ảnh; đường truyền hiện tại không đủ cho hai.
 
 Giới hạn đã biết của cách làm này:

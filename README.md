@@ -760,8 +760,9 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 Scenarios ending in `_bev` (`show_park_bev`) look for the stalls in a
 bird's-eye view instead: two more cameras under the mirrors, and the device
 puts the three images on the ground as one and runs a stall model trained on
-such views. Built on 2026-10-13 and not yet run with its trained model; see
-`docs/SIMULATION.md`.
+such views. With it the vehicle ended 0.03 to 0.15 m from the stall's centre in
+8 parks of 8, also when it reckons its own pose (the rear camera alone:
+0.18 to 0.57 m, 2 of 3 inside the 0.40 m gate); see `docs/SIMULATION.md`.
 
 The lane model is trained the same way, on 8000 images of Town04 with the
 lane sides its map gives; the input and output are those of the authors'
