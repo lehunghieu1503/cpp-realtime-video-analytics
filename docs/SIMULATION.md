@@ -898,7 +898,7 @@ Cái được thêm:
 | Phần | Làm gì | Ở đâu |
 |------|--------|-------|
 | Hai camera dưới gương | 1280×720, góc ngang 120°, chúc 45°, quay 15° về phía sau | `left_calibration`, `right_calibration` trong `simulation/config/carla.yaml` |
-| Ghép ảnh trên thiết bị | Frame của camera sau, trái, phải có cùng timestamp được chiếu xuống mặt đất thành một ảnh 800×800, 2,5 cm mỗi pixel, mũi xe hướng lên, gốc xe ở giữa. Mỗi pixel lấy từ camera gần chỗ đó nhất | `src/analytics/bev.cpp`, mục `bev` trong config |
+| Ghép ảnh trên thiết bị | Frame của camera sau, trái, phải và trước có cùng timestamp được chiếu xuống mặt đất thành một ảnh 800×800, 2,5 cm mỗi pixel, mũi xe hướng lên, gốc xe ở giữa. Mỗi pixel lấy từ camera gần chỗ đó nhất | `src/analytics/bev.cpp`, mục `bev` trong config |
 | Model ô đỗ trên ảnh ghép | Cùng kiến trúc và bốn lớp như model cũ, train trên ảnh ghép. Kết quả ra thành một luồng riêng, `carla-bev` | `src/main.cpp`, `simulation/stall-dataset.py make --bev` |
 | Controller | Kết quả camera sau và kết quả ảnh ghép của cùng frame được gộp làm một; tracker coi ảnh ghép là một camera (`BevRig`). Logic chọn ô và lùi không đổi | `bev.py`, hai chỗ trong `controller.py` |
 | Cửa sổ `--gui` | Thêm panel thứ ba: ảnh nhìn từ trên, ô và đầu vạch vẽ đè | `viewer.py` |
@@ -953,13 +953,37 @@ code đã commit.
 | Tốc độ mô phỏng | 27,3 đến 27,5 tick/giây | 17,1 đến 17,3 tick/giây |
 | Độ trễ tick tới lệnh được áp, trung vị / P95 | 74 / 108 đến 110 ms | 117 / 129 đến 174 ms |
 
-Sau các lần chạy trên, tốc độ đỗ được tăng: tìm ô ở 3 m/s (trước là 2), lùi
-tối đa 1,2 m/s (trước là 0,5; xe lùi thực tế 0,83 m/s). Một lần đỗ mất 25 giây
-mô phỏng thay vì 45. Chạy lại với dead reckoning, 5 lần đều đạt: `show_park_bev`
-hai lần lệch 0,07 và 0,23 m dọc, 0,15 và 0,27 m ngang, tới 2,8°;
-`show_park_next_bev` 0,04 và 0,17 m; `show_park` (camera sau) 0,35 và 0,17 m;
-`show_park_occupied_bev` hủy ở tick 356. Nhanh hơn thì lệch nhiều hơn, vẫn
-trong cửa 0,40 m.
+Hai thay đổi sau các lần chạy trên (tối 2026-10-13); các bảng ở trên là của
+bản ba camera, tốc độ cũ:
+
+- **Ảnh ghép có thêm camera trước**, tức bốn camera. Đó là camera trước sẵn
+  có của mọi scenario (góc 52°), nên không tốn thêm camera nào để render; nó
+  thêm vào ảnh ghép một nêm mặt đất từ 3,6 m trước xe. Model train lại trên
+  4 400 ảnh mới (sinh mất 32,8 phút): tìm được 98 % ô (3 911 / 3 978), 99 %
+  đúng lớp, 96 % đầu vạch, lệch trung vị 1,3 px.
+- **Xe đỗ nhanh hơn**: tìm ô ở 4 m/s (lúc đầu 2), lùi tối đa 2,0 m/s (lúc đầu
+  0,5; xe lùi thực tế 1,4 m/s, 5 km/h). Một lần đỗ mất 18 giây mô phỏng thay
+  vì 45.
+
+Với cả hai thay đổi, không cửa sổ, 9 lần chạy, 8 đạt:
+
+| Lần chạy | Dọc trục | Ngang trục | Lệch hướng | Kết quả |
+|----------|----------|------------|------------|---------|
+| `show_park_bev`, dead reckoning, 3 lần | 0,12 và 0,16 m | 0,16 và 0,22 m | 2,0 và 2,2° | 2 / 3: một lần hủy `stall_lost` |
+| `show_park_next_bev`, dead reckoning | 0,13 m | 0,25 m | 1,8° | đạt |
+| `show_park_occupied_bev`, dead reckoning | | | | hủy `no_free_stall` ở tick 281 |
+| `show_park` (camera sau), dead reckoning | 0,13 m | 0,18 m | 3,5° | đạt |
+| `show_park_bev`, pose thật | 0,13 m | 0,06 m | 1,0° | đạt |
+| `show_park_next_bev`, pose thật | 0,16 m | 0,07 m | 1,2° | đạt |
+| `show_park`, pose thật | 0,15 m | 0,07 m | 1,1° | đạt |
+
+Lần hủy là lần chạy đầu tiên sau khi server CARLA vừa mở: mô phỏng chỉ đạt
+8,5 tick/giây và lệnh được áp trễ 238 ms sau tick (bình thường 117 ms). Xe
+dừng lại, không va. Ở tốc độ lùi mới, độ trễ gấp đôi là đủ để mất ô. Xe cũng
+dừng sâu hơn tâm ô 0,12 đến 0,16 m: lùi nhanh hơn thì phanh trễ hơn.
+
+`simulation/run.sh --view` mở riêng cửa sổ camera, server CARLA vẫn chạy không
+cửa sổ: cửa sổ CARLA làm mô phỏng chậm từ khoảng 14 xuống 8 tick/giây.
 
 Trong cửa sổ `--gui`, panel nhìn từ trên vẽ thân xe ở giữa (không camera nào
 thấy nó), và các ô controller theo dõi được vẽ từ pose mà chính controller
