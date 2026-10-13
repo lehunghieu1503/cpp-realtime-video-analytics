@@ -349,8 +349,8 @@ simulation/run.sh --scenario brake_person --arm \
 | Trạng thái | Xe làm gì | Ra khỏi bằng cách nào |
 |------------|-----------|-----------------------|
 | `WAIT_DATA` | Phanh | Lệnh ARM đúng `run_id` khi mọi điều kiện đạt: có 3 frame mới liên tiếp với làn hợp lệ, dữ liệu còn mới hơn 60 % giới hạn tuổi, xe đứng yên, config của Jetson không lọc mất class nào trong sáu class cần phanh. Không tự ARM. |
-| `RUNNING` | Giữ làn ở 9 km/h (hoặc tốc độ scenario ghi, tối đa 30), phanh khi cần | Sang `HOLDING` hoặc `STOP_LATCHED`, tùy lý do |
-| `HOLDING` | Phanh hết, vì một lý do có thể qua đi: có vật cản trong đường đi, hoặc mất làn trong một đến bốn kết quả liên tiếp | Về `RUNNING` khi làn hợp lệ trở lại; sau vật cản thì cần thêm 30 kết quả liên tiếp cho thấy đường trống tới hết quãng dừng của tốc độ hành trình |
+| `RUNNING` | Giữ làn ở 50 km/h (hoặc tốc độ scenario ghi, tối đa 60), phanh khi cần | Sang `HOLDING` hoặc `STOP_LATCHED`, tùy lý do |
+| `HOLDING` | Phanh hết, vì một lý do có thể qua đi: có vật cản trong đường đi, hoặc mất làn trong một đến bốn kết quả liên tiếp | Về `RUNNING` khi làn hợp lệ trở lại; sau vật cản thì cần thêm 30 kết quả liên tiếp cho thấy đường trống tới hết quãng dừng của tốc độ hành trình. "Trống" gồm cả ảnh depth: không có gì cao 0,3 đến 2,5 m đứng trên đường đi, dù detector có thấy nó hay không |
 | `STOP_LATCHED` | Phanh | Chỉ khi chạy lại với `run_id` mới. Vào đây khi dữ liệu quá cũ, pose hỏng, không còn làn ở điểm ngắm, hoặc mất làn năm kết quả liên tiếp |
 
 Simulator kiểm tra độc lập với controller: lệnh sai `run_id`, sai kiểu, có
@@ -538,8 +538,45 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 ```
 
 Lần chạy đầu sau khi server CARLA vừa mở, thiết bị có thể không nạp được model
-vì thiếu bộ nhớ đồ họa; script tự khởi động lại thiết bị (tối đa 5 lần, cách
+vì thiếu bộ nhớ đồ họa; script tự khởi động lại thiết bị (tối đa 11 lần, cách
 nhau 8 giây) trong lúc server nhả texture của map mặc định.
+
+### Tốc độ: 50 km/h thay cho 9 km/h (2026-10-13)
+
+Các số ở mục 14 đo ở 9 km/h. Từ 2026-10-13 tốc độ chung là 50 km/h
+(`control.target_speed_kmh`), trần 60. Với `max_throttle` 0,5 xe không chạy
+nhanh hơn 50 km/h; đặt mục tiêu 80 km/h thì nó vẫn dừng ở 13,9 m/s.
+
+- **Phanh.** Phanh hết cỡ từ 12 m/s đo được 7,0 m/s² (đứng yên sau 10,8 m và
+  1,4 giây). `a_min_mps2` tăng từ 2,5 lên 5,0; với 2,5 xe dừng cách vật cản
+  28 m.
+- **Lỗi tìm ra khi chạy nhanh.** Ở `brake_truck`, xe phanh và đứng cách xe tải
+  11 m. Sau đó detector không còn thấy xe tải, 30 kết quả không có nó được
+  coi là đường trống, và xe chạy tiếp tới 5,3 m/s; nó chỉ dừng lại cách 1,1 m
+  nhờ lane model mất làn. Đã sửa: xem dòng `HOLDING` ở bảng trạng thái mục 14.
+- **Đường cong.** Lane model báo sai bề rộng làn ở mét thứ 302 (cong phải) và
+  193 (cong trái) kể từ điểm xuất phát, và xe dừng ở đó. Ở 9 km/h xe chưa bao
+  giờ tới các điểm này. Hai scenario được rút ngắn (600 và 400 tick) để kết
+  thúc trước đó.
+
+Chạy lại 20 scenario lái và đỗ với cấu hình này, không cửa sổ, 19 đạt:
+
+| Scenario | Kết quả |
+|----------|---------|
+| `lane_straight`, `lane_curve_right`, `lane_curve_left` | 13,3 đến 13,9 m/s; lệch tim làn RMSE 0,05 đến 0,07 m |
+| `lane_offset_start` | RMSE 0,15 m |
+| `brake_static_car`, `_30`, `_50`, `_curve` | đạt 6,9 đến 9,4 m/s trước khi phanh; dừng cách xe 10,1 đến 11,5 m |
+| `brake_truck` | dừng cách 9,5 m và đứng yên tới hết |
+| `brake_person`, `brake_person_offset` | dừng cách người 8,8 và 6,4 m |
+| `brake_cut_in` | dừng cách xe tạt vào 10,1 m (xe đó tạt vào sớm hơn: tick 30 thay vì 240) |
+| `negative_adjacent` | 13,9 m/s, không phanh |
+| `fault_no_frames`, `fault_no_depth`, `fault_controller_killed` | từ 12,6 m/s, phanh đúng hạn |
+| `show_park`, `show_park_next`, `show_park_occupied` | đạt như trước |
+| `metric_parked_ego_moving` (giữ 9 km/h) | **trượt 2 trong 3 lần**: sai số tốc độ 0,46 đến 0,52 m/s, ngưỡng 0,50 |
+
+Ở các scenario phanh, vật cản đứng cách 22 đến 50 m nên xe chưa kịp lên 50
+km/h. `metric_parked_ego_moving` nằm sát ngưỡng từ trước (0,48 và 0,49 hôm
+12/10); ở 50 km/h sai số là 0,77 m/s nên scenario này giữ 9 km/h.
 
 ### Thay đổi so với giai đoạn 1
 
@@ -559,29 +596,29 @@ nhau 8 giây) trong lúc server nhả texture của map mặc định.
 
 Scenario đọc từ `manifest.json` của lần chạy, không bao giờ từ thiết bị:
 `target_speed_kmh`, `follow_gap_m`, `overtake: true` và `park: true`.
-Scenario nào không ghi thì giữ 9 km/h, không bám xe, không chuyển làn.
+Scenario nào không ghi thì chạy 50 km/h, không bám xe, không chuyển làn.
 Scenario ghi xe được phép làm gì; không scenario nào ghi lúc nào, phía nào,
 hay ô đỗ nằm ở đâu.
 
 ### Màn lái: `show_drive`
 
-Đoạn thẳng của Town04, 1 300 tick (43 giây), tới 30 km/h:
+Đoạn thẳng của Town04, 1 250 tick (42 giây), tới 50 km/h:
 
 | Tick | Xe làm gì |
 |------|-----------|
-| 0–302 | bám xe phía trước (5 m/s), cách 25 m |
-| 302–391 | đã bám xe chậm hơn 10 giây: tự chuyển sang làn trái |
-| 391–750 | vượt xe đó ở 30 km/h |
-| 859 | một người đi ngang qua làn: phanh, dừng cách người 14 đến 15 m |
-| 932–945 | người đã rời làn: đi tiếp |
+| 0–302 | bám xe phía trước (5 m/s), cách 24 m |
+| 302–392 | đã bám xe chậm hơn 10 giây: tự chuyển sang làn trái |
+| 392–900 | tăng tốc lên 50 km/h, vượt xe đó ở khoảng tick 590 |
+| 924–929 | một người bước ra băng qua làn: phanh, dừng cách người 13 m |
+| 975–979 | người đã rời làn: đi tiếp |
 
 Các tick trên là số đo, không phải số ghi trong scenario. Scenario chỉ ghi
 `overtake: true`.
 
 - **Bám xe.** Khi xe trước nằm trong đường đi, xa hơn quãng dừng và gần hơn
   `follow_gap_m` (30 m), tốc độ mục tiêu hạ dần về tốc độ của nó; ở 80 % của
-  khoảng đó thì bằng. Gần hơn quãng dừng (20,9 m ở 30 km/h) thì phanh, không
-  bám.
+  khoảng đó thì bằng. Gần hơn quãng dừng (7,5 m ở tốc độ 5 m/s của xe trước)
+  thì phanh, không bám.
 - **Vượt xe do controller tự quyết.** Bản đầu chuyển làn ở một tick và một
   phía ghi sẵn trong scenario (`lane_change: {at_tick: 420, side: left}`). Bản
   hiện tại (2026-10-13) bỏ hai số đó: khi xe đã bị một xe chậm hơn giữ dưới
@@ -599,27 +636,33 @@ Các tick trên là số đo, không phải số ghi trong scenario. Scenario ch
   còn coi vạch đó là biên làn, tối đa 2 giây. Xong khi thiết bị báo lại một
   làn có biên phía làn cũ đúng là vạch đó và bắt đầu đủ gần để lái theo.
 - **Người đi ngang** là actor đặt vị trí từng tick, không có vật lý, đi từ lề
-  trái sang lề phải. Cảm biến va chạm không thấy actor loại này, nên script
+  trái sang lề phải. Người bắt đầu bước ra khi xe còn cách 82 m
+  (`when_ego_within_m`), không theo tick cố định: lúc xe tới nơi giờ tùy vào
+  lúc nó tự quyết định vượt, có lần lệch nhau 3 giây. Cảm biến va chạm không thấy actor loại này, nên script
   đánh giá so hộp của xe với hộp của người.
 
-Đo ngày 2026-10-13 trên 3 lần chạy liên tiếp không cửa sổ, với controller tự
-quyết lúc vượt, đều đạt:
+Đo ngày 2026-10-13 trên 3 lần chạy liên tiếp không cửa sổ, tốc độ hành trình
+50 km/h, đều đạt:
 
 | Hạng mục | Kết quả |
 |----------|---------|
-| Bám xe | 10,0 đến 10,1 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 25,1 đến 25,3 m |
+| Bám xe | 9,0 đến 9,4 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 24,4 m |
 | Quyết định vượt | tick 302 đến 303, sang trái |
-| Chuyển làn xong | tick 391 đến 392 (3,0 giây sau khi bắt đầu) |
-| Phanh trước người | giữ phanh từ tick 859; khoảng cách nhỏ nhất tới người 14,2 đến 15,0 m |
-| Đi tiếp | tick 932 đến 945, 2,4 đến 2,9 giây sau khi bắt đầu phanh |
-| Tốc độ lớn nhất | 8,49 đến 8,51 m/s (30,6 km/h) |
+| Chuyển làn xong | tick 391 đến 393 (3,0 giây sau khi bắt đầu) |
+| Phanh trước người | giữ phanh từ tick 924 đến 929; khoảng cách nhỏ nhất tới người 12,7 đến 13,2 m |
+| Đi tiếp | tick 975 đến 979, 1,6 đến 1,7 giây sau khi bắt đầu phanh |
+| Tốc độ lớn nhất | 13,80 m/s (49,7 km/h) |
 | Va chạm, hộp chồng nhau | 0 |
-| Độ trễ tick tới lệnh được áp | trung vị 67 đến 69 ms, P95 101 đến 104 ms |
-| Tốc độ mô phỏng | 28,9 đến 29,0 tick/giây |
+| Độ trễ tick tới lệnh được áp | trung vị 68 đến 69 ms, P95 105 đến 107 ms |
+| Tốc độ mô phỏng | 29,4 đến 29,6 tick/giây |
 
-Với bản đầu (chuyển làn ở tick 420 ghi sẵn), 7 lần chạy có cửa sổ CARLA sau
-lần sửa cuối cũng đều đạt: bám xe 14,1 đến 14,2 giây, chuyển làn xong ở tick
-512 đến 514.
+Hai bản trước của màn này cũng đều đạt: chuyển làn ở tick 420 ghi sẵn, 30
+km/h (7 lần có cửa sổ CARLA); controller tự quyết lúc vượt, 30 km/h (3 lần).
+
+Thử cho cả đoạn bám xe chạy nhanh hơn (xe trước 30 km/h, chuyển làn ở 8,3
+m/s) thì trượt: chuyển làn xong, vạch ngoài của làn mới bị lane model đặt
+lệch, bề rộng làn ra hơn 4,6 m năm kết quả liên tiếp và xe dừng. Vì vậy đoạn
+bám xe và chuyển làn vẫn ở 5 m/s.
 
 ### Màn đỗ: `show_park`
 

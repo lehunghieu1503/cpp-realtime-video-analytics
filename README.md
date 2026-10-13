@@ -732,7 +732,7 @@ for a browser. A scenario says what the vehicle may do (`overtake: true`,
 car, on the side its camera shows free.
 
 ```bash
-simulation/run.sh --scenario show_drive --arm --gui   # Town04, up to 30 km/h
+simulation/run.sh --scenario show_drive --arm --gui   # Town04, up to 50 km/h
 simulation/run.sh --scenario show_park --arm --gui    # Town05's car park
 ```
 
@@ -748,7 +748,8 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 
 | Show | Measured |
 |:-----|:---------|
-| `show_drive`, 3 runs | follows a slower car at 25 m, decides after 10 s to overtake on the left, changes lane in 3.0 s, stops 14 to 15 m before a person crossing, drives on 2.4 to 2.9 s later; no collision |
+| `show_drive`, 3 runs | follows a slower car at 24 m, decides after 10 s to overtake on the left, changes lane in 3.0 s, speeds up to 50 km/h, stops 13 m before a person stepping out, drives on 1.6 s later; no collision |
+| Lane keeping and braking at 50 km/h, 13 scenarios | 0.05 to 0.07 m RMSE from the lane centre on the straight and the curves; stopped 6 to 12 m from a car, a truck, a person |
 | `show_park`, 4 runs | passes two parked cars, takes the first stall it may, backs in: 0.07 to 0.08 m beside its axis, 1.2 degree off, parking brake set |
 | `show_park_next`, 2 runs | a car in that stall: it takes the next one |
 | `show_park_occupied`, 2 runs | no stall left that it may take: gives up at the end of the search without going backwards |
@@ -758,7 +759,11 @@ The stall model has seen only this car park, and the vehicle's place between
 frames is its pose as CARLA reports it, without error: the park shows the
 chain from pixels to a parked car, not parking in general.
 
-A brake for an obstacle is now released when the path is clear again; old
+The numbers of the first table are from runs at 9 km/h; since 2026-10-13
+the scenarios drive at 50 km/h unless they say otherwise.
+
+A brake for an obstacle is now released when the path is clear again, which
+includes the depth image showing nothing standing on it; old
 perception, a lost pose or a lane lost for five results still stop the car
 for the rest of the run. The script exits with the evaluation's code.
 
