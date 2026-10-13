@@ -239,9 +239,12 @@ scenarios:
          ahead_m: 42.0, lateral_m: 0.8}
     expect: *brake_expectations
 
-  # A slower car in the next lane moves into the ego lane ahead of the vehicle
+  # A slower car in the next lane moves into the ego lane ahead of the vehicle.
+  # 600 ticks: the vehicle stands from about tick 200; near tick 800 that car,
+  # at 1 m/s, is far enough for it to drive on, and whether the run then ends
+  # on the next brake or before it is chance
   brake_cut_in:
-    ticks: 900
+    ticks: 600
     actors:
       - {name: cutter, class: car, blueprint: vehicle.tesla.model3, ahead_m: 22.0,
          lane: 1, speed_mps: 1.0, cut_in: {start_tick: 30, duration_ticks: 60, to_lane: 0}}
