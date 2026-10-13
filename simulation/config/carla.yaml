@@ -90,6 +90,9 @@ bev:
     - {source: carla-rear, calibration: rear_calibration, port: 5001}
     - {source: carla-left, calibration: left_calibration, port: 5002}
     - {source: carla-right, calibration: right_calibration, port: 5003}
+    # The front camera, which every scenario has: narrow, it adds the ground
+    # from 3.6 m ahead and costs no camera more to render
+    - {source: carla-front, calibration: calibration, port: 5000}
 
 # The lane model, on the front camera. Trained on the simulator's own images
 # with the lane sides its map gives (simulation/lane-dataset.py,

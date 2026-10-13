@@ -352,8 +352,9 @@ class Simulator:
                 Rig.from_config(self.config["rear_calibration"]),
                 int(self.c.get("sender", {}).get("rear_port", 5001)))}
             if self.view:
+                # The front camera is one of them and is there already
                 self.park_cameras = {source: (rig, port) for source, rig, port
-                                     in bev.cameras_of(self.config)}
+                                     in bev.cameras_of(self.config) if source != SOURCE}
         self.rear_rig = self.park_cameras.get(REAR_SOURCE, (None,))[0]
         self.stitcher = None  # makes the view the viewer shows
         self.park_queue = queue.Queue(maxsize=int(self.c.get("callback_queue", 8))
@@ -977,12 +978,13 @@ class Simulator:
                 self.viewer.frame("front", images[2], images[0])
             if REAR_SOURCE in park:
                 self.viewer.frame("rear", sim_ns, park[REAR_SOURCE])
-            if self.stitcher and len(park) == len(self.park_cameras):
+            if self.stitcher and len(park) == len(self.park_cameras) and images is not None:
                 # What the device makes of the same frames, for the person
                 # watching; the device's own view is not sent back
+                frames = dict(park, **{SOURCE: images[0]})
                 self.viewer.frame("bev", sim_ns, self.stitcher.compose(
-                    [np.ascontiguousarray(park[source][:, :, :3])
-                     for source in self.park_cameras]))
+                    [np.ascontiguousarray(frames[source][:, :, :3])
+                     for source, _, _ in bev.cameras_of(self.config)]))
             self.viewer.show(tick, ego["speed_mps"], applied)
         self.publish_state(sim_ns, ego)
         if images is None:
@@ -1077,7 +1079,7 @@ class Simulator:
                 if self.view:
                     rigs["bev"] = bev.BevRig.from_config(self.view)
                     self.stitcher = bev.Stitcher(
-                        rigs["bev"], [rig for rig, _ in self.park_cameras.values()])
+                        rigs["bev"], [rig for _, rig, _ in bev.cameras_of(self.config)])
                 self.viewer = Viewer(rigs, lambda ns: Pose.from_dict(
                     self.ego_states.get(ns)["pose"]) if ns in self.ego_states else None,
                     vehicle=self.vehicle)

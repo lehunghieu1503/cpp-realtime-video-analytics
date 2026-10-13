@@ -213,14 +213,14 @@ if scenario.get("park") and scenario.get("bev"):
     config["stall"]["model"] = config["bev"].pop("model")
 elif scenario.get("park"):
     config["sources"] = [s for s in config["sources"]
-                         if s.get("stall") or s["id"] not in view]
+                         if s.get("stall") or s.get("lane") or s["id"] not in view]
     for source in config["sources"]:
         source.pop("lane", None)
     config.pop("lane", None)
     config.pop("bev", None)
 else:
     config["sources"] = [s for s in config["sources"]
-                         if not s.get("stall") and s["id"] not in view]
+                         if s.get("lane") or (not s.get("stall") and s["id"] not in view)]
     config.pop("stall", None)
     config.pop("bev", None)
 config["dashboard"] = bool(web)
