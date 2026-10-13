@@ -19,6 +19,10 @@ with a fixed input the shape of the camera's image:
 Usage:
     simulation/stall-dataset.py make --out data/stalls       # needs CARLA
     scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onnx
+    # the same model on images of the bird's-eye view, which are square:
+    simulation/stall-dataset.py make --bev --out data/stalls-bev
+    scripts/train-stall-model.py --data data/stalls-bev --input 800 800 \
+        --work .cache/stall-bev-training --output models/stall-bev-town05.onnx
 
 Next to the ONNX file it writes <output>.json: checksums, tool versions, the
 validation scores, and two numbers measured on the ONNX file the way the
@@ -44,7 +48,7 @@ import shutil
 
 import numpy as np
 
-INPUT = (544, 960)  # height, width: 16:9, multiples of 32
+INPUT = (544, 960)  # height, width: 16:9, multiples of 32; --input changes it
 FEATURES = 20
 NAMES = ["empty", "occupied", "mouth", "back"]
 
@@ -142,10 +146,14 @@ def check_onnx(onnx_path, data, confidence=0.5, nms=0.5):
 
 
 def main():
+    global INPUT
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data", required=True, help="directory of stall-dataset.py make")
     parser.add_argument("--output", required=True, help="the ONNX file to write")
     parser.add_argument("--weights", default="yolo11n-pose.pt")
+    parser.add_argument("--input", type=int, nargs=2, default=list(INPUT),
+                        metavar=("HEIGHT", "WIDTH"),
+                        help="the model's input, multiples of 32 (default: 544 960)")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch", type=int, default=12)
     parser.add_argument("--work", default=".cache/stall-training",
@@ -155,6 +163,7 @@ def main():
     parser.add_argument("--resume", action="store_true",
                         help="go on with a training run in --work that was stopped")
     args = parser.parse_args()
+    INPUT = tuple(args.input)
 
     import onnx
     import onnxruntime
@@ -176,11 +185,11 @@ def main():
         # Trained square, with the library's own augmentation; no rotation
         # or shear: the camera is rigid, the ground is flat
         YOLO(args.weights).train(
-            data=os.path.join(data, "data.yaml"), imgsz=INPUT[1], epochs=args.epochs,
+            data=os.path.join(data, "data.yaml"), imgsz=max(INPUT), epochs=args.epochs,
             batch=args.batch, project=work, name="stall", exist_ok=True,
             degrees=0.0, shear=0.0, perspective=0.0, seed=0, plots=False)
     model = YOLO(best)
-    scores = model.val(data=os.path.join(data, "data.yaml"), imgsz=INPUT[1], plots=False,
+    scores = model.val(data=os.path.join(data, "data.yaml"), imgsz=max(INPUT), plots=False,
                        project=work, name="val", exist_ok=True)
     exported = model.export(format="onnx", imgsz=list(INPUT), opset=17, simplify=True,
                             dynamic=False)

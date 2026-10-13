@@ -5,7 +5,7 @@ Run by hand, with a CARLA server on port 2000; nothing calls this.
 Usage:
   simulation/stall-dataset.py map  [--map Town05] [--centre X Y] [--span M]
   simulation/stall-dataset.py make --out data/stalls [--count 4400] [--seed 1]
-                                   [--preview 12]
+                                   [--preview 12] [--bev]
 
 map   CARLA has no list of parking stalls, so the paint is measured: a camera
       looking straight down gives the pixels the server labels RoadLines, and
@@ -41,6 +41,12 @@ make  The rear camera of simulation/config/carla.yaml (rear_calibration), on
 
       Writes OUT/images, OUT/labels and OUT/data.yaml.
 
+      --bev: the images are the bird's-eye view the device makes of the
+      cameras of the `bev` section (video_analytics_simulation/bev.py), each
+      camera's image first through JPEG as the device gets it. The labels
+      are the same, in that view: a corner or an end is seen where the view
+      has a camera's pixel and that camera has nothing in front of it.
+
 The stalls file is truth: it labels these images and the evaluation reads it.
 Nothing in the control path does.
 """
@@ -55,6 +61,7 @@ import numpy as np
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+from video_analytics_simulation import bev  # noqa: E402
 from video_analytics_simulation.calibration import Pose, Rig, decode_depth  # noqa: E402
 from video_analytics_simulation.parking import Stall  # noqa: E402
 
@@ -278,21 +285,63 @@ def divider_ends(stalls):
     return ends
 
 
-def label(cls, outline, points, needed, min_box, capture, rig, depth_m):
+class CameraView:
+    """What one camera shows of the world, from where the vehicle is."""
+
+    def __init__(self, rig, capture, depth_m):
+        self.rig, self.capture, self.depth_m = rig, capture, depth_m
+        self.width, self.height = rig.width, rig.height
+
+    def box(self, outline):
+        return self.rig.visible_box(self.capture.from_parent(outline), 0.15)
+
+    def sees(self, point):
+        """The pixel of a world point, or None when it is outside the image
+        or hidden."""
+        rig, f = self.rig, self.rig.focal
+        # x forward, y right, z up
+        x, y, z = rig.pose.from_parent(self.capture.from_parent(point))
+        if x < 0.15:
+            return None
+        u, v = f * y / x + rig.width / 2.0, -f * z / x + rig.height / 2.0
+        if not (0 <= u < rig.width and 0 <= v < rig.height):
+            return None
+        # Not hidden: the depth image has the ground there, not something
+        # nearer. One pixel is many metres of ground far away, so the
+        # tolerance grows with the distance.
+        tolerance = 0.3 + 1.5 * x ** 2 / (f * (rig.z - rig.ground_z))
+        return (u, v) if self.depth_m[int(v), int(u)] > x - tolerance else None
+
+
+class BevView:
+    """What the bird's-eye view shows: a place on the ground is seen where
+    the view has a camera's pixel and that camera sees the place."""
+
+    def __init__(self, stitcher, capture, depths):
+        self.stitcher, self.capture = stitcher, capture
+        self.cameras = [CameraView(rig, capture, depth_m)
+                        for rig, depth_m in zip(stitcher.rigs, depths)]
+        self.width, self.height = stitcher.view.width, stitcher.view.height
+
+    def box(self, outline):
+        return self.stitcher.view.visible_box(self.capture.from_parent(outline))
+
+    def sees(self, point):
+        (u, v), _ = self.stitcher.view.project(self.capture.from_parent(point))
+        if not (0 <= u < self.width and 0 <= v < self.height):
+            return None
+        source = self.stitcher.source[int(v), int(u)]
+        if source < 0 or self.cameras[source].sees(point) is None:
+            return None
+        return float(u), float(v)
+
+
+def label(cls, outline, points, needed, min_box, view):
     """One label line, or None: the box of the ground polygon `outline`
     (world, (n, 3)) as far as it is in the image, and the four `points`
     (world, (4, 3)), of which `needed` must be seen."""
-    f, w, h = rig.focal, rig.width, rig.height
-
-    def camera(world):  # x forward, y right, z up
-        return rig.pose.from_parent(capture.from_parent(world))
-
-    def project(points):
-        return np.stack([f * points[:, 1] / points[:, 0] + w / 2.0,
-                         -f * points[:, 2] / points[:, 0] + h / 2.0], axis=1)
-
-    near = 0.15
-    box = rig.visible_box(capture.from_parent(outline), near)
+    w, h = view.width, view.height
+    box = view.box(outline)
     if box is None:
         return None
     x0, y0, x1, y1 = box
@@ -301,19 +350,11 @@ def label(cls, outline, points, needed, min_box, capture, rig, depth_m):
 
     numbers = [(x0 + x1) / 2.0 / w, (y0 + y1) / 2.0 / h, (x1 - x0) / w, (y1 - y0) / h]
     visible = 0
-    for point in camera(points):
-        seen = False
-        if point[0] >= near:
-            u, v = project(point[None])[0]
-            if 0 <= u < w and 0 <= v < h:
-                # Not hidden: the depth image has the ground there, not
-                # something nearer. One pixel is many metres of ground far
-                # away, so the tolerance grows with the distance.
-                tolerance = 0.3 + 1.5 * point[0] ** 2 / (f * (rig.z - rig.ground_z))
-                seen = depth_m[int(v), int(u)] > point[0] - tolerance
+    for point in points:
+        seen = view.sees(point)
         if seen:
             visible += 1
-            numbers += [u / w, v / h, 2]
+            numbers += [seen[0] / w, seen[1] / h, 2]
         else:
             numbers += [0.0, 0.0, 0]
     if visible < needed:
@@ -322,16 +363,16 @@ def label(cls, outline, points, needed, min_box, capture, rig, depth_m):
         "%d" % n if isinstance(n, int) else "%.6f" % n for n in numbers)
 
 
-def labels_of(stalls, occupied, ends, capture, rig, depth_m, ground_z):
+def labels_of(stalls, occupied, ends, view, ground_z):
     lines = [label(1 if taken else 0, stall.corners(ground_z), stall.corners(ground_z),
-                   2, MIN_BOX, capture, rig, depth_m)
+                   2, MIN_BOX, view)
              for stall, taken in zip(stalls, occupied)]
     half = END_GROUND_M / 2.0
     for x, y, cls in ends:
         around = np.array([[x + a * half, y + b * half, ground_z]
                            for a, b in ((1, 1), (1, -1), (-1, -1), (-1, 1))])
         lines.append(label(cls, around, np.tile([x, y, ground_z], (4, 1)), 4, MIN_END_BOX,
-                           capture, rig, depth_m))
+                           view))
     return [line for line in lines if line]
 
 
@@ -375,7 +416,10 @@ def make(args):
     with open(args.config) as f:
         config = yaml.safe_load(f)
     town = args.map
-    rig = Rig.from_config(config["rear_calibration"])
+    # The rear camera's image, or the view from above of several cameras
+    rigs = [rig for _, rig, _ in bev.cameras_of(config)] if args.bev \
+        else [Rig.from_config(config["rear_calibration"])]
+    stitcher = bev.Stitcher(bev.BevRig.from_config(config["bev"]), rigs) if args.bev else None
     with open(STALLS) as f:
         park = yaml.safe_load(f)[town]
     stalls = [Stall.from_dict(s) for s in park["stalls"]]
@@ -422,14 +466,13 @@ def make(args):
                                wheels[0].position.y - wheels[2].position.y) / 100.0
         extent, offset = ego.bounding_box.extent, ego.bounding_box.location.x
         ego.set_simulate_physics(False)
-        mount = carla.Transform(carla.Location(rig.x, rig.y, rig.z),
-                                carla.Rotation(roll=rig.roll_deg, pitch=rig.pitch_deg,
-                                               yaw=rig.yaw_deg))
-        rgb = Camera(carla, world, "sensor.camera.rgb", mount, rig.width, rig.height,
-                     rig.fov_deg, ego)
-        depth = Camera(carla, world, "sensor.camera.depth", mount, rig.width, rig.height,
-                       rig.fov_deg, ego)
-        cameras = [rgb, depth]
+        for rig in rigs:
+            mount = carla.Transform(carla.Location(rig.x, rig.y, rig.z),
+                                    carla.Rotation(roll=rig.roll_deg, pitch=rig.pitch_deg,
+                                                   yaw=rig.yaw_deg))
+            cameras += [Camera(carla, world, kind, mount, rig.width, rig.height,
+                               rig.fov_deg, ego)
+                        for kind in ("sensor.camera.rgb", "sensor.camera.depth")]
 
         made = previews = 0
         boxes, occupied = [], []
@@ -492,15 +535,23 @@ def make(args):
                                               carla.Rotation(yaw=yaw)))
             world.tick()
             frame = world.tick()  # the image of the tick after the move
-            image = rgb.image(frame)[:, :, :3]
-            depth_m = decode_depth(depth.image(frame))
+            images = [camera.image(frame)[:, :, :3] for camera in cameras[0::2]]
+            depths = [decode_depth(camera.image(frame)) for camera in cameras[1::2]]
             capture = Pose(x, y, height, settled.rotation.roll, settled.rotation.pitch, yaw)
-            lines = labels_of(stalls, occupied, ends, capture, rig, depth_m, ground_z)
+            # As the device gets them: JPEG, at the qualities the runs use
+            quality = [cv2.IMWRITE_JPEG_QUALITY, int(rng.choice((30, 50, 75, 75, 90)))]
+            if stitcher:
+                image = stitcher.compose([
+                    cv2.imdecode(cv2.imencode(".jpg", sent, quality)[1], cv2.IMREAD_COLOR)
+                    for sent in images])
+                view, quality = BevView(stitcher, capture, depths), \
+                    [cv2.IMWRITE_JPEG_QUALITY, 95]
+            else:
+                image, view = images[0], CameraView(rigs[0], capture, depths[0])
+            lines = labels_of(stalls, occupied, ends, view, ground_z)
             part = "val" if (made // args.scene) % 10 == 9 else "train"
             name = "%s_%05d" % (town.lower(), made)
-            # As the device gets them: JPEG, at the qualities the runs use
-            cv2.imwrite(os.path.join(args.out, "images", part, name + ".jpg"), image,
-                        [cv2.IMWRITE_JPEG_QUALITY, int(rng.choice((30, 50, 75, 75, 90)))])
+            cv2.imwrite(os.path.join(args.out, "images", part, name + ".jpg"), image, quality)
             with open(os.path.join(args.out, "labels", part, name + ".txt"), "w") as f:
                 f.write("\n".join(lines) + ("\n" if lines else ""))
             if previews < args.preview and made % max(1, args.count // max(1, args.preview)) == 0:
@@ -508,13 +559,14 @@ def make(args):
                 for line in lines:
                     n = [float(v) for v in line.split()]
                     colour = ((0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255))[int(n[0])]
-                    cv2.rectangle(drawn, (int((n[1] - n[3] / 2) * rig.width),
-                                          int((n[2] - n[4] / 2) * rig.height)),
-                                  (int((n[1] + n[3] / 2) * rig.width),
-                                   int((n[2] + n[4] / 2) * rig.height)), colour, 1)
+                    cv2.rectangle(drawn, (int((n[1] - n[3] / 2) * view.width),
+                                          int((n[2] - n[4] / 2) * view.height)),
+                                  (int((n[1] + n[3] / 2) * view.width),
+                                   int((n[2] + n[4] / 2) * view.height)), colour, 1)
                     for k in range(4):
                         if n[7 + 3 * k]:
-                            at = (int(n[5 + 3 * k] * rig.width), int(n[6 + 3 * k] * rig.height))
+                            at = (int(n[5 + 3 * k] * view.width),
+                                  int(n[6 + 3 * k] * view.height))
                             cv2.circle(drawn, at, 6, colour, 2)
                             cv2.putText(drawn, str(k), at, cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                                         (255, 255, 255), 2)
@@ -559,6 +611,8 @@ def main():
     k.add_argument("--seed", type=int, default=1)
     k.add_argument("--preview", type=int, default=12,
                    help="images written again with their labels drawn, to look at")
+    k.add_argument("--bev", action="store_true",
+                   help="images of the bird's-eye view instead of the rear camera's")
     args = parser.parse_args()
     return measure(args) if args.command == "map" else make(args)
 
