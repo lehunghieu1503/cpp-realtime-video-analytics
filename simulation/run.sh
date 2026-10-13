@@ -24,6 +24,9 @@
 #                      cameras and what the device finds in them: boxes, lane
 #                      lines, parking stalls. An off-screen server left by an
 #                      earlier run is stopped and started again with a window.
+#   --view             only that second window: the server stays off-screen.
+#                      The CARLA window costs about as much as the run's
+#                      cameras together: 8 ticks a second with it, 14 without
 #   --web              serve the device's dashboard too: a page with each
 #                      camera's video and what was found in it, at the
 #                      address the script prints. Off by default: then the
@@ -60,17 +63,18 @@ while [ $# -gt 0 ]; do
     --sim-host) SIM_HOST="$2"; shift 2 ;;
     --arm) ARM=--arm; shift ;;
     --gui) GUI="--follow --view" OFFSCREEN=""; shift ;;
+    --view) GUI="--view"; shift ;;
     --web) WEB=1; shift ;;
     --ticks) TICKS="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -105,7 +109,7 @@ print("carla client %s, GStreamer %s" % (carla.Client("127.0.0.1", 1).get_client
                                         Gst.version_string()))
 PY
 
-if [ -n "$GUI" ] && pkill -f 'CarlaUE4.*-RenderOffScreen'; then
+if [ -z "$OFFSCREEN" ] && pkill -f 'CarlaUE4.*-RenderOffScreen'; then
   echo "== Stopping the off-screen CARLA server"
   while (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; do sleep 1; done
 fi
