@@ -1,6 +1,7 @@
 #include "bev.hpp"
 
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
@@ -82,11 +83,17 @@ cv::Mat BevStitcher::offer(size_t camera, uint64_t stamp, const cv::Mat& bgr) {
             cv::BORDER_TRANSPARENT);
   moment.have |= 1u << camera;
   if (moment.have != (rigs_.size() == 32 ? ~0u : (1u << rigs_.size()) - 1)) {
-    while (pending_.size() > kPending) pending_.erase(pending_.begin());
+    while (pending_.size() > kPending) {
+      pending_.erase(pending_.begin());
+      dropped_++;
+    }
     return {};
   }
   cv::Mat view = moment.view;
   // Nothing older can still be wanted: results go out in order
-  pending_.erase(pending_.begin(), pending_.upper_bound(stamp));
+  auto end = pending_.upper_bound(stamp);
+  dropped_ += std::distance(pending_.begin(), end) - 1;
+  pending_.erase(pending_.begin(), end);
+  made_++;
   return view;
 }

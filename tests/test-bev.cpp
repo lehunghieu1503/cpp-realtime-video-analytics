@@ -101,6 +101,12 @@ void testFixture(const json& fixture) {
   uint64_t oldest = 10000, newest = 10000 + 3 * BevStitcher::kPending - 1;
   check(stitcher.offer(2, oldest, frames[2]).empty(), "Old moments are dropped");
   check(!stitcher.offer(2, newest, frames[2]).empty(), "The newest is still whole");
+  // Views: the moments 1000, 3000 and the newest. Dropped: 2000 twice (it
+  // was offered again after it was forgotten), every moment of the run
+  // above but the newest, and `oldest` once more for the same reason
+  check(stitcher.made() == 3 &&
+            stitcher.dropped() == 2 + (3 * BevStitcher::kPending - 1) + 1,
+        "Views and dropped moments are counted");
 
   bool refused = false;
   try {

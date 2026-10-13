@@ -920,6 +920,10 @@ int runLive(const AppConfig& app) {
 
   sseServer.stop();
   pipeline.stop();
+  if (bev) {
+    std::cout << "Bird's-eye view: " << bev->made() << " views, "
+              << bev->dropped() << " moments without every camera's frame\n";
+  }
   if (!app.headless) cv::destroyAllWindows();
 
   return failed ? -1 : 0;

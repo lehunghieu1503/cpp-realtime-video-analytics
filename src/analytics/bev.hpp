@@ -56,6 +56,12 @@ public:
   // the frame is not of the size the camera's calibration says.
   cv::Mat offer(size_t camera, uint64_t stamp, const cv::Mat& bgr);
 
+  // Views given out, and moments dropped because a camera's frame of them
+  // never came: when the device does not keep up, each camera loses other
+  // frames and few moments are whole
+  uint64_t made() const { return made_; }
+  uint64_t dropped() const { return dropped_; }
+
 private:
   struct Pending {
     cv::Mat view;
@@ -65,4 +71,6 @@ private:
   cv::Mat source_;  // CV_8S
   std::vector<cv::Mat> mapX_, mapY_;
   std::map<uint64_t, Pending> pending_;
+  uint64_t made_ = 0;
+  uint64_t dropped_ = 0;
 };
