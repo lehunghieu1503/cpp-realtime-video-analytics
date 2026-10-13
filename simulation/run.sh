@@ -258,12 +258,13 @@ else
 fi
 
 # A local device that stops ends the run: the simulator would wait ten
-# minutes for it. One that stops while it starts is started again a few
-# times: beside a CARLA server that has just loaded a map there is, for the
-# first half minute, not enough video memory for its models.
+# minutes for it. One that stops while it starts is started again, up to
+# eleven times: beside a CARLA server that has just loaded a map there is not
+# enough video memory for its models at first. With a window and two cameras
+# it took five tries, a minute; five was all it had.
 while kill -0 "$SIMULATOR" 2>/dev/null; do
   if [ -n "$LOCAL_DEVICE" ] && ! kill -0 "$LOCAL_DEVICE" 2>/dev/null; then
-    if [ $((SECONDS - DEVICE_STARTED)) -lt 30 ] && [ "$DEVICE_STARTS" -lt 6 ]; then
+    if [ $((SECONDS - DEVICE_STARTED)) -lt 30 ] && [ "$DEVICE_STARTS" -lt 12 ]; then
       echo "   the device stopped while starting; again in 8 s ($(tail -n 1 "$RUN_DIR/device.log" | cut -c1-80))"
       sleep 8
       start_local_device
