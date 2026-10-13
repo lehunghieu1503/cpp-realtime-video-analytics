@@ -361,5 +361,37 @@ class ReverseAndParkingBrake(unittest.TestCase):
         self.assertEqual(applied["reason"], "parked")
 
 
+class ScriptedActors(unittest.TestCase):
+    """An actor's script, without a simulator to put it in."""
+
+    def actor(self, spec):
+        import types
+        from video_analytics_simulation.simulator import ScriptedActor
+        actor = ScriptedActor.__new__(ScriptedActor)
+        actor.spec = spec
+        at = types.SimpleNamespace(location=types.SimpleNamespace(x=290.0, y=0.0))
+        actor.transform_at = lambda tick: (at, 0.0)
+        return actor
+
+    def test_a_cut_in_that_waits_for_the_ego_vehicle(self):
+        actor = self.actor({"lane": -2.6, "cut_in": {
+            "when_ego_within_m": 82.0, "duration_ticks": 300, "to_lane": 1.6}})
+        actor.near(500, None)                      # no ego state yet
+        actor.near(500, {"x": 200.0, "y": 0.0})    # 90 m away
+        self.assertEqual(actor.lane_position(900), -2.6)
+        actor.near(640, {"x": 208.5, "y": 3.0})    # within 82 m: it starts
+        actor.near(700, {"x": 250.0, "y": 0.0})    # and does not start again
+        self.assertEqual(actor.spec["cut_in"]["start_tick"], 640)
+        self.assertEqual(actor.lane_position(640), -2.6)
+        self.assertAlmostEqual(actor.lane_position(790), -0.5)  # half way
+        self.assertEqual(actor.lane_position(2000), 1.6)
+
+    def test_a_cut_in_at_a_tick_is_not_moved_by_the_ego_vehicle(self):
+        actor = self.actor({"lane": 1, "cut_in": {
+            "start_tick": 30, "duration_ticks": 60, "to_lane": 0}})
+        actor.near(0, {"x": 289.0, "y": 0.0})
+        self.assertEqual((actor.lane_position(29), actor.lane_position(90)), (1.0, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()

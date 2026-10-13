@@ -227,7 +227,9 @@ class ScriptedActor:
     def lane_position(self, tick):
         """Lane index relative to the ego lane (fractional during a cut-in)."""
         cut = self.spec.get("cut_in")
-        if not cut or tick < cut["start_tick"]:
+        # Without a start_tick it starts when the ego vehicle comes within
+        # when_ego_within_m (see near()): until then it has not started
+        if not cut or tick < cut.get("start_tick", math.inf):
             return float(self.spec.get("lane", 0))
         progress = min(1.0, (tick - cut["start_tick"]) / float(cut["duration_ticks"]))
         start = float(self.spec.get("lane", 0))
@@ -278,6 +280,17 @@ class ScriptedActor:
             transform.location.z + float(spec.get("z_m", 0.3 if self.cls != "person" else 1.0)))
         rotation = self.carla.Rotation(yaw=transform.rotation.yaw + float(spec.get("yaw_deg", 0.0)))
         return self.carla.Transform(location, rotation), speed
+
+    def near(self, tick, ego_pose):
+        """Starts the cut-in of an actor that waits for the ego vehicle,
+        once that is within when_ego_within_m of it: a person who steps out
+        when a car comes, whenever the car comes."""
+        cut = self.spec.get("cut_in")
+        if cut and "start_tick" not in cut and ego_pose:
+            at = self.transform_at(max(0, tick))[0].location
+            if math.hypot(at.x - ego_pose["x"], at.y - ego_pose["y"]) \
+                    <= float(cut["when_ego_within_m"]):
+                cut["start_tick"] = tick
 
     def step(self, tick):
         """The command that puts the actor where it is at this tick."""
@@ -882,6 +895,8 @@ class Simulator:
                 # manual_gear_shift stays off
                 reverse=bool(applied.get("reverse", False)),
                 hand_brake=bool(applied.get("hand_brake", False))))]
+        for actor in self.scripted:
+            actor.near(tick, last["pose"] if last else None)
         commands += [actor.step(tick) for actor in self.scripted]
         self.client.apply_batch_sync(commands, False)
         self.draw_markers()
