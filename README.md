@@ -693,8 +693,9 @@ flowchart LR
 ```
 
 ```bash
-# once: the lane model (the authors publish a PyTorch checkpoint)
-scripts/export-lane-model.py --repo ufld --checkpoint tusimple_18.pth
+# once: the lane model, trained on the simulator's own images
+simulation/lane-dataset.py --out data/lanes/town04    # 8000 images, needs CARLA
+scripts/train-lane-model.py --data data/lanes/town04 --output models/lane-town04.onnx
 # once: the image on the board
 IMAGE_ONLY=1 scripts/deploy-jetson.sh user@board
 
@@ -748,13 +749,17 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 
 | Show | Measured |
 |:-----|:---------|
-| `show_drive`, 3 runs | follows a slower car at 24 m, decides after 10 s to overtake on the left, changes lane in 3.0 s, speeds up to 50 km/h, stops 13 m before a person stepping out, drives on 1.6 s later; no collision |
-| Lane keeping and braking at 50 km/h, 13 scenarios | 0.05 to 0.07 m RMSE from the lane centre on the straight and the curves; stopped 6 to 12 m from a car, a truck, a person |
+| `show_drive`, 4 runs | follows a car at 30 km/h, 37 m behind, decides after 10 s to overtake on the left, changes lane in 2.1 s, speeds up to 50 km/h, stops 13 m before a person stepping out, drives on; no collision |
+| Lane keeping and braking at 50 km/h, 14 scenarios | 0.005 m RMSE from the lane centre on the straight, 0.10 to 0.11 m on the curves; a ramp of 100 m radius at 30 km/h within 0.19 m; stopped 8 to 12 m from a car, a truck, a person |
+| Lane model, 845 validation images of Town04 | a lane in 97 % of the images whose labels give one (83 % with the authors' TuSimple weights), its centre 0.007 m off at the median; 90 % on a map it was not trained on (78 %) |
 | `show_park`, 4 runs | passes two parked cars, takes the first stall it may, backs in: 0.07 to 0.08 m beside its axis, 1.2 degree off, parking brake set |
 | `show_park_next`, 2 runs | a car in that stall: it takes the next one |
 | `show_park_occupied`, 2 runs | no stall left that it may take: gives up at the end of the search without going backwards |
 | Stall model, 440 validation images | 87 % of the stalls found, 99 % of them with the right class; divider ends 3 to 9 m away: 98 % found, 1.8 pixels off at the median |
 
+The lane model is trained the same way, on 8000 images of Town04 with the
+lane sides its map gives; the input and output are those of the authors'
+TuSimple weights, which are no longer used. It has seen only CARLA's roads.
 The stall model has seen only this car park, and the vehicle's place between
 frames is its pose as CARLA reports it, without error: the park shows the
 chain from pixels to a parked car, not parking in general.

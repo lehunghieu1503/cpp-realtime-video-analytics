@@ -212,7 +212,7 @@ lệch bao nhiêu mét ở 120 m.
 | Detect, track | Không đổi; kết quả có thêm `simulation` và `image` | `src/server/result-serializer.hpp` |
 | Calibration và uv → XY | File thông số camera dùng chung cho Jetson và laptop; hàm đổi pixel sang mét trên mặt đường | `simulation/config/carla.yaml`, `calibration.py`, `src/analytics/lane-geometry.cpp` |
 | Tracking trong toạ độ mét | Khoảng cách từ depth, Kalman theo từng track trong hệ toạ độ thế giới, xuất vận tốc và gia tốc | `metric_tracker.py` |
-| Lane | Model UFLD ResNet-18 (TuSimple) làm engine thứ hai, tiền xử lý và giải mã riêng | `src/inference/lane-engine.cpp`, `scripts/export-lane-model.py` |
+| Lane | Mạng UFLD ResNet-18 làm engine thứ hai, tiền xử lý và giải mã riêng. Lúc đầu dùng trọng số TuSimple của tác giả; từ 2026-10-13 train trên ảnh CARLA (mục 15) | `src/inference/lane-engine.cpp`, `scripts/train-lane-model.py`, `scripts/export-lane-model.py` |
 | Xuất làn ra ngoài | Làn theo mét trong JSON và topic ROS 2 | `src/server/result-serializer.hpp`, `ros2/video_analytics_bridge` |
 | Điều khiển lái và phanh | Pure pursuit theo tim làn, PI tốc độ, phanh khi có vật cản trong đường đi | `controller.py` |
 | Đánh giá | Recall theo dải khoảng cách, sai số khoảng cách, vận tốc, gia tốc, làn, độ trễ, kết luận theo kỳ vọng của scenario | `simulation/evaluate.py` |
@@ -279,7 +279,8 @@ chắn sẽ làm giai đoạn 2 thì cài 0.9.15 ngay từ đầu để khỏi c
   thử ban đêm, mưa, giao lộ, đường không vạch.
 - Điều khoản sử dụng của checkpoint lane: mã nguồn UFLD theo giấy phép MIT,
   còn checkpoint do tác giả đăng trên Google Drive không ghi điều khoản. Vì
-  vậy checkpoint và file ONNX không nằm trong repository.
+  vậy checkpoint và file ONNX không nằm trong repository. Từ 2026-10-13 các
+  lần chạy không dùng checkpoint đó nữa (mục 15).
 - Tài liệu nêu yêu cầu cho CARLA 0.9.x đang viết cho bản 0.9.15, chưa cập nhật
   cho 0.9.16.
 - Các tham số méo ống kính và việc thiếu vật thể bàn cờ trong CARLA là theo trí
@@ -310,10 +311,10 @@ curl -LO https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.1
 tar -xzf CARLA_0.9.16.tar.gz
 python3 -m venv --system-site-packages venv && venv/bin/pip install carla==0.9.16
 
-# Lane model: tác giả chỉ phát hành checkpoint PyTorch
-git clone https://github.com/cfzd/Ultra-Fast-Lane-Detection ufld
-# tải tusimple_18.pth theo link trong README của repository đó
-scripts/export-lane-model.py --repo ufld --checkpoint tusimple_18.pth
+# Lane model: train trên ảnh của chính simulator (lệnh đầu cần server CARLA,
+# 8,5 phút; lệnh sau cần torch, khoảng 35 phút trên RTX 5060, CARLA phải tắt)
+simulation/lane-dataset.py --out data/lanes/town04
+scripts/train-lane-model.py --data data/lanes/town04 --output models/lane-town04.onnx
 
 # Image cho Jetson (chỉ gửi image, không đụng tới stack đang chạy)
 IMAGE_ONLY=1 scripts/deploy-jetson.sh machineai@100.85.110.98
@@ -488,7 +489,8 @@ vẫn dừng, nhưng những lần đó không chứng minh được quy tắc v
 
 Làm ngày 2026-10-12 theo `plans/261012-1633-carla-drive-and-park-show`. Mọi
 thứ chạy trên một máy: CARLA, inference (`tensorrt-native`, RTX 5060 8 GB) và
-controller. Màn lái dùng YOLO11s và lane model của giai đoạn 1. Màn đỗ được
+controller. Màn lái dùng YOLO11s và lane model (từ 2026-10-13 là bản train
+trên ảnh CARLA, xem dưới). Màn đỗ được
 làm lại ngày 2026-10-13: thêm camera sau và một model thứ ba nhận ô đỗ, để xe
 tự tìm ô thay vì lùi vào toạ độ ghi sẵn.
 
@@ -554,10 +556,12 @@ nhanh hơn 50 km/h; đặt mục tiêu 80 km/h thì nó vẫn dừng ở 13,9 m/
   11 m. Sau đó detector không còn thấy xe tải, 30 kết quả không có nó được
   coi là đường trống, và xe chạy tiếp tới 5,3 m/s; nó chỉ dừng lại cách 1,1 m
   nhờ lane model mất làn. Đã sửa: xem dòng `HOLDING` ở bảng trạng thái mục 14.
-- **Đường cong.** Lane model báo sai bề rộng làn ở mét thứ 302 (cong phải) và
-  193 (cong trái) kể từ điểm xuất phát, và xe dừng ở đó. Ở 9 km/h xe chưa bao
-  giờ tới các điểm này. Hai scenario được rút ngắn (600 và 400 tick) để kết
-  thúc trước đó.
+- **Đường cong.** Lane model TuSimple báo sai bề rộng làn ở mét thứ 302 (cong
+  phải) và 193 (cong trái) kể từ điểm xuất phát, và xe dừng ở đó. Ở 9 km/h xe
+  chưa bao giờ tới các điểm này. Hai scenario khi ấy được rút ngắn (600 và 400
+  tick) để kết thúc trước đó. Hai điểm là cùng một chỗ trên road 23: nơi
+  đường cong hết và một dốc cua bán kính khoảng 100 m bắt đầu. Lane model mới
+  (mục kế) không còn hỏng ở đó.
 
 Chạy lại 20 scenario lái và đỗ với cấu hình này, không cửa sổ, 19 đạt:
 
@@ -577,6 +581,93 @@ Chạy lại 20 scenario lái và đỗ với cấu hình này, không cửa s�
 Ở các scenario phanh, vật cản đứng cách 22 đến 50 m nên xe chưa kịp lên 50
 km/h. `metric_parked_ego_moving` nằm sát ngưỡng từ trước (0,48 và 0,49 hôm
 12/10); ở 50 km/h sai số là 0,77 m/s nên scenario này giữ 9 km/h.
+
+### Lane model train trên ảnh CARLA (2026-10-13)
+
+Lane model của giai đoạn 1 là trọng số TuSimple của tác giả UFLD: ảnh đường
+cao tốc Mỹ, camera khác. Ở 50 km/h nó lộ hai giới hạn: báo sai bề rộng làn ở
+chỗ đường cong chuyển sang dốc cua, và đặt sai vạch ngoài của làn mới khi
+chuyển làn ở 30 km/h. Từ 2026-10-13 các lần chạy dùng
+`models/lane-town04.onnx`: cùng mạng, cùng input và output, nên thiết bị và
+C++ không đổi gì; khác ở chỗ nó được train trên ảnh của chính simulator, với
+nhãn lấy từ bản đồ. Cách làm giống model ô đỗ.
+
+- **Ảnh** (`simulation/lane-dataset.py`): camera trước đặt lên mọi làn xe
+  chạy của map, cách nhau 2 m. Hai phần ba số ảnh xe ở gần tim làn và gần
+  song song với làn; một phần ba xe nằm bất kỳ đâu ngang làn, lệch hướng tới
+  8°, như lúc chuyển làn. Nửa số ảnh có 1 đến 4 xe phía trước. Ánh sáng: 40 %
+  như lúc chạy (`ClearNoon`), 30 % mặt trời, mây, đường ướt khác, 15 % đêm
+  (một nửa có đèn xe), 15 % mưa. 8 000 ảnh Town04 mất 8,5 phút.
+- **Nhãn**: bốn vạch mà model có chỗ chứa: hai biên của làn xe đang ở, và
+  biên xa của làn bên trái, bên phải. Bản đồ cho vị trí biên làn; script đi
+  theo làn 100 m về phía trước (đi thẳng ở chỗ làn tách nhánh) và chiếu lên
+  ảnh bằng pose của xe. Một vạch được gắn nhãn từ chỗ bản đồ bắt đầu có sơn
+  tới chỗ hết sơn: xuyên qua khe của vạch đứt, qua đoạn hở không sơn và phía
+  sau xe khác. Bản đồ chỉ dùng để gắn nhãn; controller không đọc nó.
+- **Chia train và val** theo đoạn đường 50 m: một phần mười số đoạn vào val
+  (845 ảnh), phần còn lại vào train (7 155 ảnh). Ảnh val vì vậy không phải
+  cùng một chỗ với ảnh train nhìn từ xa hơn 2 m.
+- **Train** (`scripts/train-lane-model.py`): từ trọng số ImageNet của
+  torchvision cho ResNet-18, như tác giả đã làm, không từ checkpoint TuSimple.
+  40 epoch, 35 phút. Ngoài lớp của từng ô, mạng còn được dạy vị trí mà bộ
+  giải mã đọc ra từ ô đó (trung bình các cột), vì làn được đo từ số ấy.
+
+Script train tự kiểm tra file ONNX theo cách thiết bị chạy (JPEG chất lượng
+30, thu nhỏ cả ảnh về input, bộ giải mã tham chiếu) và so với nhãn;
+`--check-only` làm việc đó cho model bất kỳ. "Có làn" nghĩa là
+`lane.py` dựng được một làn hợp lệ, tính bằng mét, từ các vạch.
+
+| Ảnh val | Hạng mục | TuSimple | Train trên CARLA |
+|---------|----------|----------|------------------|
+| Town04, 845 ảnh | Có làn, trên 744 ảnh mà nhãn cho một làn | 616 (83 %) | 720 (97 %) |
+| | Tim làn lệch so với nhãn: trung vị / P90 / P99 | 0,048 / 0,169 / 0,871 m | 0,007 / 0,028 / 0,109 m |
+| | Hàng có nhãn được tìm đúng trong 20 px | 64 % | 93 % |
+| | Đêm không đèn xe: có làn trên 67 ảnh | 52 | 64 |
+| | Mưa: có làn trên 108 ảnh | 64 | 104 |
+| | Xe nằm ngang làn: có làn trên 138 ảnh | 87 | 129 |
+| Town05, 197 ảnh (map không có trong tập train) | Có làn, trên 172 ảnh | 135 (78 %) | 155 (90 %) |
+| | Tim làn lệch, trung vị | 0,045 m | 0,010 m |
+
+Chạy scenario với cùng code, chỉ đổi model (không cửa sổ):
+
+| Lần chạy | TuSimple | Train trên CARLA |
+|----------|----------|------------------|
+| `lane_ramp`: dốc cua bán kính khoảng 100 m, 30 km/h | dừng ở mét 115 vì `lane:width` | chạy hết; làn hợp lệ 758 / 758 frame; xe lệch tim làn nhiều nhất 0,19 m |
+| `lane_curve_right` kéo dài 900 tick, 50 km/h | dừng ở mét 302 vì `lane:width` | làn hợp lệ 898 / 898 frame; xe đi hết 353 m |
+| Chuyển làn sau xe chạy 30 km/h | chuyển xong thì dừng (`no_lookahead_support`) | chuyển xong ở tick 365 rồi lên 50 km/h |
+| Tim làn so với bản đồ, RMSE, các scenario giữ làn và phanh | 0,03 đến 0,09 m | 0,003 đến 0,015 m |
+| Xe lệch tim làn, `lane_straight`, RMSE | 0,04 đến 0,05 m | 0,005 m |
+| Xe lệch tim làn, 600 tick đầu của `lane_curve_right`, RMSE | 0,07 m | 0,09 m |
+
+Chạy lại 23 lần với model mới (giữ làn, phanh, lỗi, màn lái ba lần): 20 đạt.
+Ba lần trượt không do làn: `brake_cut_in` (sửa bên dưới),
+`metric_parked_ego_moving` (0,52 m/s, vẫn sát ngưỡng 0,50 như trước) và
+`baseline` (tôi chạy nhầm với `--arm`; chạy lại không `--arm` thì đạt).
+
+Scenario đổi theo:
+
+- `lane_curve_right` và `lane_curve_left` chạy tới hết đường cong: 760 và 500
+  tick (trước là 600 và 400).
+- `lane_ramp` mới: xuất phát 65 m trước dốc cua và đi hết dốc ở 30 km/h.
+- `show_drive` bám xe và chuyển làn ở 30 km/h (xem dưới).
+- `brake_cut_in` còn 600 tick. Xe tạt vào vẫn đi 1 m/s, nên gần tick 800 xe
+  ego đi tiếp rồi phanh lần nữa; lần chạy 900 tick đạt hay trượt tùy nó kết
+  thúc sau hay trước lần phanh thứ hai.
+
+Giới hạn của model này:
+
+- **Nó chỉ biết đường của CARLA.** Ảnh train là Town04; trên Town05 nó vẫn
+  hơn bản TuSimple, nhưng các số trên không nói gì về ảnh thật.
+- **Trên dốc cua ở 50 km/h xe chạy lệch 0,62 đến 0,71 m ra phía ngoài**, đè
+  vạch. Làn vẫn hợp lệ ở mọi frame và khớp bản đồ; phần lệch là của pure
+  pursuit. Trên đường cong bán kính 340 m xe cũng lệch 0,08 m trung bình
+  (0,18 m lớn nhất); với bản TuSimple con số đó nhỏ hơn (0,04 m) vì sai số
+  của chính model bù một phần. Chưa sửa controller.
+- **38 trên 101 ảnh val mà nhãn không cho làn, model vẫn cho một làn** (bản
+  TuSimple: 37). Đó là những chỗ một biên làn không có sơn theo bản đồ, và
+  model vẽ tiếp vạch.
+- **Chưa chạy trên Jetson.** Input và output không đổi, `run.sh` tự gửi file
+  model sang board; engine TensorRT của board chưa được dựng và đo.
 
 ### Thay đổi so với giai đoạn 1
 
@@ -602,23 +693,23 @@ hay ô đỗ nằm ở đâu.
 
 ### Màn lái: `show_drive`
 
-Đoạn thẳng của Town04, 1 250 tick (42 giây), tới 50 km/h:
+Đoạn thẳng của Town04, 1 400 tick (47 giây), tới 50 km/h:
 
 | Tick | Xe làm gì |
 |------|-----------|
-| 0–302 | bám xe phía trước (5 m/s), cách 24 m |
-| 302–392 | đã bám xe chậm hơn 10 giây: tự chuyển sang làn trái |
-| 392–900 | tăng tốc lên 50 km/h, vượt xe đó ở khoảng tick 590 |
-| 924–929 | một người bước ra băng qua làn: phanh, dừng cách người 13 m |
-| 975–979 | người đã rời làn: đi tiếp |
+| 0–300 | bám xe phía trước (30 km/h), cách 37 m |
+| 300–365 | đã bám xe chậm hơn 10 giây: tự chuyển sang làn trái |
+| 365–745 | tăng tốc lên 50 km/h, vượt xe đó ở khoảng tick 725 |
+| 1051–1112 | một người bước ra băng qua làn: phanh, dừng cách người 13 m |
+| 1106–1114 | người đã rời làn: đi tiếp |
 
 Các tick trên là số đo, không phải số ghi trong scenario. Scenario chỉ ghi
 `overtake: true`.
 
 - **Bám xe.** Khi xe trước nằm trong đường đi, xa hơn quãng dừng và gần hơn
-  `follow_gap_m` (30 m), tốc độ mục tiêu hạ dần về tốc độ của nó; ở 80 % của
-  khoảng đó thì bằng. Gần hơn quãng dừng (7,5 m ở tốc độ 5 m/s của xe trước)
-  thì phanh, không bám.
+  `follow_gap_m` (45 m), tốc độ mục tiêu hạ dần về tốc độ của nó; ở 80 % của
+  khoảng đó thì bằng. Gần hơn quãng dừng (14 m ở tốc độ 8,33 m/s của xe
+  trước) thì phanh, không bám.
 - **Vượt xe do controller tự quyết.** Bản đầu chuyển làn ở một tick và một
   phía ghi sẵn trong scenario (`lane_change: {at_tick: 420, side: left}`). Bản
   hiện tại (2026-10-13) bỏ hai số đó: khi xe đã bị một xe chậm hơn giữ dưới
@@ -641,28 +732,31 @@ Các tick trên là số đo, không phải số ghi trong scenario. Scenario ch
   lúc nó tự quyết định vượt, có lần lệch nhau 3 giây. Cảm biến va chạm không thấy actor loại này, nên script
   đánh giá so hộp của xe với hộp của người.
 
-Đo ngày 2026-10-13 trên 3 lần chạy liên tiếp không cửa sổ, tốc độ hành trình
-50 km/h, đều đạt:
+Đo ngày 2026-10-13 với lane model train trên ảnh CARLA, 4 lần chạy không cửa
+sổ, bám xe và chuyển làn ở 30 km/h, hành trình 50 km/h, đều đạt:
 
 | Hạng mục | Kết quả |
 |----------|---------|
-| Bám xe | 9,0 đến 9,4 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 24,4 m |
-| Quyết định vượt | tick 302 đến 303, sang trái |
-| Chuyển làn xong | tick 391 đến 393 (3,0 giây sau khi bắt đầu) |
-| Phanh trước người | giữ phanh từ tick 924 đến 929; khoảng cách nhỏ nhất tới người 12,7 đến 13,2 m |
-| Đi tiếp | tick 975 đến 979, 1,6 đến 1,7 giây sau khi bắt đầu phanh |
-| Tốc độ lớn nhất | 13,80 m/s (49,7 km/h) |
+| Bám xe | 8,2 giây trong vòng 2 m/s so với xe trước; khoảng cách trung vị 37,1 đến 37,4 m |
+| Quyết định vượt | tick 300 đến 303, sang trái |
+| Chuyển làn xong | tick 364 đến 366 (2,1 giây sau khi bắt đầu) |
+| Làn không hợp lệ trong cả lần chạy | 2 đến 4 frame trên 1 397, đều lúc đè vạch |
+| Phanh trước người | giữ phanh từ tick 1051–1054 đến 1104–1112; khoảng cách nhỏ nhất tới người 12,6 đến 13,0 m |
+| Đi tiếp | tick 1106 đến 1114 |
+| Khoảng cách nhỏ nhất tới xe bị vượt | 23,5 đến 24,6 m |
+| Tốc độ lớn nhất | 13,91 m/s (50,1 km/h) |
 | Va chạm, hộp chồng nhau | 0 |
-| Độ trễ tick tới lệnh được áp | trung vị 68 đến 69 ms, P95 105 đến 107 ms |
-| Tốc độ mô phỏng | 29,4 đến 29,6 tick/giây |
+| Độ trễ tick tới lệnh được áp | trung vị 70 đến 74 ms, P95 107 đến 111 ms |
+| Tốc độ mô phỏng | 29,5 đến 29,7 tick/giây |
 
-Hai bản trước của màn này cũng đều đạt: chuyển làn ở tick 420 ghi sẵn, 30
-km/h (7 lần có cửa sổ CARLA); controller tự quyết lúc vượt, 30 km/h (3 lần).
+Ba bản trước của màn này cũng đều đạt: chuyển làn ở tick 420 ghi sẵn, 30
+km/h (7 lần có cửa sổ CARLA); controller tự quyết lúc vượt, 30 km/h (3 lần);
+bám xe và chuyển làn ở 5 m/s rồi hành trình 50 km/h (3 lần).
 
-Thử cho cả đoạn bám xe chạy nhanh hơn (xe trước 30 km/h, chuyển làn ở 8,3
-m/s) thì trượt: chuyển làn xong, vạch ngoài của làn mới bị lane model đặt
-lệch, bề rộng làn ra hơn 4,6 m năm kết quả liên tiếp và xe dừng. Vì vậy đoạn
-bám xe và chuyển làn vẫn ở 5 m/s.
+Bản 5 m/s có là vì lane model TuSimple: với nó, chuyển làn sau xe chạy 30
+km/h thì trượt. Chuyển làn xong, vạch ngoài của làn mới bị đặt lệch, bề rộng
+làn ra hơn 4,6 m năm kết quả liên tiếp và xe dừng. Với lane model train trên
+ảnh CARLA thì không còn, nên đoạn bám xe và chuyển làn giờ ở 30 km/h.
 
 ### Màn đỗ: `show_park`
 
@@ -813,6 +907,8 @@ tại; hai điểm đã thay đổi.
 
 ### Giới hạn
 
+- **Lane model chỉ biết đường của CARLA**, và trên dốc cua ở 50 km/h xe chạy
+  lệch tới 0,7 m: xem mục lane model ở trên.
 - **Model ô đỗ chỉ biết một bãi.** Ảnh train và ảnh lúc chạy là cùng bãi đỗ
   của Town05, cùng kiểu vạch sơn. Các số đo cho biết model thuộc bãi này tới
   đâu; chúng không nói gì về bãi khác, vạch khác, hay ảnh thật.
