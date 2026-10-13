@@ -195,6 +195,7 @@ routes:
   straight: {x: 13.0, y: 219.9}      # road 46 lane -3: 400 m straight, lanes both sides
   curve_right: {x: -39.4, y: -231.6} # road 23 lane -3: radius about 340 m
   curve_left: {x: -122.6, y: -148.2} # road 23 lane -3
+  ramp: {x: -225.0, y: -97.2}        # road 23 lane -3, 65 m before its ramp
   # Town05, on the widest aisle of its car park, at the east end, heading
   # west. The car park is a paved square 0.16 m above the streets, with a
   # kerb and a fence around it: no lane leads into it and its aisles have no

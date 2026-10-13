@@ -156,18 +156,29 @@ scenarios:
 
   # This stretch has more in view: at quality 30 its frames are 45 kB,
   # 10.7 Mbit/s, more than the link carried; at 25 they fit.
-  # 600 ticks: 302 m from the start of this route the lane model gives a lane
-  # of the wrong width and the vehicle stops; at 50 km/h it gets there
+  # 760 ticks: the curve ends 298 m from the start of this route, where the
+  # ramp of lane_ramp begins; at 50 km/h it gets there
   lane_curve_right:
     route: curve_right
     jpeg_quality: 25
-    ticks: 600
+    ticks: 760
     expect: *lane_expectations
 
-  # 400 ticks: the same 193 m from the start of this one
+  # 500 ticks: the same place is 180 m from the start of this one
   lane_curve_left:
     route: curve_left
-    ticks: 400
+    ticks: 500
+    expect: *lane_expectations
+
+  # The ramp that road ends in: to the left, about 100 m radius, at the
+  # 30 km/h a ramp is driven at. Where it begins the TuSimple lane model gave
+  # a lane of the wrong width and the vehicle stopped. At 50 km/h the lane is
+  # still found, and the vehicle runs 0.7 m outside its centre.
+  lane_ramp:
+    route: ramp
+    jpeg_quality: 25
+    ticks: 760
+    target_speed_kmh: 30.0
     expect: *lane_expectations
 
   # Starts 0.5 m right of the lane centre, 2 degrees off its direction
