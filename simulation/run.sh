@@ -36,7 +36,8 @@
 # Environment:
 #   CARLA_ROOT   CARLA 0.9.16 (default ~/opt/carla-0.9.16); its server is
 #                started (off-screen without --gui) when nothing listens on port 2000, and
-#                left running for the next run
+#                left running for the next run. One that listens but does not
+#                answer is stopped and started again.
 #   CARLA_PYTHON python with the carla 0.9.16 client (default
 #                $CARLA_ROOT/venv/bin/python, else python3)
 #
@@ -65,11 +66,11 @@ while [ $# -gt 0 ]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -107,6 +108,25 @@ PY
 if [ -n "$GUI" ] && pkill -f 'CarlaUE4.*-RenderOffScreen'; then
   echo "== Stopping the off-screen CARLA server"
   while (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; do sleep 1; done
+fi
+# A server that listens but does not answer is stopped: one left running for
+# hours was found like that, and the simulator then waited on it for a minute
+# before it gave up
+if (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null && ! "$CARLA_PYTHON" -c '
+import carla
+client = carla.Client("127.0.0.1", 2000)
+client.set_timeout(10.0)
+client.get_server_version()' 2>/dev/null; then
+  echo "== The CARLA server on port 2000 does not answer: stopping it"
+  pkill -f 'CarlaUE4-Linux-Shipping' || true
+  for _ in $(seq 20); do
+    (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null || break
+    sleep 1
+  done
+  if (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; then
+    pkill -KILL -f 'CarlaUE4-Linux-Shipping' || true
+    sleep 2
+  fi
 fi
 if ! (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; then
   [ -x "$CARLA_ROOT/CarlaUE4.sh" ] || { echo "No CARLA server on port 2000 and none at $CARLA_ROOT" >&2; exit 1; }
