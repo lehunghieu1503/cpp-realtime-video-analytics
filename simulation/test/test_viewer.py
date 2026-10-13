@@ -81,6 +81,36 @@ class Window(unittest.TestCase):
         self.assertGreater((drawn[:360, 640:] == (0, 255, 255)).all(axis=2).sum(), 200)
         self.assertGreater((drawn[360:] > 0).sum(), 500)  # the line of text
 
+    def test_the_view_from_above_is_a_third_panel(self):
+        from video_analytics_simulation.bev import BevRig
+        above = BevRig.from_config(CONFIG["bev"])
+        view = viewer.Viewer({"front": FRONT, "rear": REAR, "bev": above},
+                             lambda ns: self.pose)
+        view.frame("front", 100, np.full((720, 1280, 4), 90, np.uint8))
+        view.frame("rear", 100, np.full((720, 1280, 4), 90, np.uint8))
+        view.frame("bev", 100, np.full((800, 800, 3), 90, np.uint8))
+        # A stall 3 m to the left of the vehicle, as the device finds it in the view
+        stall = Stall(self.pose.x + 5.5, self.pose.y, 0.0, 5.0, 2.8)
+        view.status({"state": "RUNNING", "stop_reason": "", "park": {
+            "phase": "search", "target": 4,
+            "stalls": [dict(stall.as_dict(), id=4,
+                            corners=[[float(x), float(y)] for x, y, _ in stall.corners()])]}})
+        view.result("bev", {"simulation": {"sim_ns": 100}, "detections": [],
+                            "stalls": fixtures.stall_detections([stall], self.pose, above),
+                            "stall_points": fixtures.stall_points([stall], self.pose, above)})
+        self.assertTrue(view.show(3, 0.0, {}))
+        shown = self.shown[-1]
+        # Two cameras 360 high and the view 400 high, side by side, and the text
+        self.assertEqual(shown.shape, (400 + 28, 640 + 640 + 400, 3))
+        self.assertEqual(int(shown[360:400, :1280].sum()), 0)
+        panel = shown[:400, 1280:]
+        # Its ends as crosses, and the stall the controller takes in yellow,
+        # left of the middle: the stall is on the vehicle's left
+        self.assertGreater((panel == (255, 255, 0)).all(axis=2).sum(), 5)
+        yellow = np.argwhere((panel == (0, 255, 255)).all(axis=2))
+        self.assertGreater(len(yellow), 100)
+        self.assertLess(yellow[:, 1].max(), 200)
+
     def test_a_result_of_a_frame_no_longer_kept_changes_nothing(self):
         view = self.view
         view.frame("front", 100, np.zeros((720, 1280, 4), np.uint8))

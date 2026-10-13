@@ -8,6 +8,10 @@ own images, with what the device found in them drawn on top.
                                       in yellow the one it parks in
     one line: tick, state, phase, speed, what is applied to the vehicle
 
+With a bird's-eye view (the `bev` section of the configuration) there is a
+third panel, the view from above of the cameras around the vehicle, forward
+up; the stalls and the ends are then found in it and drawn on it.
+
 In a scenario that parks there are no lane lines: the device does not run
 the lane model there (simulation/run.sh leaves it out of its config).
 
@@ -127,7 +131,10 @@ class Viewer:
         if self.closed:
             return False
         cv2 = self.cv2
-        row = np.hstack(list(self.panels.values()))
+        # The panels are not of one height: the lower ones end in black
+        tallest = max(panel.shape[0] for panel in self.panels.values())
+        row = np.hstack([np.pad(panel, ((0, tallest - panel.shape[0]), (0, 0), (0, 0)))
+                         for panel in self.panels.values()])
         bar = np.zeros((28, row.shape[1], 3), np.uint8)
         gear = "R" if applied.get("reverse") else "D"
         text = "tick %d  %s  %s%4.1f km/h  %s  throttle %.2f  brake %.2f  steer %+.2f  %s" % (

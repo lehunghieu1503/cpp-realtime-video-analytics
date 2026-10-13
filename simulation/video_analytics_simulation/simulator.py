@@ -14,7 +14,9 @@ Each tick, in this order:
 
 A scenario that parks has a second camera, looking back (rear_calibration):
 its image of the same tick goes to the device the same way, on a port of
-its own, as source carla-rear. It has no depth image.
+its own, as source carla-rear. It has no depth image. One that parks with
+`bev: true` has every camera of the configuration's `bev` section, each sent
+the same way; the device makes the bird's-eye view of them.
 
 What the controller may use: RGB (through the device), depth, the camera
 calibration and the ego vehicle's own pose and velocity. The positions of
@@ -46,7 +48,7 @@ import zlib
 import numpy as np
 import yaml
 
-from . import protocol
+from . import bev, protocol
 from .calibration import Pose, Rig, decode_depth
 from .parking import Stall
 
@@ -337,9 +339,25 @@ class Simulator:
         self.run_dir = args.run_dir
         os.makedirs(self.run_dir, exist_ok=True)
         self.rig = Rig.from_config(self.config["calibration"])
-        self.rear_rig = Rig.from_config(self.config["rear_calibration"]) \
-            if self.scenario.get("park") else None
-        self.rear_queue = queue.Queue(maxsize=int(self.c.get("callback_queue", 8)))
+        # The `bev` section, in a scenario that parks with `bev: true`: the
+        # stalls are then found in the bird's-eye view
+        self.view = self.config["bev"] if self.scenario.get("park") \
+            and self.scenario.get("bev") else None
+        # The cameras besides the front one, of the scenarios that park, by
+        # source id: (Rig, the port its images are sent on). The rear camera;
+        # with the view, every camera it is made of.
+        self.park_cameras = {}
+        if self.scenario.get("park"):
+            self.park_cameras = {REAR_SOURCE: (
+                Rig.from_config(self.config["rear_calibration"]),
+                int(self.c.get("sender", {}).get("rear_port", 5001)))}
+            if self.view:
+                self.park_cameras = {source: (rig, port) for source, rig, port
+                                     in bev.cameras_of(self.config)}
+        self.rear_rig = self.park_cameras.get(REAR_SOURCE, (None,))[0]
+        self.stitcher = None  # makes the view the viewer shows
+        self.park_queue = queue.Queue(maxsize=int(self.c.get("callback_queue", 8))
+                                      * max(1, len(self.park_cameras)))
         self.viewer = None
         self.dt = 1.0 / float(self.c.get("fps", 30))
         # A scenario may lower it: a scene with more detail makes larger frames
@@ -387,7 +405,8 @@ class Simulator:
         self.arm_sent = 0.0  # when ARM was last sent
         self.stats = {"ticks": 0, "sent": 0, "dropped": 0, "jpeg_bytes": 0,
                       "encode_ms": 0.0, "tick_ms": 0.0, "wait_images_ms": 0.0,
-                      "rear_sent": 0, "rear_dropped": 0}
+                      "park_sent": {source: 0 for source in self.park_cameras},
+                      "park_dropped": {source: 0 for source in self.park_cameras}}
 
     # ── ROS ──────────────────────────────────────────────────────────────────
 
@@ -421,7 +440,8 @@ class Simulator:
         self.node.create_subscription(String, names["status"], self.on_status, 10)
         if self.viewer:
             # Only to draw them: the simulator makes nothing of a result
-            for name, source in (("front", SOURCE), ("rear", REAR_SOURCE)):
+            for name, source in (("front", SOURCE), ("rear", REAR_SOURCE),
+                                 ("bev", (self.view or {}).get("id", ""))):
                 if name in self.viewer.rigs:
                     self.node.create_subscription(
                         String, protocol.topics(self.run_id, source)["perception"],
@@ -556,8 +576,9 @@ class Simulator:
         depth = camera("sensor.camera.depth", {})
         rgb.listen(lambda image: self.on_image("rgb", image))
         depth.listen(lambda image: self.on_image("depth", image))
-        if self.rear_rig:
-            camera("sensor.camera.rgb", pinhole, self.rear_rig).listen(self.on_rear_image)
+        for source, (rig, _) in self.park_cameras.items():
+            camera("sensor.camera.rgb", pinhole, rig).listen(
+                lambda image, source=source: self.on_park_image(source, image))
 
         for kind in ("sensor.other.collision", "sensor.other.lane_invasion"):
             sensor = self.world.spawn_actor(library.find(kind), carla.Transform(),
@@ -624,35 +645,36 @@ class Simulator:
             self.ledger.update(image.frame, "dropped", reason="callback_queue_full",
                                kind=kind)
 
-    def on_rear_image(self, image):
-        """Sensor thread. The rear camera has no ledger: its frames are
+    def on_park_image(self, source, image):
+        """Sensor thread. These cameras have no ledger: their frames are
         counted, sent and dropped, in the run's summary."""
         data = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
             image.height, image.width, 4).copy()
         try:
-            self.rear_queue.put_nowait((image.frame, data))
+            self.park_queue.put_nowait((image.frame, source, data))
         except queue.Full:
             # Nobody is taking them (the run has not started): the newest
-            # stays, so that the first tick finds its own image
+            # stay, so that the first tick finds its own images
             try:
-                self.rear_queue.get_nowait()
+                self.stats["park_dropped"][self.park_queue.get_nowait()[1]] += 1
             except queue.Empty:
                 pass
-            self.rear_queue.put_nowait((image.frame, data))
-            self.stats["rear_dropped"] += 1
+            self.park_queue.put_nowait((image.frame, source, data))
 
-    def collect_rear(self, frame):
-        """The rear image of this tick's frame, or None."""
+    def collect_park(self, frame):
+        """The images of this tick's frame, by source. A camera whose image
+        has not come after two seconds is not in it."""
+        images = {}
         deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
+        while len(images) < len(self.park_cameras) and time.monotonic() < deadline:
             try:
-                image_frame, data = self.rear_queue.get(
+                image_frame, source, data = self.park_queue.get(
                     timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 break
             if image_frame == frame:
-                return data
-        return None
+                images[source] = data
+        return images
 
     def on_event(self, kind, event):
         record = {"event": kind.split(".")[-1], "frame": event.frame}
@@ -819,7 +841,7 @@ class Simulator:
                   0.0, 0.0, 1.0, 0.0]
         self.pub_info.publish(info)
 
-    def output_loop(self, sender, rear_sender=None):
+    def output_loop(self, sender, park_senders):
         """Output thread: one paired frame at a time, in the order produced.
         Depth first, so that it is on the host before the device's result
         for the same frame can come back."""
@@ -834,13 +856,13 @@ class Simulator:
             item = self.output_queue.get()
             if item is None:
                 return
-            frame, sim_ns, rgb, depth_raw, drop_rgb, drop_depth, rear = item
-            if rear is not None:
-                ok, jpeg = cv2.imencode(".jpg", rear[:, :, :3], quality)
-                if ok and rear_sender.send(jpeg.tobytes(), sim_ns):
-                    self.stats["rear_sent"] += 1
+            frame, sim_ns, rgb, depth_raw, drop_rgb, drop_depth, park = item
+            for source, image in park.items():
+                ok, jpeg = cv2.imencode(".jpg", image[:, :, :3], quality)
+                if ok and park_senders[source].send(jpeg.tobytes(), sim_ns):
+                    self.stats["park_sent"][source] += 1
                 else:
-                    self.stats["rear_dropped"] += 1
+                    self.stats["park_dropped"][source] += 1
             if not drop_depth:
                 self.publish_depth(sim_ns, decode_depth(depth_raw))
                 self.depth_writer.offer(frame, sim_ns, depth_raw)
@@ -948,13 +970,19 @@ class Simulator:
         # 3. This tick's images
         wait = time.monotonic()
         images = self.collect_images(frame)
-        rear = self.collect_rear(frame) if self.rear_rig else None
+        park = self.collect_park(frame) if self.park_cameras else {}
         self.stats["wait_images_ms"] += (time.monotonic() - wait) * 1e3
         if self.viewer:
             if images is not None:
                 self.viewer.frame("front", images[2], images[0])
-            if rear is not None:
-                self.viewer.frame("rear", sim_ns, rear)
+            if REAR_SOURCE in park:
+                self.viewer.frame("rear", sim_ns, park[REAR_SOURCE])
+            if self.stitcher and len(park) == len(self.park_cameras):
+                # What the device makes of the same frames, for the person
+                # watching; the device's own view is not sent back
+                self.viewer.frame("bev", sim_ns, self.stitcher.compose(
+                    [np.ascontiguousarray(park[source][:, :, :3])
+                     for source in self.park_cameras]))
             self.viewer.show(tick, ego["speed_mps"], applied)
         self.publish_state(sim_ns, ego)
         if images is None:
@@ -969,7 +997,7 @@ class Simulator:
             # short: a frame that cannot get in is dropped whole, and counted.
             item = (frame, sim_ns, images[0], images[1],
                     bool(self.fault("drop_rgb", tick)),
-                    bool(self.fault("drop_depth", tick)), rear)
+                    bool(self.fault("drop_depth", tick)), park)
             try:
                 self.output_queue.put_nowait(item)
             except queue.Full:
@@ -1014,6 +1042,7 @@ class Simulator:
             "rear_source": REAR_SOURCE if self.rear_rig else None,
             "rear_calibration": self.config["rear_calibration"] if self.rear_rig else None,
             "stall": self.config.get("stall") if self.rear_rig else None,
+            "bev": self.view,
             # For the evaluation only: the controller reads scenario_config,
             # vehicle and the source names, and finds its stalls itself
             "truth": {"stalls": self.stall_truth()},
@@ -1036,7 +1065,7 @@ class Simulator:
     def run(self):
         signal.signal(signal.SIGINT, lambda *_: setattr(self, "stop_requested", True))
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "stop_requested", True))
-        sender = rear_sender = None
+        sender, park_senders = None, {}
         try:
             self.connect()
             self.spawn()
@@ -1045,6 +1074,10 @@ class Simulator:
                 rigs = {"front": self.rig}
                 if self.rear_rig:
                     rigs["rear"] = self.rear_rig
+                if self.view:
+                    rigs["bev"] = bev.BevRig.from_config(self.view)
+                    self.stitcher = bev.Stitcher(
+                        rigs["bev"], [rig for rig, _ in self.park_cameras.values()])
                 self.viewer = Viewer(rigs, lambda ns: Pose.from_dict(
                     self.ego_states.get(ns)["pose"]) if ns in self.ego_states else None)
             self.start_ros()
@@ -1052,11 +1085,10 @@ class Simulator:
             sender = JpegSender(s.get("bind", "0.0.0.0"), int(s.get("port", 5000)),
                                 int(s.get("max_queued", 2)),
                                 int(s.get("client_max_buffers", 30)))
-            if self.rear_rig:
-                rear_sender = JpegSender(s.get("bind", "0.0.0.0"),
-                                         int(s.get("rear_port", 5001)),
-                                         int(s.get("max_queued", 2)),
-                                         int(s.get("client_max_buffers", 30)))
+            for source, (_, port) in self.park_cameras.items():
+                park_senders[source] = JpegSender(s.get("bind", "0.0.0.0"), port,
+                                                  int(s.get("max_queued", 2)),
+                                                  int(s.get("client_max_buffers", 30)))
             self.last_ego = None
             self.ego.apply_control(self.carla.VehicleControl(throttle=0.0, brake=1.0))
             # Let the vehicle settle on its wheels before anything is measured
@@ -1104,7 +1136,7 @@ class Simulator:
                 self.ledger.update(frame, "dropped", reason="waiting_for_the_device")
             self.ledger.registered.clear()
             output = threading.Thread(target=self.output_loop,
-                                      args=(sender, rear_sender), daemon=True)
+                                      args=(sender, park_senders), daemon=True)
             output.start()
             # Before the run: the same loop, vehicle braked, until the first
             # result has come all the way back (the device may still be
@@ -1114,8 +1146,8 @@ class Simulator:
             while sender.clients() > 0 and self.controller_frames == 0 \
                     and time.monotonic() < preroll and not self.stop_requested:
                 self.tick(-1)
-            for key in self.stats:  # the rates are those of the run itself
-                self.stats[key] = 0
+            for key, value in self.stats.items():  # the rates are those of the run itself
+                self.stats[key] = dict.fromkeys(value, 0) if isinstance(value, dict) else 0
             started = time.monotonic()
             for tick in range(ticks):
                 if self.stop_requested:
@@ -1147,8 +1179,8 @@ class Simulator:
                 "wait_images_mean_ms": self.stats["wait_images_ms"] / n,
                 "commands_rejected": self.lease.rejected,
                 "live_cache_evicted": self.sent.evicted,
-                "rear_frames_sent": self.stats["rear_sent"],
-                "rear_frames_dropped": self.stats["rear_dropped"],
+                "park_frames_sent": self.stats["park_sent"],
+                "park_frames_dropped": self.stats["park_dropped"],
                 "depth_artifact_bytes": self.depth_writer.bytes,
                 "depth_artifact_write_seconds": self.depth_writer.seconds,
             }
@@ -1156,9 +1188,9 @@ class Simulator:
                                 summary)
             print(json.dumps(summary), flush=True)
         finally:
-            self.close(sender, rear_sender)
+            self.close(sender, park_senders)
 
-    def close(self, sender, rear_sender=None):
+    def close(self, sender, park_senders=None):
         """Only what this run created; the world gets its settings back."""
         if self.world is not None:
             try:
@@ -1178,7 +1210,7 @@ class Simulator:
                     pass
             if self.original_settings is not None:
                 self.world.apply_settings(self.original_settings)
-        for open_sender in (sender, rear_sender):
+        for open_sender in [sender] + list((park_senders or {}).values()):
             if open_sender:
                 open_sender.close()
         if self.viewer:
