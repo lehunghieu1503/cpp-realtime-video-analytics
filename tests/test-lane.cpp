@@ -267,10 +267,10 @@ sources:
 
 static void testModel() {
   std::cout << "=== Model ===\n";
-  const char* model = "models/ufld-tusimple18.onnx";
+  const char* model = "models/lane-town04.onnx";
   if (!std::filesystem::exists(model)) {
     std::cout << "SKIP: " << model
-              << " not found (scripts/export-lane-model.py)\n";
+              << " not found (scripts/train-lane-model.py)\n";
     return;
   }
   LaneEngineConfig config;

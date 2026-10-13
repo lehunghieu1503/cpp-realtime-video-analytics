@@ -826,7 +826,7 @@ available on the machine returns the same detections as the CPU on
 `tests/test-image.jpg`, on the GPU pre-processing path and on the CPU one.
 `test_capture_timestamps` skips, saying so, when the GStreamer GDP or JPEG
 elements are not installed, and `test_lane` skips its model check without
-`models/ufld-tusimple18.onnx`. CI builds and runs all of these on every
+`models/lane-town04.onnx`. CI builds and runs all of these on every
 push.
 
 ### Sanitizers

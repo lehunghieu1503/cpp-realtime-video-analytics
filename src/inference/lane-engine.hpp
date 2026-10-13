@@ -14,8 +14,10 @@ struct LaneEngineConfig {
   int numThreads = 2;
 };
 
-// Lane detector: Ultra Fast Lane Detection, ResNet-18, trained on TuSimple
-// (scripts/export-lane-model.py). A model of its own next to the YOLO
+// Lane detector: the network of Ultra Fast Lane Detection, ResNet-18, as
+// scripts/train-lane-model.py trains it on the simulator's images or as
+// scripts/export-lane-model.py exports the authors' TuSimple weights; both
+// have this input and output. A model of its own next to the YOLO
 // detector, with its own backend instance:
 //
 //   input   [1, 3, 288, 800]  RGB, [0, 1], then (x - mean) / std

@@ -51,8 +51,11 @@ rear_calibration:
   ground_z: 0.0
   distortion: [0, 0, 0, 0, 0]
 
+# The lane model, on the front camera. Trained on the simulator's own images
+# with the lane sides its map gives (simulation/lane-dataset.py,
+# scripts/train-lane-model.py); not committed, like the other models.
 lane:
-  model: models/ufld-tusimple18.onnx
+  model: models/lane-town04.onnx
   backend: tensorrt-native
   precision: fp16
   roi_x_min_m: 3.0
