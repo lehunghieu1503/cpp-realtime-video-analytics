@@ -1,6 +1,6 @@
 # Each test is one source file linked against the application code
 foreach(name inference pipeline serializer latency-tracker sse-server rules
-        capture-timestamps lane stall)
+        capture-timestamps lane stall bev)
     string(REPLACE "-" "_" target "test_${name}")
     add_executable(${target} test-${name}.cpp)
     target_link_libraries(${target} PRIVATE va_core)
@@ -14,3 +14,5 @@ endif()
 # Shared with the Python reference: simulation/test
 target_compile_definitions(test_lane PRIVATE
     LANE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/lane-calibration.json")
+target_compile_definitions(test_bev PRIVATE
+    BEV_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/bev.json")

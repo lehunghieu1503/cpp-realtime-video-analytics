@@ -51,6 +51,7 @@ jobs:
           build/tests/test_capture_timestamps
           build/tests/test_lane
           build/tests/test_stall
+          build/tests/test_bev
 
       # Geometry, filter and protocol code of the simulation; no simulator,
       # ROS or device is involved

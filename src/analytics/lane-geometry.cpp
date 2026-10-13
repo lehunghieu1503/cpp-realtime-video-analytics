@@ -110,6 +110,18 @@ bool CameraRig::uvToGround(double u, double v, double& groundX,
   return true;
 }
 
+void CameraRig::project(double px, double py, double pz, double& u, double& v,
+                        double& depth) const {
+  // Into the camera's frame: x forward, y right, z up
+  cv::Vec3d camera = rotation(rollDeg, pitchDeg, yawDeg).t() *
+                     cv::Vec3d(px - x, py - y, pz - z);
+  depth = camera[0];
+  if (!(depth > 0)) return;
+  double f = focal();
+  u = f * camera[1] / depth + width / 2.0;
+  v = -f * camera[2] / depth + height / 2.0;
+}
+
 bool fitBoundary(const std::vector<cv::Point2d>& ground,
                  const LaneGeometryConfig& config, LaneCurve& out) {
   std::vector<cv::Point2d> points;

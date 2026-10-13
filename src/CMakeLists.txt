@@ -34,6 +34,7 @@ target_compile_options(bytetrack PRIVATE -w)
 
 # Everything except main(), shared by the application and the tests
 add_library(va_core STATIC
+    analytics/bev.cpp
     analytics/lane-geometry.cpp
     analytics/rules.cpp
     analytics/tracker.cpp

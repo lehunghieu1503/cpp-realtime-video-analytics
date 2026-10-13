@@ -29,6 +29,30 @@ int classIdByName(const std::string& name) {
   return -1;
 }
 
+// A camera's calibration section; absent leaves `out` alone
+bool readRig(const YAML::Node& rig, CameraRig& out) {
+  if (!rig) return true;
+  read(rig["width"], out.width);
+  read(rig["height"], out.height);
+  read(rig["fov_deg"], out.fovDeg);
+  read(rig["ground_z"], out.groundZ);
+  if (const YAML::Node camera = rig["camera"]) {
+    read(camera["x"], out.x);
+    read(camera["y"], out.y);
+    read(camera["z"], out.z);
+    read(camera["pitch_deg"], out.pitchDeg);
+    read(camera["yaw_deg"], out.yawDeg);
+    read(camera["roll_deg"], out.rollDeg);
+  }
+  for (const auto& k : rig["distortion"]) {
+    if (k.as<double>() != 0.0) {
+      std::cerr << "Config: lens distortion is not supported\n";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool readSource(const YAML::Node& node, size_t index, SourceConfig& out) {
   out.capture.id = "cam" + std::to_string(index);
   read(node["id"], out.capture.id);
@@ -139,24 +163,20 @@ bool loadConfig(const std::string& path, AppConfig& config) {
     read(stall["precision"], config.stall.precision);
     read(stall["confidence"], config.stall.confidence);
 
-    if (const YAML::Node rig = root["calibration"]) {
-      read(rig["width"], config.calibration.width);
-      read(rig["height"], config.calibration.height);
-      read(rig["fov_deg"], config.calibration.fovDeg);
-      read(rig["ground_z"], config.calibration.groundZ);
-      if (const YAML::Node camera = rig["camera"]) {
-        read(camera["x"], config.calibration.x);
-        read(camera["y"], config.calibration.y);
-        read(camera["z"], config.calibration.z);
-        read(camera["pitch_deg"], config.calibration.pitchDeg);
-        read(camera["yaw_deg"], config.calibration.yawDeg);
-        read(camera["roll_deg"], config.calibration.rollDeg);
-      }
-      for (const auto& k : rig["distortion"]) {
-        if (k.as<double>() != 0.0) {
-          std::cerr << "Config: lens distortion is not supported\n";
-          return false;
-        }
+    if (!readRig(root["calibration"], config.calibration)) return false;
+    if (const YAML::Node bev = root["bev"]) {
+      read(bev["id"], config.bev.id);
+      read(bev["width"], config.bev.width);
+      read(bev["height"], config.bev.height);
+      read(bev["metres_per_pixel"], config.bev.metresPerPixel);
+      for (const auto& node : bev["cameras"]) {
+        BevConfig::Camera camera;
+        read(node["source"], camera.source);
+        // The name of a section like `calibration`
+        std::string section;
+        read(node["calibration"], section);
+        if (!section.empty() && !readRig(root[section], camera.rig)) return false;
+        config.bev.cameras.push_back(std::move(camera));
       }
     }
 
@@ -212,6 +232,32 @@ std::string checkSimulation(const AppConfig& config) {
   }
   return "";
 #endif
+}
+
+std::string checkBev(const AppConfig& config) {
+  const BevConfig& bev = config.bev;
+  if (!bev.isSet()) return "";
+  if (bev.width <= 0 || bev.height <= 0 || !(bev.metresPerPixel > 0.0)) {
+    return "bev needs width, height and metres_per_pixel";
+  }
+  if (bev.cameras.empty() || bev.cameras.size() > 32) {
+    return "bev needs 1 to 32 cameras";
+  }
+  for (const auto& camera : bev.cameras) {
+    bool known = false;
+    for (const auto& source : config.sources) {
+      known = known || source.capture.id == camera.source;
+      if (source.capture.id == bev.id) return "bev.id is a source's id";
+    }
+    if (!known) return "bev camera '" + camera.source + "' is not a source";
+    if (!camera.rig.isSet()) {
+      return "bev camera '" + camera.source + "' has no calibration section";
+    }
+    std::string reason = camera.rig.check();
+    if (!reason.empty()) return "bev camera '" + camera.source + "': " + reason;
+  }
+  if (config.stall.model.empty()) return "bev is set but stall.model is not";
+  return "";
 }
 
 std::string checkStall(const AppConfig& config) {

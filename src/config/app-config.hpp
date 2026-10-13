@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analytics/bev.hpp"
 #include "analytics/lane-geometry.hpp"
 #include "analytics/rules.hpp"
 #include "capture/video-capture.hpp"
@@ -23,7 +24,8 @@ struct LaneConfig {
   LaneGeometryConfig geometry;
 };
 
-// The parking stall model; used by the sources that set `stall: true`
+// The parking stall model; used by the sources that set `stall: true`, and
+// by the bird's-eye view when there is one
 struct StallConfig {
   std::string model;
   std::string backend;  // empty: the detector's backend
@@ -91,6 +93,8 @@ struct AppConfig {
   StallConfig stall;
   // The camera of the sources that run the lane model
   CameraRig calibration;
+  // The view from above of some of the sources; the stall model runs on it
+  BevConfig bev;
 };
 
 // Empty when no source asks for lanes or when everything they need is
@@ -100,6 +104,11 @@ std::string checkLane(const AppConfig& config);
 // Empty when no source asks for stalls or the stall model is named; the
 // reason otherwise
 std::string checkStall(const AppConfig& config);
+
+// Empty when there is no bird's-eye view or it can be made: its cameras are
+// sources with a usable calibration, and there is a stall model to run on
+// it. The reason otherwise.
+std::string checkBev(const AppConfig& config);
 
 // Empty when the simulation settings can be used; the reason otherwise.
 // A simulation needs a run id and, for every source, a GStreamer pipeline

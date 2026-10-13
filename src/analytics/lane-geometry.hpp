@@ -32,6 +32,11 @@ struct CameraRig {
   // the image, at or above the horizon, or farther than maxRange metres.
   bool uvToGround(double u, double v, double& groundX, double& groundY,
                   double maxRange = 150.0) const;
+  // The pixel of a point of the ego frame, and its depth along the optical
+  // axis; a depth that is not positive is behind the camera, and u, v are
+  // then not set
+  void project(double px, double py, double pz, double& u, double& v,
+               double& depth) const;
 };
 
 struct LaneGeometryConfig {

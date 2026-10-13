@@ -520,6 +520,12 @@ std::string streamsJson(const AppConfig& app) {
     streams.push_back(
         {{"id", source.capture.id}, {"zones", zones}, {"lines", lines}});
   }
+  // The bird's-eye view is a stream of its own, after the sources
+  if (app.bev.isSet()) {
+    streams.push_back({{"id", app.bev.id},
+                       {"zones", nlohmann::json::array()},
+                       {"lines", nlohmann::json::array()}});
+  }
   return streams.dump();
 }
 }  // namespace
@@ -557,8 +563,11 @@ int runLive(const AppConfig& app) {
   }
   // The same for the parking stall model
   std::unique_ptr<StallEngine> stallEngine;
+  bool stallsWanted = app.bev.isSet();
   for (const auto& source : app.sources) {
-    if (!source.stall || stallEngine) continue;
+    stallsWanted = stallsWanted || source.stall;
+  }
+  if (stallsWanted) {
     StallEngineConfig stallConfig;
     stallConfig.modelPath = app.stall.model;
     stallConfig.backend =
@@ -571,6 +580,29 @@ int runLive(const AppConfig& app) {
       std::cerr << "Failed to load the stall model\n";
       return -1;
     }
+  }
+  // The bird's-eye view of some of the sources; the stall model runs on it.
+  // bevCamera: which of its cameras a source is, -1 for none.
+  std::unique_ptr<BevStitcher> bev;
+  std::vector<int> bevCamera(app.sources.size(), -1);
+  const size_t bevStream = app.sources.size();
+  FpsTracker bevFps;
+  uint64_t bevFrames = 0;
+  if (app.bev.isSet()) {
+    std::vector<CameraRig> rigs;
+    for (size_t c = 0; c < app.bev.cameras.size(); c++) {
+      rigs.push_back(app.bev.cameras[c].rig);
+      for (size_t i = 0; i < app.sources.size(); i++) {
+        if (app.sources[i].capture.id == app.bev.cameras[c].source) {
+          bevCamera[i] = static_cast<int>(c);
+        }
+      }
+    }
+    bev = std::make_unique<BevStitcher>(app.bev.width, app.bev.height,
+                                        app.bev.metresPerPixel, rigs);
+    std::cout << "Bird's-eye view " << app.bev.id << ": " << app.bev.width
+              << "x" << app.bev.height << " from " << rigs.size()
+              << " cameras\n";
   }
   const std::string calibrationId =
       app.calibration.isSet() ? app.calibration.calibrationId() : "";
@@ -625,7 +657,7 @@ int runLive(const AppConfig& app) {
   sseConfig.bindAddress = app.bind;
   sseConfig.staticDir = "web/";
   sseConfig.dashboard = app.dashboard;
-  sseConfig.numStreams = static_cast<int>(app.sources.size());
+  sseConfig.numStreams = static_cast<int>(app.sources.size()) + (bev ? 1 : 0);
   sseConfig.streamsJson = streamsJson(app);
   sseConfig.username = app.httpUser;
   sseConfig.password = app.httpPassword;
@@ -658,6 +690,7 @@ int runLive(const AppConfig& app) {
   // first frame arrives
   if (!app.headless) {
     for (const auto& stream : streams) cv::namedWindow(stream.id);
+    if (bev) cv::namedWindow(app.bev.id);
   }
 
   bool failed = false;
@@ -749,6 +782,23 @@ int runLive(const AppConfig& app) {
       }
     }
 
+    // The bird's-eye view takes this frame as captured, before anything is
+    // drawn on it. Frames are joined by the source's own timestamp, which
+    // the simulator's cameras share; a frame without one is not used.
+    // shortcut: equal timestamps only, cameras with clocks of their own
+    // would need a tolerance.
+    cv::Mat view;
+    if (bev && bevCamera[s] >= 0 && result.sourcePtsNs) {
+      try {
+        view = bev->offer(static_cast<size_t>(bevCamera[s]),
+                          *result.sourcePtsNs, result.cpuFrame());
+      } catch (const std::exception& e) {
+        std::cerr << e.what() << ", stopping\n";
+        failed = true;
+        break;
+      }
+    }
+
     // Drawing costs more than the rules; skip it when nobody will see it
     bool needFrame = !app.headless || sseServer.hasViewers(s) ||
                      (!events.empty() && !app.snapshotDir.empty());
@@ -824,6 +874,44 @@ int runLive(const AppConfig& app) {
     sseServer.broadcast(json.dump(), s);
     // Skipped by the server too when nobody watches this stream
     if (needFrame) sseServer.updateFrame(result.frame, s);
+
+    // This frame was the last its moment waited for: the view is whole.
+    // Its result is a stream's, of the moment the frames share; the
+    // detector does not run on it.
+    if (!view.empty()) {
+      StallResult found;
+      try {
+        found = stallEngine->detect(view);
+      } catch (const std::exception& e) {
+        std::cerr << "Stall model failed, stopping: " << e.what() << "\n";
+        failed = true;
+        break;
+      }
+      bevFps.update();
+      nlohmann::json viewJson = {
+          {"stream", app.bev.id},
+          {"frame_id", bevFrames++},
+          {"detections", nlohmann::json::array()},
+          {"latency_ms",
+           std::round(std::chrono::duration<double, std::milli>(
+                          Clock::now() - result.captureTime)
+                          .count() *
+                      10) /
+               10},
+          {"fps", std::round(bevFps.fps * 10) / 10},
+          {"image", {{"width", view.cols}, {"height", view.rows}}},
+          {"stalls", serializeStalls(found.stalls)},
+          {"stall_points", serializeStallPoints(found.points)}};
+      if (app.simulation.enabled) {
+        viewJson["simulation"] = {{"run_id", app.simulation.runId},
+                                  {"sim_ns", *result.sourcePtsNs}};
+      }
+      bool viewWatched = !app.headless || sseServer.hasViewers(bevStream);
+      if (viewWatched) drawStalls(view, found);
+      if (!app.headless) cv::imshow(app.bev.id, view);
+      sseServer.broadcast(viewJson.dump(), bevStream);
+      if (viewWatched) sseServer.updateFrame(view, bevStream);
+    }
   }
 
   // A worker that gave up clears isRunning(); sources that simply ended
@@ -994,6 +1082,10 @@ int main(int argc, char* argv[]) {
     return -1;
   }
   if (std::string reason = checkStall(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
+    return -1;
+  }
+  if (std::string reason = checkBev(app); !reason.empty()) {
     std::cerr << "Error: " << reason << "\n";
     return -1;
   }
