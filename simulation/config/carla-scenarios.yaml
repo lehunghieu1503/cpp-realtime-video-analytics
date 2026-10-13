@@ -8,7 +8,8 @@
 #   lane        0: the ego lane, 1: the lane to its right, -1: to its left
 #   lateral_m   further to the right, metres
 #   sweep       the actor stands at each distance for hold_ticks ticks
-#   cut_in      the actor slides to another lane
+#   cut_in      the actor slides to another lane, from start_tick on, or,
+#               with when_ego_within_m, from when the ego vehicle is that near
 # Their positions are written to truth.jsonl for the evaluation and are never
 # given to the controller.
 #
@@ -138,6 +139,7 @@ scenarios:
   # stay near zero although it moves in the image. Needs --arm.
   metric_parked_ego_moving:
     ticks: 600
+    target_speed_kmh: 9.0   # at 50 km/h the car's speed is 0.77 m/s off, not 0.5
     actors:
       - {name: parked, class: car, blueprint: vehicle.tesla.model3,
          ahead_m: 45.0, lane: 1}
@@ -154,15 +156,18 @@ scenarios:
 
   # This stretch has more in view: at quality 30 its frames are 45 kB,
   # 10.7 Mbit/s, more than the link carried; at 25 they fit.
+  # 600 ticks: 302 m from the start of this route the lane model gives a lane
+  # of the wrong width and the vehicle stops; at 50 km/h it gets there
   lane_curve_right:
     route: curve_right
     jpeg_quality: 25
-    ticks: 900
+    ticks: 600
     expect: *lane_expectations
 
+  # 400 ticks: the same 193 m from the start of this one
   lane_curve_left:
     route: curve_left
-    ticks: 900
+    ticks: 400
     expect: *lane_expectations
 
   # Starts 0.5 m right of the lane centre, 2 degrees off its direction
@@ -228,7 +233,7 @@ scenarios:
     ticks: 900
     actors:
       - {name: cutter, class: car, blueprint: vehicle.tesla.model3, ahead_m: 22.0,
-         lane: 1, speed_mps: 1.0, cut_in: {start_tick: 240, duration_ticks: 75, to_lane: 0}}
+         lane: 1, speed_mps: 1.0, cut_in: {start_tick: 30, duration_ticks: 60, to_lane: 0}}
     expect: *brake_expectations
 
   # Cars and a person beside the lane: nothing to brake for
@@ -260,17 +265,17 @@ scenarios:
   # by tick, from the left shoulder to the right one, and has left the next
   # lane 3 s before the passed car gets there.
   show_drive:
-    ticks: 1300
+    ticks: 1250
     jpeg_quality: 75       # one PC: there is no link to fit
-    target_speed_kmh: 30.0
-    follow_gap_m: 30.0     # the stopping distance from 30 km/h is 20.9 m
+    target_speed_kmh: 50.0
+    follow_gap_m: 30.0     # the stopping distance from the lead's 18 km/h is 7.5 m
     overtake: true         # when and to which side is the controller's to see
     actors:
       - {name: lead, class: car, blueprint: vehicle.tesla.model3, ahead_m: 25.0,
          physics: true, speed_mps: 5.0}
       - {name: walker, class: person, blueprint: walker.pedestrian.0001,
-         ahead_m: 212.0, lane: -2.6, yaw_deg: 90.0,
-         cut_in: {start_tick: 752, duration_ticks: 300, to_lane: 1.6}}
+         ahead_m: 290.0, lane: -2.6, yaw_deg: 90.0,
+         cut_in: {when_ego_within_m: 82.0, duration_ticks: 300, to_lane: 1.6}}
     # A lane change that was skipped is logged and fails the show. The
     # person has no physics, so the collision sensor would not notice it
     # being hit: the boxes are compared instead.

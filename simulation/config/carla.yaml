@@ -113,8 +113,12 @@ metric:
   max_gap_s: 0.5
 
 control:
-  target_speed_kmh: 9.0    # of every scenario that does not set its own
-  speed_cap_kmh: 30.0      # no scenario drives faster, whatever it asks for
+  # Of every scenario that does not set its own: a town's speed. The lane is
+  # held at it (0.04 m RMSE on the straight) and a car, a truck and a person
+  # standing 30 to 50 m ahead are braked for in time. With max_throttle 0.5
+  # the vehicle does not go faster than this anyway.
+  target_speed_kmh: 50.0
+  speed_cap_kmh: 60.0      # no scenario drives faster, whatever it asks for
   # Budgets, version 2. Version 1 was 200 ms of simulation and 300 ms of wall
   # time, the targets of the plan. They cannot be met on the link used so
   # far: from a tick to its result takes 216 ms at the median, 235 ms at the
@@ -130,10 +134,12 @@ control:
   pose_budget_ms: 100
   hazard_classes: [person, bicycle, car, motorcycle, bus, truck]
   # Brake when gap <= v * tau + v^2 / (2 * a_min) + margin
-  # a_min: full brake from 2.6 m/s measured 10.3 m/s^2 (scenario
-  # vehicle_response); 2.5 is the conservative bound used. tau: the age limit
-  # plus the measured 0.1 s from brake command to first deceleration.
-  brake: {a_min_mps2: 2.5, tau_s: 0.6, margin_m: 2.0}
+  # a_min: a full brake measured 10.3 m/s^2 from 2.6 m/s (scenario
+  # vehicle_response) and 7.0 m/s^2 from 12 m/s (standing 10.8 m and 1.4 s
+  # later); 5.0 is the bound used. With the 2.5 used before, the vehicle
+  # stood 28 m from what it braked for from 12 m/s. tau: the age limit plus
+  # the measured 0.1 s from brake command to first deceleration.
+  brake: {a_min_mps2: 5.0, tau_s: 0.6, margin_m: 2.0}
   ttc_min_s: 2.0
   # After a brake for an object, this many results in a row must show the
   # path clear before the vehicle drives on: 1 s, longer than the 0.5 s
