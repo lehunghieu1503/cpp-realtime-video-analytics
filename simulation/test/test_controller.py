@@ -527,6 +527,31 @@ class HoldAndResume(unittest.TestCase):
         self.assertEqual(world.core.state, HOLDING)
         self.assertEqual(world.last["brake"], 1.0)
 
+    def test_what_the_detector_no_longer_finds_is_still_standing_there(self):
+        world = self.held()
+        # The car has not moved; the device sends no box for it any more
+        for _ in range(3 * CONFIG["control"]["clear_frames"]):
+            world.frame(detections=[])
+            self.assertEqual(world.core.state, HOLDING)
+            self.assertEqual(world.last["brake"], 1.0)
+        self.assertGreater(world.core.debug["standing_points"], 12)
+        # It drives away: nothing stands on the path, and the vehicle goes on
+        world.objects = []
+        for _ in range(CONFIG["control"]["clear_frames"] + 2):
+            world.frame()
+        self.assertEqual(world.core.state, RUNNING)
+        self.assertEqual(world.core.debug.get("standing_points", 0), 0)
+
+    def test_what_stands_beside_the_path_or_beyond_the_stopping_distance_does_not_hold(self):
+        for where in ((8.0, 2.2, 4.0), (40.0, -0.9, 0.9)):  # the next lane; far ahead
+            world = self.held()
+            world.objects = [("car", where[0], where[1], where[2], 1.5, 9)]
+            # The track of the car that was braked for is predicted for half
+            # a second more; then the clear results are counted
+            for _ in range(CONFIG["control"]["clear_frames"] + 20):
+                world.frame(detections=[])
+            self.assertEqual(world.core.state, RUNNING, where)
+
     def test_a_missed_detection_is_still_the_obstacle(self):
         world = self.held()
         for _ in range(3):

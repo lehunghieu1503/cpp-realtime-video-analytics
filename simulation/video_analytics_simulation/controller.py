@@ -28,7 +28,9 @@ States:
                 is valid again and, after an object, clear_frames results in a
                 row have shown the path clear as far as the vehicle would need
                 to stop from its cruising speed. A prediction of a track that
-                was not measured is not such a result.
+                was not measured is not such a result, and neither is one
+                whose depth image shows something standing on the path: the
+                detector not finding a thing does not make it gone.
   STOP_LATCHED  brake, until the episode is restarted with a new run id:
                 perception too old, no usable pose, no lane ahead to steer on,
                 or the lane lost for five results in a row.
@@ -481,6 +483,30 @@ class ControlCore:
                 brake_reason = "obstacle:%s:%s" % (decision[6:], obs["class"])
         return brake_reason, predicted_in_path, decisions
 
+    def standing_in_path(self, pose_now, centre, reach_m):
+        """Whether the depth image of the basis frame shows something
+        standing on the path within reach_m of the bumper: whatever it is.
+        What the vehicle braked for is not gone because the detector no
+        longer finds it: a truck 11 m ahead was lost that way, and the
+        vehicle drove on at it."""
+        depth = self.depth.get(self.basis["sim_ns"])
+        if depth is None:
+            return True  # nothing to tell by: not clear
+        step = 8
+        v, u = np.mgrid[step // 2:self.rig.height:step, step // 2:self.rig.width:step]
+        points = self.rig.depth_to_ego(u + 0.5, v + 0.5, depth[v, u]).reshape(-1, 3)
+        x, y, z = pose_now.from_parent(self.basis["pose"].to_parent(points)).T
+        bumper = self.vehicle["front_bumper_m"]
+        half = self.vehicle["width_m"] / 2.0 + self.c.get("corridor_margin_m", 0.3)
+        # shortcut: the road is taken as flat at ground_z; on a slope of more
+        # than 1 % over the reach this never clears. Then fit the road's plane.
+        above = z - self.rig.ground_z
+        standing = (x > bumper + 0.2) & (x < bumper + reach_m) & (above > 0.3) \
+            & (above < 2.5) & (np.abs(y - lane_geometry.evaluate(centre["coefficients"], x))
+                               < half)
+        self.debug["standing_points"] = int(standing.sum())
+        return int(standing.sum()) >= int(self.c.get("standing_points", 12))
+
     def step(self, ego_now):
         """The command for the tick that follows this ego state."""
         self.debug = {"state": self.state}
@@ -585,7 +611,7 @@ class ControlCore:
             self.clear_needed = self.clear_frames
             return hold(brake_reason)
         if self.state == HOLDING:
-            if predicted_in_path:
+            if predicted_in_path or self.standing_in_path(pose_now, centre, envelope):
                 self.clear_count = 0
             elif basis_ns != self.clear_ns:
                 self.clear_count += 1
