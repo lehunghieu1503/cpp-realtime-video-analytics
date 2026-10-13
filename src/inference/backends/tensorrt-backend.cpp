@@ -261,6 +261,7 @@ struct TensorRtBackend::Impl {
 
     reclaimPageCache();
     std::unique_ptr<IBuilder> builder(createInferBuilder(logger));
+    if (!builder) throw std::runtime_error("TensorRT cannot start");
     std::unique_ptr<INetworkDefinition> network(builder->createNetworkV2(0));
     std::unique_ptr<nvonnxparser::IParser> parser(
         nvonnxparser::createParser(*network, logger));
@@ -348,6 +349,13 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   if (!fs::exists(modelPath)) {
     throw std::runtime_error("model file does not exist");
   }
+  // CUDA is asked first. When it cannot start (seen after a driver fault
+  // that needs a reboot: error 999), TensorRT 11.4 logs the reason and
+  // returns a runtime that is neither null nor an object, and the first
+  // call on it is a segmentation fault.
+  int devices = 0;
+  check(cudaGetDeviceCount(&devices), "CUDA cannot start");
+  if (devices < 1) throw std::runtime_error("CUDA finds no device");
   // An engine older than its model file was built from the file that one
   // replaced (a model trained again under the same name): built again
   std::error_code stale;
@@ -364,6 +372,7 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   }
 
   impl_->runtime.reset(nvinfer1::createInferRuntime(impl_->logger));
+  if (!impl_->runtime) throw std::runtime_error("TensorRT cannot start");
   impl_->engine.reset(
       impl_->runtime->deserializeCudaEngine(plan.data(), plan.size()));
   if (!impl_->engine) {
@@ -371,6 +380,9 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
                              "; delete it to rebuild");
   }
   impl_->context.reset(impl_->engine->createExecutionContext());
+  if (!impl_->context) {
+    throw std::runtime_error("TensorRT cannot create an execution context");
+  }
 
   // One float32 input and one float32 output, as the YOLO detectors and the
   // lane model export. Anything else is refused: picking one tensor of
