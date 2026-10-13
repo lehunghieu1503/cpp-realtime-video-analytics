@@ -1079,7 +1079,8 @@ class Simulator:
                     self.stitcher = bev.Stitcher(
                         rigs["bev"], [rig for rig, _ in self.park_cameras.values()])
                 self.viewer = Viewer(rigs, lambda ns: Pose.from_dict(
-                    self.ego_states.get(ns)["pose"]) if ns in self.ego_states else None)
+                    self.ego_states.get(ns)["pose"]) if ns in self.ego_states else None,
+                    vehicle=self.vehicle)
             self.start_ros()
             s = self.c.get("sender", {})
             sender = JpegSender(s.get("bind", "0.0.0.0"), int(s.get("port", 5000)),

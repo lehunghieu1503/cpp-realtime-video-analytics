@@ -25,18 +25,22 @@ from collections import OrderedDict
 
 import numpy as np
 
+from .calibration import Pose
+
 WINDOW = "CARLA cameras"
 KEPT = 45  # images a late result can still be joined with
 
 
 class Viewer:
-    def __init__(self, rigs, pose_at, scale=0.5):
+    def __init__(self, rigs, pose_at, scale=0.5, vehicle=None):
         """rigs: name -> Rig, in the order shown. pose_at(sim_ns): the ego
-        pose of that frame as calibration.Pose, or None."""
+        pose of that frame as calibration.Pose, or None. vehicle: the
+        manifest's, to draw it into a view from above."""
         import cv2
         self.cv2 = cv2
         self.rigs = rigs
         self.pose_at = pose_at
+        self.vehicle = vehicle
         self.scale = scale
         self.images = {name: OrderedDict() for name in rigs}
         self.results = {name: None for name in rigs}
@@ -112,7 +116,11 @@ class Viewer:
     def draw_tracks(self, name, panel, sim_ns):
         """The stalls the controller follows, from the world back into this
         image: where it believes they are."""
-        cv2, rig, pose = self.cv2, self.rigs[name], self.pose_at(sim_ns)
+        cv2, rig = self.cv2, self.rigs[name]
+        # The controller's own pose when it gives one: it reckons its place
+        # itself, and its stalls are where it takes them to be from there
+        pose = Pose.from_dict(self.park["pose"]) if self.park.get("pose") \
+            else self.pose_at(sim_ns)
         if pose is None:
             return
         for row in self.park.get("stalls", []):
@@ -133,8 +141,9 @@ class Viewer:
         cv2 = self.cv2
         # The panels are not of one height: the lower ones end in black
         tallest = max(panel.shape[0] for panel in self.panels.values())
-        row = np.hstack([np.pad(panel, ((0, tallest - panel.shape[0]), (0, 0), (0, 0)))
-                         for panel in self.panels.values()])
+        row = np.hstack([np.pad(self.with_vehicle(name, panel),
+                                ((0, tallest - panel.shape[0]), (0, 0), (0, 0)))
+                         for name, panel in self.panels.items()])
         bar = np.zeros((28, row.shape[1], 3), np.uint8)
         gear = "R" if applied.get("reverse") else "D"
         text = "tick %d  %s  %s%4.1f km/h  %s  throttle %.2f  brake %.2f  steer %+.2f  %s" % (
@@ -148,6 +157,26 @@ class Viewer:
                 or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             self.close()
         return not self.closed
+
+    def with_vehicle(self, name, panel):
+        """A view from above with the vehicle drawn where it is: no camera
+        sees it, and the ground under it is black."""
+        rig, v = self.rigs[name], self.vehicle
+        if not v or not hasattr(rig, "metres_per_pixel"):
+            return panel
+        cv2, panel = self.cv2, panel.copy()
+        front, half = v["front_bumper_m"], v["width_m"] / 2.0
+        rear = v.get("rear_bumper_m", -front)
+        outline = np.array([[front, -half, 0.0], [front, half, 0.0],
+                            [rear, half, 0.0], [rear, -half, 0.0]])
+        nose = np.array([[front - 0.3, 0.0, 0.0], [front - 1.4, -half + 0.25, 0.0],
+                         [front - 1.4, half - 0.25, 0.0]])
+        body, tip = (np.round(rig.project(p)[0] * self.scale).astype(np.int32)
+                     for p in (outline, nose))
+        cv2.fillPoly(panel, [body], (120, 70, 40), cv2.LINE_AA)
+        cv2.polylines(panel, [body], True, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.fillPoly(panel, [tip], (255, 255, 255), cv2.LINE_AA)
+        return panel
 
     def pump(self):
         """Lets the window answer while nothing new is drawn (the run is

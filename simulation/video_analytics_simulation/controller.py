@@ -979,7 +979,12 @@ class ControlCore:
 
     def park_status(self):
         """For whoever watches: the phase, the stalls followed, the one taken."""
+        seen = self.stalls.capture
         return {"phase": self.park_phase, "target": self.target,
+                # Where the controller takes the vehicle to be, in the frame
+                # the corners below are in: its own, not the simulator's
+                "pose": seen and {k: float(getattr(seen, k))
+                                  for k in ("x", "y", "z", "roll", "pitch", "yaw")},
                 "stalls": [dict(row, corners=[
                     [round(float(x), 3), round(float(y), 3)]
                     for x, y, _ in self.stalls.get(row["id"]).stall().corners()])

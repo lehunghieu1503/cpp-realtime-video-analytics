@@ -85,14 +85,18 @@ class Window(unittest.TestCase):
         from video_analytics_simulation.bev import BevRig
         above = BevRig.from_config(CONFIG["bev"])
         view = viewer.Viewer({"front": FRONT, "rear": REAR, "bev": above},
-                             lambda ns: self.pose)
+                             lambda ns: None, vehicle={
+                                 "width_m": 2.16, "front_bumper_m": 2.4, "rear_bumper_m": -2.4})
         view.frame("front", 100, np.full((720, 1280, 4), 90, np.uint8))
         view.frame("rear", 100, np.full((720, 1280, 4), 90, np.uint8))
         view.frame("bev", 100, np.full((800, 800, 3), 90, np.uint8))
         # A stall 3 m to the left of the vehicle, as the device finds it in the view
         stall = Stall(self.pose.x + 5.5, self.pose.y, 0.0, 5.0, 2.8)
+        # The pose is the controller's own: the simulator's is not asked for
         view.status({"state": "RUNNING", "stop_reason": "", "park": {
             "phase": "search", "target": 4,
+            "pose": {"x": self.pose.x, "y": self.pose.y, "z": 0.0, "roll": 0.0,
+                     "pitch": 0.0, "yaw": self.pose.yaw},
             "stalls": [dict(stall.as_dict(), id=4,
                             corners=[[float(x), float(y)] for x, y, _ in stall.corners()])]}})
         view.result("bev", {"simulation": {"sim_ns": 100}, "detections": [],
@@ -110,6 +114,9 @@ class Window(unittest.TestCase):
         yellow = np.argwhere((panel == (0, 255, 255)).all(axis=2))
         self.assertGreater(len(yellow), 100)
         self.assertLess(yellow[:, 1].max(), 200)
+        # The vehicle itself, in the middle, nose up
+        self.assertTrue((panel[200, 200] == (120, 70, 40)).all())
+        self.assertTrue((panel[165, 200] == (255, 255, 255)).all())
 
     def test_a_result_of_a_frame_no_longer_kept_changes_nothing(self):
         view = self.view

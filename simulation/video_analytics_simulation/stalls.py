@@ -126,6 +126,7 @@ class StallTrack:
 class StallTracker:
     def __init__(self, rig, config=None):
         self.rig = rig
+        self.capture = None  # the pose of the latest frame: what the tracks are held in
         self.config = dict(DEFAULTS, **(config or {}))
         self.ends = []
         self.tracks = []
@@ -145,6 +146,7 @@ class StallTracker:
         """The stall detections and divider ends of one frame, taken from the
         pose `capture`. Returns what was made of them, for the log."""
         config = self.config
+        self.capture = capture
         record = {"ends": self.see_ends(points, capture, sim_ns)}
         stale = sim_ns - int(config["stale_s"] * 1e9)
         self.ends = [e for e in self.ends
