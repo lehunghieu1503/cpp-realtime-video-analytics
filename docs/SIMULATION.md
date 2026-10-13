@@ -953,6 +953,19 @@ code đã commit.
 | Tốc độ mô phỏng | 27,3 đến 27,5 tick/giây | 17,1 đến 17,3 tick/giây |
 | Độ trễ tick tới lệnh được áp, trung vị / P95 | 74 / 108 đến 110 ms | 117 / 129 đến 174 ms |
 
+Sau các lần chạy trên, tốc độ đỗ được tăng: tìm ô ở 3 m/s (trước là 2), lùi
+tối đa 1,2 m/s (trước là 0,5; xe lùi thực tế 0,83 m/s). Một lần đỗ mất 25 giây
+mô phỏng thay vì 45. Chạy lại với dead reckoning, 5 lần đều đạt: `show_park_bev`
+hai lần lệch 0,07 và 0,23 m dọc, 0,15 và 0,27 m ngang, tới 2,8°;
+`show_park_next_bev` 0,04 và 0,17 m; `show_park` (camera sau) 0,35 và 0,17 m;
+`show_park_occupied_bev` hủy ở tick 356. Nhanh hơn thì lệch nhiều hơn, vẫn
+trong cửa 0,40 m.
+
+Trong cửa sổ `--gui`, panel nhìn từ trên vẽ thân xe ở giữa (không camera nào
+thấy nó), và các ô controller theo dõi được vẽ từ pose mà chính controller
+tin. Trước đó chúng được vẽ bằng pose thật của simulator, nên với dead
+reckoning ô vàng nằm lệch khỏi vạch dù controller lái đúng.
+
 Về tầm nhìn, đo trên bãi Town05:
 
 | Hạng mục | Camera sau | Thêm hai camera gương |
