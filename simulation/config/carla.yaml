@@ -194,6 +194,9 @@ control:
   # the measured 0.1 s from brake command to first deceleration.
   brake: {a_min_mps2: 5.0, tau_s: 0.6, margin_m: 2.0}
   ttc_min_s: 2.0
+  # A ground-plane range past this is not a follow gap and not a
+  # time-to-collision brake. Inside the stopping distance it still brakes.
+  ground_range_max_m: 40.0
   # After a brake for an object, this many results in a row must show the
   # path clear before the vehicle drives on: 1 s, longer than the 0.5 s
   # (metric.max_gap_s) a track that is no longer measured is still predicted
@@ -206,6 +209,14 @@ control:
   pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
   steer: {gain: 1.0, rate_per_s: 2.0}
   speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
+  # Fixed wheel and gyro error. The controller integrates this after ARM.
+  # Show runs that miss the park gate do not edit these numbers.
+  odometry:
+    speed_scale: 1.015
+    speed_noise_mps: 0.03
+    yaw_rate_bias_radps: 0.001745
+    yaw_rate_noise_radps: 0.003491
+    seed: 1
   # Overtaking (scenarios with `overtake`): after this long behind a vehicle
   # that keeps it under its target speed, it moves to the next lane, on the
   # first of these sides that the image shows and that is free

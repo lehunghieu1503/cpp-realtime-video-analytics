@@ -7,7 +7,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from video_analytics_simulation.calibration import Pose, Rig  # noqa: E402
-from video_analytics_simulation.metric_tracker import MetricTracker, measure_box  # noqa: E402
+from video_analytics_simulation.metric_tracker import (  # noqa: E402
+    MetricTracker, measure_box, measure_ground)
 
 RIG = Rig(640, 360, 52.0, 1.5, 0.0, 1.6)
 DT_NS = 33333333
@@ -68,14 +69,51 @@ def drive(tracker, steps, ego_at, object_at, skip=()):
         t = i * DT_NS * 1e-9
         pose, velocity, yaw_rate = ego_at(t)
         centre = pose.from_parent([*object_at(t), 0.0])
-        depth, boxes = render([(centre[0], centre[1] - 0.9, centre[1] + 0.9, 1.5)])
-        result = tracker.update(perception(i * DT_NS, boxes, [7]), depth,
+        _, boxes = render([(centre[0], centre[1] - 0.9, centre[1] + 0.9, 1.5)])
+        result = tracker.update(perception(i * DT_NS, boxes, [7]),
                                 ego_state(i * DT_NS, pose, velocity, yaw_rate))
         out.append(result["observations"][0])
     return out
 
 
 class Measurement(unittest.TestCase):
+    def test_ground_bottom_is_the_contact(self):
+        _, boxes = render([(21.5, -0.9, 0.9, 1.5)])
+        m = measure_ground(boxes[0], RIG)
+        self.assertTrue(m["valid"])
+        self.assertAlmostEqual(m["near_x_m"], 21.5, delta=0.15)
+        self.assertGreater(m["sigma_m"][0], 0.15)  # one pixel at 21 m
+
+    def test_ground_sigma_at_eight_metres_is_not_the_depth_floor(self):
+        _, boxes = render([(8.0, -0.9, 0.9, 1.5)])
+        m = measure_ground(boxes[0], RIG)
+        self.assertTrue(m["valid"])
+        self.assertLess(m["sigma_m"][0], 0.15)
+        tracker = MetricTracker(RIG)
+        obs = tracker.update(perception(0, boxes, [1]),
+                             ego_state(0, Pose(0, 0, 0)))["observations"][0]
+        # The filter variance is the pixel sigma, not max(0.15, ...).
+        self.assertLess(obs["covariance"][0], 0.15 ** 2)
+
+    def test_front_bottom_row_is_not_a_measurement(self):
+        m = measure_ground({"x": 200.0, "y": RIG.height - 40.0, "w": 40.0,
+                            "h": 39.0}, RIG)
+        self.assertEqual(m["reason"], "truncated_bottom")
+        self.assertFalse(m["valid"])
+
+    def test_one_degree_of_pitch_at_thirty_metres(self):
+        # The front rig in carla.yaml: 1.5 m up, pitched 10 degrees down.
+        base = Rig(1280, 720, 52.0, 0.6, 0.0, 1.5, pitch_deg=-10.0)
+        uv, _ = base.project([[30.0, 0.0, 0.0]])
+        box = {"x": float(uv[0, 0]) - 4.0, "y": float(uv[0, 1]) - 8.0,
+               "w": 8.0, "h": 8.0}
+        straight = measure_ground(box, base)["near_x_m"]
+        tilted = Rig(1280, 720, 52.0, 0.6, 0.0, 1.5, pitch_deg=-11.0)
+        shifted = measure_ground(box, tilted)["near_x_m"]
+        # Finite step through uv_to_ground on this rig, not the
+        # small-angle sketch (that sketch is about 10 m).
+        self.assertAlmostEqual(abs(shifted - straight), 7.5, delta=1.5)
+
     def test_range_of_a_car(self):
         depth, boxes = render([(21.5, -0.9, 0.9, 1.5)])
         # The detector's box is looser than the object: road and background in it
@@ -169,28 +207,28 @@ class Tracking(unittest.TestCase):
         tracker = MetricTracker(RIG)
         depth, boxes = render([(21.5, -0.9, 0.9, 1.5)])
         pose = Pose(0, 0, 0)
-        self.assertIsNotNone(tracker.update(perception(5 * DT_NS, boxes, [1]), depth,
+        self.assertIsNotNone(tracker.update(perception(5 * DT_NS, boxes, [1]),
                                             ego_state(5 * DT_NS, pose)))
         before = tracker.tracks[("r1", "front", 1)].updates
         for ns in (5 * DT_NS, 4 * DT_NS):
-            self.assertIsNone(tracker.update(perception(ns, boxes, [1]), depth,
+            self.assertIsNone(tracker.update(perception(ns, boxes, [1]),
                                              ego_state(ns, pose)))
         self.assertEqual(tracker.tracks[("r1", "front", 1)].updates, before)
         with self.assertRaises(ValueError):
-            tracker.update(perception(6 * DT_NS, boxes, [1]), depth,
+            tracker.update(perception(6 * DT_NS, boxes, [1]),
                            ego_state(7 * DT_NS, pose))
         with self.assertRaises(ValueError):
-            tracker.update(perception(8 * DT_NS, boxes, [1]), depth,
+            tracker.update(perception(8 * DT_NS, boxes, [1]),
                            ego_state(8 * DT_NS, pose, run="r2"))
         # Another run keeps its own tracks
-        tracker.update(perception(0, boxes, [1], run="r2"), depth,
+        tracker.update(perception(0, boxes, [1], run="r2"),
                        ego_state(0, pose, run="r2"))
         self.assertEqual(len(tracker.tracks), 2)
 
     def test_no_track_id_gives_a_position_only(self):
         tracker = MetricTracker(RIG)
         depth, boxes = render([(9.5, -0.3, 0.3, 1.7)])
-        result = tracker.update(perception(0, boxes, [None], name="person"), depth,
+        result = tracker.update(perception(0, boxes, [None], name="person"),
                                 ego_state(0, Pose(0, 0, 0)))
         o = result["observations"][0]
         self.assertTrue(o["valid"])
@@ -204,11 +242,11 @@ class Tracking(unittest.TestCase):
         pose = Pose(0, 0, 0)
         for i in range(10):
             depth, boxes = render([(21.5 + 0.1 * i, -0.9, 0.9, 1.5)])
-            tracker.update(perception(i * DT_NS, boxes, [3]), depth,
+            tracker.update(perception(i * DT_NS, boxes, [3]),
                            ego_state(i * DT_NS, pose))
         late = 10 * DT_NS + int(2e9)
         depth, boxes = render([(41.5, 3.0, 4.8, 1.5)])
-        o = tracker.update(perception(late, boxes, [3]), depth,
+        o = tracker.update(perception(late, boxes, [3]),
                            ego_state(late, pose))["observations"][0]
         self.assertFalse(o["kinematics_valid"])
         self.assertAlmostEqual(o["filtered_world_m"][0], 41.5, delta=0.2)
@@ -218,12 +256,12 @@ class Tracking(unittest.TestCase):
         pose = Pose(0, 0, 0)
         for i in range(20):
             depth, boxes = render([(21.5, -0.9, 0.9, 1.5)])
-            tracker.update(perception(i * DT_NS, boxes, [3]), depth,
+            tracker.update(perception(i * DT_NS, boxes, [3]),
                            ego_state(i * DT_NS, pose))
         depth, boxes = render([(31.5, -0.9, 0.9, 1.5)])
         reasons = []
         for i in range(20, 24):
-            o = tracker.update(perception(i * DT_NS, boxes, [3]), depth,
+            o = tracker.update(perception(i * DT_NS, boxes, [3]),
                                ego_state(i * DT_NS, pose))["observations"][0]
             reasons.append(o["reason"])
             # The raw range is reported whatever the filter thinks of it
@@ -236,9 +274,9 @@ class Tracking(unittest.TestCase):
         pose = Pose(0, 0, 0)
         depth, boxes = render([(21.5, -0.9, 0.9, 1.5)])
         for i in range(5):
-            measured = tracker.update(perception(i * DT_NS, boxes, [3]), depth,
+            measured = tracker.update(perception(i * DT_NS, boxes, [3]),
                                       ego_state(i * DT_NS, pose))["observations"][0]
-        o = tracker.update(perception(5 * DT_NS, [], []), depth,
+        o = tracker.update(perception(5 * DT_NS, [], []),
                            ego_state(5 * DT_NS, pose))["observations"]
         self.assertEqual(len(o), 1)
         self.assertTrue(o[0]["predicted_only"])
@@ -250,11 +288,11 @@ class Tracking(unittest.TestCase):
                                    measured["lateral_extent_m"], atol=1e-9)
         # ... in the frame of the vehicle now, which has moved 2 m forward
         moved = Pose(2.0, 0, 0)
-        o = tracker.update(perception(6 * DT_NS, [], []), depth,
+        o = tracker.update(perception(6 * DT_NS, [], []),
                            ego_state(6 * DT_NS, moved))["observations"]
         self.assertAlmostEqual(o[0]["near_x_m"], 19.5, delta=0.1)
         late = 5 * DT_NS + int(1e9)
-        o = tracker.update(perception(late, [], []), depth,
+        o = tracker.update(perception(late, [], []),
                            ego_state(late, pose))["observations"]
         self.assertEqual(o, [])
         self.assertEqual(len(tracker.tracks), 0)

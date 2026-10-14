@@ -100,6 +100,73 @@ def measure_box(bbox, depth_m, rig, config=DEFAULTS):
     }
 
 
+def _ground_hit(rig, u, v):
+    """Ego (x, y) where the pixel meets the road, or None."""
+    xy, ok = rig.uv_to_ground(float(u), float(v))
+    if not bool(np.all(ok)):
+        return None
+    return float(xy[0]), float(xy[1])
+
+
+def measure_ground(bbox, rig, config=None):
+    """The bottom edge of a box on the flat road. No depth image.
+
+    A forward camera's near edge is the smaller ego x. A camera looking
+    back (yaw past 90 degrees) reports the same corners; the caller that
+    brakes behind the vehicle uses the larger x, which is closer to the
+    bumper. sigma_m is metres per pixel, from the neighbouring pixels.
+    """
+    del config  # the depth noise model does not apply to this measurement
+    u0 = float(bbox["x"])
+    width = float(bbox["w"])
+    v = float(bbox["y"]) + float(bbox["h"])
+    u1 = u0 + width
+    looking_back = abs((rig.yaw_deg + 180.0) % 360.0 - 180.0) > 90.0
+    bottom_cut = v >= rig.height - 2
+    if bottom_cut and not looking_back:
+        # The front camera's last rows meet the road on the bonnet.
+        return {"valid": False, "reason": "truncated_bottom"}
+    v_use = min(v, rig.height - 1.0)
+    left = _ground_hit(rig, u0, v_use)
+    right = _ground_hit(rig, u1, v_use)
+    side_cut = u0 < 1.0 or u1 > rig.width - 1.0
+    hits = [p for p in (left, right) if p is not None]
+    if side_cut or len(hits) == 1:
+        out = {"valid": False, "reason": "truncated_side"}
+        if hits:
+            out["position_ego_m"] = [hits[0][0], hits[0][1]]
+            out["near_x_m"] = hits[0][0]
+        return out
+    if len(hits) < 2:
+        return {"valid": False, "reason": "above_horizon"}
+    centre_u = u0 + width / 2.0
+    centre = _ground_hit(rig, centre_u, v_use)
+    if centre is None:
+        centre = ((left[0] + right[0]) / 2.0, (left[1] + right[1]) / 2.0)
+    above = _ground_hit(rig, centre_u, v_use - 1.0)
+    below = _ground_hit(rig, centre_u, v_use + 1.0)
+    if above is not None and below is not None:
+        sigma_x = abs(above[0] - below[0]) / 2.0
+    elif above is not None:
+        sigma_x = abs(above[0] - centre[0])
+    else:
+        sigma_x = 0.5
+    west = _ground_hit(rig, centre_u - 1.0, v_use)
+    east = _ground_hit(rig, centre_u + 1.0, v_use)
+    sigma_y = abs(west[1] - east[1]) / 2.0 if west and east else sigma_x
+    xs = (left[0], right[0])
+    ys = (left[1], right[1])
+    return {
+        "valid": True, "reason": "",
+        "position_ego_m": [centre[0], centre[1]],
+        "near_x_m": float(min(xs)),
+        "far_x_m": float(max(xs)),
+        "lateral_extent_m": [float(min(ys)), float(max(ys))],
+        "sigma_m": [float(max(sigma_x, 1e-3)), float(max(sigma_y, 1e-3))],
+        "points": 2,
+    }
+
+
 class _Track:
     def __init__(self, z, r, sim_ns):
         self.state = np.array([z[0], z[1], 0.0, 0.0])
@@ -138,11 +205,11 @@ class MetricTracker:
         self.tracks.clear()
         self.last_ns.clear()
 
-    def update(self, perception, depth_m, ego):
-        """One frame: the device's result, the depth image and the ego state
-        of the same simulator frame. Returns the metric_perception dict, or
-        None for a frame that must not be used (a repeat, or older than one
-        already taken)."""
+    def update(self, perception, ego):
+        """One frame: the device's result and the ego state of the same
+        simulator frame. Range is the bottom edge of each box on the road.
+        Returns the metric_perception dict, or None for a frame that must
+        not be used (a repeat, or older than one already taken)."""
         c = self.config
         sim = perception["simulation"]
         stream = perception.get("stream", "")
@@ -162,7 +229,7 @@ class MetricTracker:
         observations = []
         seen = set()
         for detection in perception.get("detections", []):
-            m = measure_box(detection["bbox"], depth_m, self.rig, c)
+            m = measure_ground(detection["bbox"], self.rig, c)
             track_id = detection.get("track_id")
             obs = {"class": detection.get("class"), "track_id": track_id,
                    "bbox": detection["bbox"], "valid": m["valid"],
@@ -223,13 +290,17 @@ class MetricTracker:
                 "image": perception.get("image"),
                 "calibration_id": self.rig.calibration_id,
                 "coordinate_frame": "ego at capture: x forward, y right, metres; "
-                                    "world: CARLA world",
+                                    "world: dead reckoning after ARM, else the pose given",
+                "pose_used": {"x": float(pose.x), "y": float(pose.y),
+                              "z": float(pose.z), "roll": float(pose.roll),
+                              "pitch": float(pose.pitch), "yaw": float(pose.yaw)},
                 "observations": observations}
 
     def _filter(self, track_key, z, m, sim_ns, obs):
         c = self.config
-        sigma = max(c["r_floor_m"], c["r_range_fraction"] * m["position_ego_m"][0],
-                    max(m["sigma_m"]))
+        # Pixel size on the road. The depth floor (r_floor_m, 1 % of range)
+        # is not applied: it described a depth cluster, not this measurement.
+        sigma = max(m["sigma_m"])
         r = sigma * sigma
         track = self.tracks.get(track_key)
         dt = (sim_ns - track.last_ns) * 1e-9 if track else 0.0

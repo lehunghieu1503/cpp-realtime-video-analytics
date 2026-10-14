@@ -921,8 +921,10 @@ class Simulator:
             # its gates pass; without --arm nobody arms. The controller may
             # still refuse (a gate closed on the way): asked again, at most
             # once a second, while it reports ready.
-            self.pub_arm.publish(self.String(data=json.dumps(
-                {"run_id": self.run_id, "enable": True})))
+            arm = {"run_id": self.run_id, "enable": True}
+            if self.last_ego and self.last_ego.get("pose"):
+                arm["pose"] = self.last_ego["pose"]
+            self.pub_arm.publish(self.String(data=json.dumps(arm)))
             self.arm_sent = time.monotonic()
         forged = self.fault("forge_commands", tick)
         if forged:

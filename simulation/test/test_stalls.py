@@ -62,6 +62,19 @@ class Geometry(unittest.TestCase):
 
 
 class Tracking(unittest.TestCase):
+    def test_a_yaw_bias_since_the_last_sighting_is_all_the_carry_adds(self):
+        tracker = StallTracker(REAR)
+        passing(tracker, ROW)
+        track = by_index(tracker)[0]
+        pose = Pose(7.2, 20.0, 0.0, 0.0, 0.0, 90.0)
+        biased = Pose(7.2, 6.0, 0.0, 0.0, 0.0, 94.0)
+        honest = track.seen_from(pose).heading_error(0.0)
+        shifted = track.seen_from(biased).heading_error(0.0)
+        self.assertAlmostEqual(shifted - honest, math.radians(4.0), delta=0.03)
+        see(tracker, ROW[:1], pose, 5000)
+        again = by_index(tracker)[0].seen_from(pose).heading_error(0.0)
+        self.assertAlmostEqual(again, honest, delta=0.03)
+
     def test_a_row_passed_once_is_found_where_it_is(self):
         tracker = StallTracker(REAR)
         passing(tracker, ROW)

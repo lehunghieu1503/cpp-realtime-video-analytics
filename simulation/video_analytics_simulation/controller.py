@@ -94,6 +94,7 @@ from . import lane as lane_geometry
 from . import protocol
 from .bev import BevRig, Joiner
 from .calibration import Pose, Rig
+from .ego_motion import EgoMotion
 from .metric_tracker import MetricTracker
 from .parking import Aisle, reverse_steer
 from .stalls import StallTracker
@@ -161,7 +162,13 @@ class ControlCore:
         # the caller names (the bird's-eye view, as a camera)
         self.stalls = StallTracker(stall_rig or self.rear_rig, self.c.get("stalls")) \
             if self.parking else None
+        self.rear_tracker = MetricTracker(self.rear_rig, config.get("metric")) \
+            if self.parking else None
+        self.rear_metric = None
+        self.rear_pose = None
+        self.rear_holding = False
         self.rear_ns = None        # the frame of the last result of the rear camera
+        self.latest_ego_ns = None
         self.target = None         # id of the track of the stall it parks in
         self.target_stall = None   # that stall, as last seen
         self.park_direction = 0
@@ -179,6 +186,11 @@ class ControlCore:
         # To arm, perception must be well inside the limit, not at its edge:
         # a run armed with 467 ms of 500 was stopped as stale one tick later
         self.arm_age_ns = int(self.age_limit_ns * self.c.get("arm_age_fraction", 0.6))
+        # Measured speed may sit above the command cap (a test does that on
+        # purpose). Reject only a sample no car in this project reaches.
+        cap = float(self.c.get("speed_cap_kmh", 60.0)) / 3.6
+        self.motion = EgoMotion(self.c.get("odometry"), max(cap, 40.0))
+        self.applied_reverse = False
         self.tracker = MetricTracker(self.rig, config.get("metric"))
         self.depth = protocol.LiveCache(int(self.c.get("depth_cache_entries", 45)))
         self.ego = protocol.LiveCache(int(self.c.get("ego_cache_entries", 120)))
@@ -202,10 +214,32 @@ class ControlCore:
 
     # ── Inputs ───────────────────────────────────────────────────────────────
 
+    def _reported_pose(self, ego):
+        """The one read of a pose on a message. After ARM this is not called."""
+        return Pose.from_dict(ego["pose"])
+
+    def _pose_at(self, ego):
+        if ego is None:
+            return None
+        if self.motion.seeded:
+            found = self.motion.at(ego["sim_ns"])
+            return found if found is not None else self.motion.pose
+        try:
+            return self._reported_pose(ego)
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def on_ego(self, ego):
         if ego.get("run_id") != self.run_id:
             return "wrong_run"
-        self.ego.put(int(ego["sim_ns"]), ego)
+        sim_ns = int(ego["sim_ns"])
+        if self.motion.seeded:
+            reason = self.motion.accept(ego, self.applied_reverse)
+            if reason:
+                self.rejected[reason] = self.rejected.get(reason, 0) + 1
+                return reason
+        self.ego.put(sim_ns, ego)
+        self.latest_ego_ns = sim_ns
         return ""
 
     def on_depth(self, sim_ns, depth_m):
@@ -235,6 +269,8 @@ class ControlCore:
         image = envelope.get("image") or {}
         if (image.get("width"), image.get("height")) != (self.rig.width, self.rig.height):
             return self.reject("image_size")
+        if not isinstance(envelope.get("detections"), list):
+            return self.reject("no_detections")
         # A car park has no lanes: the device is not asked for any there
         lane = envelope.get("lane")
         if lane is None and not self.parking:
@@ -244,12 +280,15 @@ class ControlCore:
         ego = self.ego.get(sim_ns)
         if ego is None:
             return self.reject("no_ego_for_frame")
-        depth = self.depth.get(sim_ns)
-        if depth is None:
-            return self.reject("no_depth_for_frame")
-        capture = dict(ego, pose=Pose.from_dict(ego["pose"]))
+        pose = self._pose_at(ego)
+        if pose is None:
+            return self.reject("no_pose_for_frame")
+        capture = dict(ego, pose=pose)
+        if self.motion.seeded and int(ego["sim_ns"]) in self.motion.samples:
+            capture["velocity_world_mps"] = list(self.motion.velocity_at(ego["sim_ns"]))
+            capture["yaw_rate_radps"] = self.motion.yaw_at(ego["sim_ns"])
         try:
-            metric = self.tracker.update(envelope, depth, capture)
+            metric = self.tracker.update(envelope, capture)
         except (KeyError, TypeError, ValueError):
             return self.reject("bad_envelope")
         if metric is None:
@@ -285,14 +324,24 @@ class ControlCore:
         if not isinstance(envelope.get("stalls"), list) \
                 or not isinstance(envelope.get("stall_points"), list):
             return None, "no_stalls_block"
+        if not isinstance(envelope.get("detections"), list):
+            return None, "no_detections"
+        if self.latest_ego_ns is not None and sim_ns > self.latest_ego_ns:
+            return None, "future_frame"
         ego = self.ego.get(sim_ns)
         if ego is None:
             return None, "no_ego_for_frame"
+        pose = self._pose_at(ego)
+        if pose is None:
+            return None, "no_pose_for_frame"
+        capture = dict(ego, pose=pose)
         try:
             records = self.stalls.update(envelope["stalls"], envelope["stall_points"],
-                                         Pose.from_dict(ego["pose"]), sim_ns)
+                                         capture["pose"], sim_ns)
+            self.rear_metric = self.rear_tracker.update(envelope, capture)
         except (KeyError, TypeError, ValueError):
             return None, "bad_envelope"
+        self.rear_pose = capture["pose"]
         self.rear_ns = sim_ns
         return records, ""
 
@@ -339,9 +388,14 @@ class ControlCore:
             return "gates:" + ";".join(reasons)
         self.state = RUNNING
         self.integral = 0.0
+        seed_from = message if isinstance(message.get("pose"), dict) else ego_now
+        try:
+            self.motion.seed(self._reported_pose(seed_from), ego_now["sim_ns"])
+        except (KeyError, TypeError, ValueError):
+            self.state = WAIT_DATA
+            return "bad_pose"
         if self.parking:
-            self.aisle = Aisle(Pose.from_dict(ego_now["pose"]), self.vehicle,
-                               self.park_config)
+            self.aisle = Aisle(self.motion.pose, self.vehicle, self.park_config)
         return ""
 
     def on_aisle(self, pose=None):
@@ -357,6 +411,16 @@ class ControlCore:
 
     def command(self, ego_now, throttle, brake, steer, reason, reverse=False,
                 hand_brake=False):
+        self.applied_reverse = bool(reverse)
+        change = self.lane_change
+        if change and change.get("side") and change.get("state") in (
+                "active", "done", "skipped"):
+            self.debug["lane_change_side"] = change["side"]
+        pose = getattr(self, "_tick_pose", None)
+        if pose is not None:
+            self.debug["dr_pose"] = {"x": pose.x, "y": pose.y, "z": pose.z,
+                                     "roll": pose.roll, "pitch": pose.pitch,
+                                     "yaw": pose.yaw}
         self.seq += 1
         basis_ns = self.basis["sim_ns"] if self.basis else 0
         return {
@@ -409,8 +473,12 @@ class ControlCore:
                 record["predicted"] = True
             hazard = obs["class"] in self.hazards
             if obs["valid"]:
-                x, (left, right) = obs["near_x_m"], obs["lateral_extent_m"]
-                points = np.array([[x, left, 0.0], [x, right, 0.0]])
+                # The path test uses the bottom centre. The two corner rays
+                # stretch at long range and pull a car in the next lane into
+                # this one.
+                x = float(obs["near_x_m"])
+                cy = float(obs["position_ego_m"][1])
+                points = np.array([[x, cy, 0.0]])
                 world = capture.to_parent(points)
                 moved = 0.0
                 if obs.get("velocity_world_mps") is not None:
@@ -423,11 +491,11 @@ class ControlCore:
                                      - obs["measurement_sim_ns"]) * 1e-9
                     moved = self.c.get("unknown_closing_mps", 2.0) * since
                 now = pose_now.from_parent(world)
-                near = float(now[:, 0].min()) - moved
-                left, right = float(now[:, 1].min()), float(now[:, 1].max())
+                near = float(now[0, 0]) - moved
+                cy = float(now[0, 1])
                 gap = near - bumper
-                path = in_path(near, left, right)
-                record.update(gap_m=gap, left_m=left, right_m=right, in_path=path)
+                path = in_path(near, cy, cy)
+                record.update(gap_m=gap, left_m=cy, right_m=cy, in_path=path)
                 closing = None
                 if obs.get("velocity_relative_mps") is not None:
                     closing = -obs["velocity_relative_mps"][0]
@@ -445,6 +513,12 @@ class ControlCore:
                         decision = "brake_ttc"
                     else:
                         decision = "in_path_far"
+                    cap = float(self.c.get("ground_range_max_m", 40.0))
+                    # Past the cap a ground range is not a follow gap and not
+                    # a time-to-collision brake. A gap inside the stopping
+                    # distance still brakes: that decision is brake_distance.
+                    if gap > cap and decision == "brake_ttc":
+                        decision = "in_path_far"
                 else:
                     decision = "outside_path"
                 if predicted and hazard and path is not False:
@@ -452,31 +526,22 @@ class ControlCore:
                     if decision.startswith("brake"):
                         decision = "brake_predicted"
             else:
-                # No usable depth in the box. Where its bottom edge meets the
-                # road says whether it could be in the way.
-                box = obs["bbox"]
-                bottom = box["y"] + box["h"]
-                xy, ok = self.rig.uv_to_ground(box["x"] + box["w"] / 2.0,
-                                               min(bottom, self.rig.height - 1))
+                # The bottom edge did not make a measurement. The reason says
+                # which failure, already decided by measure_ground.
                 record["measurement"] = obs["reason"]
-                if obs["reason"] == "only_road":
-                    # The depth was read and nothing in the box stands above
-                    # the road: a shadow or a marking taken for a road user
-                    decision = "flat_on_road"
-                elif bottom >= self.rig.height - 2:
+                if obs["reason"] == "truncated_bottom":
                     decision = "brake_unreadable_near"
-                elif not ok:
-                    decision = "unreadable_far"
-                else:
+                elif obs["reason"] == "truncated_side" and "position_ego_m" in obs:
+                    xy = obs["position_ego_m"]
                     now = pose_now.from_parent(
                         capture.to_parent([float(xy[0]), float(xy[1]), 0.0]))
                     gap = float(now[0]) - bumper
-                    width = box["w"] * max(0.0, float(xy[0]) - self.rig.x) / self.rig.focal
-                    path = in_path(float(now[0]), float(now[1]) - width / 2,
-                                   float(now[1]) + width / 2)
+                    path = in_path(float(now[0]), float(now[1]), float(now[1]))
                     record.update(gap_m=gap, in_path=path)
-                    decision = ("brake_unreadable" if path is not False
+                    decision = ("brake_unreadable" if path is True
                                 and gap <= 2.0 * envelope else "unreadable_far")
+                else:
+                    decision = "unreadable_far"
             if decision.startswith("brake") and not hazard:
                 # Logged, not braked for: the brake list is the six road users
                 decision = "non_hazard_class"
@@ -486,33 +551,10 @@ class ControlCore:
                 brake_reason = "obstacle:%s:%s" % (decision[6:], obs["class"])
         return brake_reason, predicted_in_path, decisions
 
-    def standing_in_path(self, pose_now, centre, reach_m):
-        """Whether the depth image of the basis frame shows something
-        standing on the path within reach_m of the bumper: whatever it is.
-        What the vehicle braked for is not gone because the detector no
-        longer finds it: a truck 11 m ahead was lost that way, and the
-        vehicle drove on at it."""
-        depth = self.depth.get(self.basis["sim_ns"])
-        if depth is None:
-            return True  # nothing to tell by: not clear
-        step = 8
-        v, u = np.mgrid[step // 2:self.rig.height:step, step // 2:self.rig.width:step]
-        points = self.rig.depth_to_ego(u + 0.5, v + 0.5, depth[v, u]).reshape(-1, 3)
-        x, y, z = pose_now.from_parent(self.basis["pose"].to_parent(points)).T
-        bumper = self.vehicle["front_bumper_m"]
-        half = self.vehicle["width_m"] / 2.0 + self.c.get("corridor_margin_m", 0.3)
-        # shortcut: the road is taken as flat at ground_z; on a slope of more
-        # than 1 % over the reach this never clears. Then fit the road's plane.
-        above = z - self.rig.ground_z
-        standing = (x > bumper + 0.2) & (x < bumper + reach_m) & (above > 0.3) \
-            & (above < 2.5) & (np.abs(y - lane_geometry.evaluate(centre["coefficients"], x))
-                               < half)
-        self.debug["standing_points"] = int(standing.sum())
-        return int(standing.sum()) >= int(self.c.get("standing_points", 12))
-
     def step(self, ego_now):
         """The command for the tick that follows this ego state."""
         self.debug = {"state": self.state}
+        self._tick_pose = self._pose_at(ego_now)
         dt = 1.0 / 30.0
         if self.last_step_ns is not None:
             dt = max(1e-3, (ego_now["sim_ns"] - self.last_step_ns) * 1e-9)
@@ -548,8 +590,10 @@ class ControlCore:
         if age_ns > self.age_limit_ns:
             return stop("stale_perception")
         try:
-            pose_now = Pose.from_dict(ego_now["pose"])
+            pose_now = self._tick_pose
             speed = float(ego_now["speed_mps"])
+            if pose_now is None:
+                return stop("bad_ego_state")
         except (KeyError, TypeError, ValueError):
             return stop("bad_ego_state")
         if not math.isfinite(speed):
@@ -614,7 +658,9 @@ class ControlCore:
             self.clear_needed = self.clear_frames
             return hold(brake_reason)
         if self.state == HOLDING:
-            if predicted_in_path or self.standing_in_path(pose_now, centre, envelope):
+            # A missed box is held only while its track is still predicted.
+            # Nothing else, depth included, keeps the road occupied.
+            if predicted_in_path:
                 self.clear_count = 0
             elif basis_ns != self.clear_ns:
                 self.clear_count += 1
@@ -736,6 +782,37 @@ class ControlCore:
             _, track, self.target_stall, self.park_direction = best
             self.target = track.id
 
+    def rear_corridor_hit(self, pose_now):
+        """A hazard behind the rear bumper, inside the reversing corridor.
+
+        On the rear camera the closer face is the larger ego x (far_x_m).
+        """
+        if self.rear_metric is None or self.rear_pose is None:
+            return False
+        bumper = self.vehicle.get("rear_bumper_m")
+        if bumper is None:
+            return False
+        half = self.vehicle["width_m"] / 2.0 + self.c.get("corridor_margin_m", 0.3)
+        reach = max(stopping_distance(0.5, self.c["brake"]), 1.5)
+        capture = self.rear_pose
+        for obs in self.rear_metric["observations"]:
+            if obs.get("class") not in self.hazards:
+                continue
+            if obs.get("valid"):
+                x = float(obs.get("far_x_m", obs["near_x_m"]))
+                y = float(obs["position_ego_m"][1])
+            elif obs.get("reason") == "truncated_side" and "position_ego_m" in obs:
+                x, y = obs["position_ego_m"]
+            else:
+                continue
+            now = pose_now.from_parent(capture.to_parent([float(x), float(y), 0.0]))
+            if float(now[0]) >= bumper:
+                continue
+            gap = bumper - float(now[0])
+            if abs(float(now[1])) <= half and 0.0 < gap <= reach:
+                return True
+        return False
+
     def park_backwards(self, ego_now, pose_now, speed, dt, stop):
         """Back, align, enter, parked: onto the stall as it is seen now."""
         config, aisle = self.park_config, self.aisle
@@ -743,13 +820,30 @@ class ControlCore:
         if track is not None and track.stall() is not None:
             self.target_stall = track.stall()
         stall = self.target_stall
-        heading = stall.heading_error(pose_now.yaw)
-        u, v = stall.frame([pose_now.x, pose_now.y])
+        # Steering uses the mouth as the rear camera last saw it, carried
+        # only across the motion since that frame. The world stall still
+        # chooses which stall and where the quarter-circle starts.
+        live = track.seen_from(pose_now) if track is not None else None
+        if live is not None:
+            heading = live.heading_error(0.0)
+            u, v = live.frame([0.0, 0.0])
+        else:
+            heading = stall.heading_error(pose_now.yaw)
+            u, v = stall.frame([pose_now.x, pose_now.y])
         self.debug.update(park=self.park_phase, park_u_m=u, park_v_m=v,
                           park_heading_rad=heading, park_stall=stall.as_dict())
         if self.park_phase == "parked":
             # The state says so, not a reason: brake held, gear forward
             return self.command(ego_now, 0.0, 1.0, 0.0, "parked", hand_brake=True)
+
+        if self.park_phase in ("back", "align", "enter"):
+            if self.rear_holding or self.rear_corridor_hit(pose_now):
+                self.rear_holding = True
+                if speed >= 0.15:
+                    return self.command(ego_now, 0.0, 1.0, 0.0, "park:rear_obstacle",
+                                        reverse=True)
+                self.latch("park_abort:rear_obstacle")
+                return self.command(ego_now, 0.0, 1.0, 0.0, "park_abort:rear_obstacle")
 
         if self.park_phase in ("back", "align"):
             # Still outside the stall: what the camera says of it decides
@@ -765,7 +859,10 @@ class ControlCore:
                                 reverse=True)
 
         self.park_travelled += speed * dt
-        rear_u, rear_v = stall.frame(aisle.rear_axle(pose_now))
+        if live is not None:
+            rear_u, rear_v = live.frame([-aisle.wheelbase / 2.0, 0.0])
+        else:
+            rear_u, rear_v = stall.frame(aisle.rear_axle(pose_now))
         if self.park_phase == "back":
             radius = aisle.radius(stall, pose_now)
             if aisle.past(stall, pose_now) <= radius:
@@ -832,9 +929,11 @@ class ControlCore:
         before this is reached."""
         lead = None
         for d in decisions:
+            cap = float(self.c.get("ground_range_max_m", 40.0))
             if d.get("in_path") is True and d["class"] in self.hazards \
                     and "closing_mps" in d and not d.get("predicted") \
                     and envelope < d["gap_m"] < self.follow_gap_m \
+                    and d["gap_m"] <= cap \
                     and (lead is None or d["gap_m"] < lead["gap_m"]):
                 lead = d
         if lead is None:

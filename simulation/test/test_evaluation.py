@@ -246,7 +246,7 @@ def write_run(directory, results=None, drops=(), expect=None, stop_at=None,
                                     "bbox": boxes[0]}],
                     "lane": {"valid": True, "reference_x_m": 8.0,
                              "lateral_error_m": 0.05, "heading_rad": 0.0}}
-        metric = tracker.update(envelope, depth, dict(ego, pose=Pose.from_dict(pose)))
+        metric = tracker.update(envelope, dict(ego, pose=Pose.from_dict(pose)))
         out("perception", {"received_mono_ns": mono + 90 * MS, "rejected": "",
                            "now_sim_ns": sim_ns + 2 * TICK, "envelope": envelope})
         out("metric", metric)
@@ -397,15 +397,12 @@ class WholeRun(unittest.TestCase):
         self.assertGreater(m["replay"]["compared_values"], 100)
         self.assertLessEqual(m["replay"]["max_abs_difference"], 1e-6)
 
-    def test_replay_fails_on_a_missing_or_corrupt_artifact(self):
+    def test_replay_does_not_need_the_depth_artifact(self):
         m = self.run_in(replay=True, depth_frames=range(12))
-        self.assertFalse(m["replay"]["pass"])
-        self.assertEqual(m["replay"]["replayed"], 12)
-        self.assertIn("no depth artifact", m["replay"]["errors"][0])
-        self.assertEqual(m["verdict"], "fail")
+        self.assertTrue(m["replay"]["pass"], m["replay"])
+        self.assertEqual(m["replay"]["replayed"], 30)
         m = self.run_in(replay=True, corrupt_depth=4)
-        self.assertFalse(m["replay"]["pass"])
-        self.assertEqual(m["replay"]["replayed"], 4)
+        self.assertTrue(m["replay"]["pass"], m["replay"])
 
     def test_a_missing_file_is_an_error_not_a_zero(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -754,6 +751,56 @@ class Show(unittest.TestCase):
         # A collision
         self.assertFalse(self.one({"park_abort": True}, self.given_up(),
                                   collisions=[{"tick": 3}])[0])
+
+
+def _results(expect, metrics):
+    return ev.check_expectations(expect, metrics)
+
+
+class LaneReport(unittest.TestCase):
+    def metrics(self, **report):
+        base = {"finished_with_lane": False, "latched_lane": False,
+                "never_armed": False, "drove_invalid_too_long": False,
+                "valid_fraction": 1.0}
+        base.update(report)
+        return {"control": {"collisions": []}, "lane_report": base,
+                "show": {"lane_change": {"state": "done", "side": "right"},
+                         "lane_ids": [-3, -4]}}
+
+    def test_finished_on_a_valid_lane_passes(self):
+        got = _results({"lane_report": "safe"}, self.metrics(finished_with_lane=True))
+        self.assertTrue(got[0][1])
+
+    def test_a_latch_passes(self):
+        got = _results({"lane_report": "safe"}, self.metrics(latched_lane=True))
+        self.assertTrue(got[0][1])
+
+    def test_never_armed_passes(self):
+        got = _results({"lane_report": "safe"}, self.metrics(never_armed=True))
+        self.assertTrue(got[0][1])
+
+    def test_six_invalid_results_while_driving_fails(self):
+        got = _results({"lane_report": "safe"},
+                       self.metrics(drove_invalid_too_long=True, finished_with_lane=True))
+        self.assertFalse(got[0][1])
+
+    def test_a_collision_fails(self):
+        metrics = self.metrics(finished_with_lane=True)
+        metrics["control"]["collisions"] = [{"tick": 1}]
+        self.assertFalse(_results({"lane_report": "safe"}, metrics)[0][1])
+
+    def test_right_is_a_smaller_lane_id(self):
+        metrics = self.metrics()
+        self.assertTrue(_results({"lane_to": "right"}, metrics)[0][1])
+        metrics["show"]["lane_ids"] = [-3, -2]
+        self.assertFalse(_results({"lane_to": "right"}, metrics)[0][1])
+
+    def test_a_string_lane_change_does_not_require_a_side(self):
+        metrics = self.metrics()
+        metrics["show"]["lane_change"]["side"] = "left"
+        self.assertTrue(_results({"lane_change": "done"}, metrics)[0][1])
+        self.assertFalse(_results({"lane_change": {"state": "done", "side": "right"}},
+                                  metrics)[0][1])
 
 
 if __name__ == "__main__":

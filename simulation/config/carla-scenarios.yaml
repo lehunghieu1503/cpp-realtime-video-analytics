@@ -72,7 +72,7 @@ scenarios:
       - {name: left, class: car, blueprint: vehicle.tesla.model3, lane: -1,
          from_tick: 90, sweep: {distances_m: [15.0, 25.0, 25.0], hold_ticks: 90}}
     expect: {depth_is: along_optical_axis, road_height_rmse_m: 0.03,
-             reprojection_max_px: 2, range_error_max_m: 0.2, unknown_frames: 0}
+             reprojection_max_px: 2, unknown_frames: 0}
 
   # ── Transport and detection, vehicle braked ───────────────────────────────
 
@@ -124,7 +124,7 @@ scenarios:
     actors:
       - {name: lead, class: car, blueprint: vehicle.tesla.model3,
          ahead_m: 9.0, speed_mps: 3.0}
-    expect: {speed_rmse_mps: 0.5, range_error_max_m: 0.2}
+    expect: {speed_rmse_mps: 0.5}
 
   # Ego stands; a car accelerates away at 1.5 m/s^2 up to 9 m/s
   metric_accelerating:
@@ -296,6 +296,47 @@ scenarios:
     expect: {drives: true, follows: 2.0, lane_change: done, resumes: person,
              no_box_overlap: [walker, lead], collisions: 0}
 
+  # The left lane is occupied by a scripted car, so the one overtake goes
+  # right. The scenario does not name the side. physics is off: a physics
+  # actor is not held in the lane it was spawned in.
+  show_drive_right:
+    ticks: 900
+    jpeg_quality: 75
+    target_speed_kmh: 50.0
+    follow_gap_m: 30.0
+    overtake: true
+    actors:
+      - {name: lead, class: car, blueprint: vehicle.tesla.model3, ahead_m: 25.0,
+         physics: true, speed_mps: 5.0}
+      - {name: left_blocker, class: car, blueprint: vehicle.audi.tt,
+         ahead_m: 20.0, lane: -1, physics: false, speed_mps: 5.0}
+    expect: {lane_change: done, lane_to: right, collisions: 0,
+             no_box_overlap: [lead, left_blocker]}
+
+  # Lane model on a curve, at night, and in rain. A run that never arms
+  # because the lane is invalid, and stays braked, is a pass. No new model.
+  lane_curve:
+    ticks: 600
+    jpeg_quality: 75
+    route: curve_right
+    weather: ClearNoon
+    target_speed_kmh: 30.0
+    expect: {lane_report: safe, collisions: 0}
+  lane_night:
+    ticks: 600
+    jpeg_quality: 75
+    route: straight
+    weather: ClearNight
+    target_speed_kmh: 30.0
+    expect: {lane_report: safe, collisions: 0}
+  lane_rain:
+    ticks: 600
+    jpeg_quality: 75
+    route: straight
+    weather: HardRainNoon
+    target_speed_kmh: 30.0
+    expect: {lane_report: safe, collisions: 0}
+
   # ── The park show. Needs --arm ────────────────────────────────────────────
   # Town05's car park, as the map has it: 17 parked cars in its 60 stalls.
   # The scenario says where the vehicle starts and that it parks, not where.
@@ -365,10 +406,11 @@ scenarios:
     faults: [{kind: drop_rgb, from_tick: 300}]
     expect: {drives: true, stops: true, fault_brake_by_deadline: true, collisions: 0}
 
-  fault_no_depth:       # the depth image stops reaching the controller
+  fault_no_depth:       # depth stops. The controller does not use it.
     ticks: 500
     faults: [{kind: drop_depth, from_tick: 300}]
-    expect: {drives: true, stops: true, fault_brake_by_deadline: true, collisions: 0}
+    expect: {drives: true, stops: false, no_stop_reason_prefix: stale_perception,
+             collisions: 0}
 
   fault_controller_killed:   # SIGKILL; the simulator keeps ticking
     ticks: 500

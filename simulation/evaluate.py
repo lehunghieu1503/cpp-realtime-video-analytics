@@ -605,7 +605,12 @@ def show_section(controls, commands, truth_rows, manifest, matches):
         lane_change["skipped_reason"] = next(
             (d["lane_change_skipped"] for _, d in states if d.get("lane_change_skipped")),
             None)
+        lane_change["side"] = next(
+            (d["lane_change_side"] for _, d in reversed(states)
+             if d.get("lane_change_side")), None)
     out["lane_change"] = lane_change
+    out["lane_ids"] = [row["lane"]["lane_id"] for row in truth_rows
+                       if isinstance(row.get("lane"), dict) and "lane_id" in row["lane"]]
 
     # Following, and boxes that share ground
     ego_box = ego_footprint(vehicle)
@@ -1048,30 +1053,23 @@ def replay(run_dir, manifest, perception, ego_rows, generated, metric_live):
               "max_abs_difference": 0.0, "errors": []}
     for envelope in accepted:
         sim_ns = envelope["simulation"]["sim_ns"]
-        entry = artifact.get(sim_ns, {})
-        path = entry.get("depth_artifact")
-        if not path:
-            result["errors"].append("%d: no depth artifact (%s)" % (
-                sim_ns, entry.get("depth_artifact_error", "beyond the run's budget")))
-            break  # the filter's state depends on every frame before
-        try:
-            with open(os.path.join(run_dir, path), "rb") as f:
-                raw = zlib.decompress(f.read())
-        except (OSError, zlib.error) as error:
-            result["errors"].append("%d: %s" % (sim_ns, error))
+        live_metric = live.get(sim_ns)
+        if live_metric is None:
+            result["errors"].append("%d: no live metric" % sim_ns)
             break
-        if zlib.crc32(raw) != entry["depth_crc32"]:
-            result["errors"].append("%d: depth checksum differs" % sim_ns)
-            break
-        h, w = entry["depth_shape"]
-        bgr = np.frombuffer(raw, np.uint8).reshape(h, w, 3)
-        depth = decode_depth(np.concatenate(
-            [bgr, np.full((h, w, 1), 255, np.uint8)], axis=2))
+        # The pose the live filter used, not a fresh read of the truth log.
+        pose_used = live_metric.get("pose_used")
         ego = ego_by_ns.get(sim_ns)
-        if ego is None:
-            result["errors"].append("%d: no ego state" % sim_ns)
+        if pose_used is None and ego is not None:
+            pose_used = ego["pose"]
+        if pose_used is None:
+            result["errors"].append("%d: no pose for the filter" % sim_ns)
             break
-        again = tracker.update(envelope, depth, dict(ego, pose=Pose.from_dict(ego["pose"])))
+        ego = dict(ego or {}, pose=Pose.from_dict(pose_used), sim_ns=sim_ns,
+                   run_id=envelope["simulation"]["run_id"])
+        if "velocity_world_mps" not in ego:
+            ego["velocity_world_mps"] = [0.0, 0.0, 0.0]
+        again = tracker.update(envelope, ego)
         result["replayed"] += 1
         for a, b in zip(again["observations"], live[sim_ns]["observations"]):
             for key in ("position_ego_m", "position_world_m", "velocity_world_mps",
@@ -1237,11 +1235,37 @@ def check_expectations(expect, metrics):
                     h["drove_on_tick"]) for h in holds) or "no such brake")
         elif key == "lane_change":
             change = metrics["show"]["lane_change"]
+            if isinstance(value, dict):
+                state_ok = change["state"] == value.get("state", change["state"])
+                side_ok = change.get("side") == value.get("side", change.get("side"))
+                add("lane change %s" % value, state_ok and side_ok,
+                    "state %s side %s" % (change["state"], change.get("side")))
+                continue
             add("lane change: %s" % value, change["state"] == value,
                 "%s%s" % (change["state"], " (%s)" % change["skipped_reason"]
                           if change.get("skipped_reason") else
                           " at tick %s" % change.get("done_tick")
                           if change.get("done_tick") is not None else ""))
+        elif key == "lane_to":
+            show = metrics["show"]
+            ids = show.get("lane_ids") or []
+            side = (show.get("lane_change") or {}).get("side")
+            # CARLA follows OpenDRIVE: the lane to the right has the smaller id.
+            moved = (len(ids) >= 2 and ids[-1] < ids[0]) if value == "right" \
+                else (len(ids) >= 2 and ids[-1] > ids[0])
+            add("moved %s by lane id" % value, bool(moved) and side == value,
+                "ids %s -> %s, logged side %s" % (
+                    ids[0] if ids else None, ids[-1] if ids else None, side))
+        elif key == "lane_report":
+            report = metrics.get("lane_report") or {}
+            safe = len(control["collisions"]) == 0 and not report.get(
+                "drove_invalid_too_long") and (
+                    report.get("finished_with_lane") or report.get("latched_lane")
+                    or report.get("never_armed"))
+            add("lane report %s" % value, value == "safe" and safe,
+                "valid %.2f latched %s never_armed %s invalid_run %s" % (
+                    report.get("valid_fraction", 0.0), report.get("latched_lane"),
+                    report.get("never_armed"), report.get("drove_invalid_too_long")))
         elif key == "follows":
             best = max(metrics["show"]["follow"].values(),
                        key=lambda f: f["seconds_at_its_speed"], default=None)
@@ -1262,11 +1286,18 @@ def check_expectations(expect, metrics):
         elif key == "parked":
             park = metrics["show"].get("park") or {}
             needed = 15 if value is True else int(value)
+            along = park.get("final_u_m")
+            across = park.get("final_v_m")
+            heading = park.get("final_heading_deg")
             ok = park.get("parked_ticks_at_the_end", 0) >= needed \
                 and park.get("stall_was_occupied") is False \
-                and park.get("stall_before_was_occupied") is False
+                and park.get("stall_before_was_occupied") is False \
+                and along is not None and abs(along) <= 0.40 \
+                and across is not None and abs(across) <= 0.40 \
+                and heading is not None and abs(heading) <= 5.0
             add("parked for the last %d ticks: in a stall that was empty, as was the one "
-                "passed before it; within 15 deg, standing, reverse off, brakes on" % needed,
+                "passed before it; within 0.40 m and 5 deg, standing, reverse off, "
+                "brakes on" % needed,
                 ok, "%d ticks; %s; %.2f m along, %.2f m beside its axis, %.1f deg" % (
                     park.get("parked_ticks_at_the_end", 0),
                     "in no stall" if not park.get("final_inside") else
@@ -1301,6 +1332,50 @@ def check_expectations(expect, metrics):
         else:
             add("unknown expectation %s" % key, False, "not implemented")
     return results
+
+
+def lane_report_section(perception, controls, commands):
+    """Whether a lane run stayed safe: finished on a valid lane, latched, or
+    never armed. Driving on through more than five invalid results fails."""
+    accepted = [r for r in perception if r.get("rejected") == ""]
+    streak = worst = valid = 0
+    for record in accepted:
+        if (record.get("envelope") or {}).get("lane", {}).get("valid"):
+            valid += 1
+            streak = 0
+        else:
+            streak += 1
+            worst = max(worst, streak)
+    drove = any(c.get("event") == "applied" and c.get("throttle", 0) > 0
+                for c in controls)
+    latched = any(
+        (r.get("debug") or {}).get("state") == "STOP_LATCHED"
+        and str((r.get("command") or {}).get("reason", "")).startswith("lane")
+        for r in commands)
+    n = len(accepted)
+    return {
+        "valid_fraction": (valid / n) if n else 0.0,
+        "finished_with_lane": bool(n) and valid == n and drove,
+        "latched_lane": latched,
+        "never_armed": not drove and not latched,
+        "drove_invalid_too_long": worst > 5 and drove and not latched,
+    }
+
+
+def odometry_section(commands, truth_rows):
+    """How far the dead-reckoned pose is from the simulator pose. A report,
+    not a pass/fail. Missing dr_pose (older logs) yields no samples."""
+    by_ns = {row["sim_ns"]: row["ego"]["pose"] for row in truth_rows}
+    errors = []
+    for record in commands:
+        dr = (record.get("debug") or {}).get("dr_pose")
+        truth = by_ns.get((record.get("command") or {}).get("control_sim_ns"))
+        if not dr or not truth:
+            continue
+        errors.append(math.hypot(dr["x"] - truth["x"], dr["y"] - truth["y"]))
+    if not errors:
+        return {"samples": 0}
+    return {"samples": len(errors), "final_m": errors[-1], "max_m": max(errors)}
 
 
 def evaluate(run_dir, do_replay=False, lane_model=None):
@@ -1345,6 +1420,8 @@ def evaluate(run_dir, do_replay=False, lane_model=None):
         "latency": latency_section(usable, generated, ticks, controls, commands),
         "control": control_section(controls, truth_rows, manifest),
         "show": show_section(controls, commands, truth_rows, manifest, matches),
+        "lane_report": lane_report_section(perception, controls, commands),
+        "odometry": odometry_section(commands, truth_rows),
         "faults": faults, "commands_rejected_by_simulator": rejected,
         "control_budget": {k: manifest.get("control", {}).get(k) for k in (
             "age_limit_ms", "wall_lease_ms", "pose_budget_ms")},

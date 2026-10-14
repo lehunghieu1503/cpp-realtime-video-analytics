@@ -79,10 +79,30 @@ class End:
         self.back = 0  # sightings that said "at the back"
         self.last_ns = 0
         self.nearest_m = math.inf
+        self.latest_ego = None
+        self.latest_pose = None
 
-    def add(self, xy, weight, back, distance, sim_ns, forget):
+    def add(self, xy, ego_xy, capture, weight, back, distance, sim_ns, forget):
+        """Blend in the ego frame of this sighting, then write the world point.
+
+        A yaw bias shared by the pose that stored the old mean and the pose
+        that reads it cancels. Blending in the world would keep the bias
+        from every earlier sighting.
+        """
         known = self.weight * forget
-        self.xy = (known * self.xy + weight * xy) / (known + weight)
+        measured = np.asarray(ego_xy, dtype=float)
+        if self.latest_pose is None or known <= 0.0:
+            blended = measured
+        else:
+            old_world = self.latest_pose.to_parent(
+                [self.latest_ego[0], self.latest_ego[1], self.latest_pose.z])
+            old_ego = capture.from_parent(old_world)[:2]
+            blended = (known * old_ego + weight * measured) / (known + weight)
+        self.latest_ego = np.asarray(blended, dtype=float)
+        self.latest_pose = capture
+        world = capture.to_parent(
+            [self.latest_ego[0], self.latest_ego[1], capture.z])
+        self.xy = world[:2]
         self.weight = known + weight
         self.hits += 1
         self.back += 1 if back else 0
@@ -105,6 +125,8 @@ class StallTrack:
         self.hits = 0                        # votes
         self.backs = ()  # the ends at the back of its two dividers, once seen
         self.fitted = None
+        self.ref_pose = None   # ego frame the steering stall was built in
+        self.ref_stall = None  # that stall, in ref_pose's ego frame
 
     @property
     def last_ns(self):
@@ -121,6 +143,28 @@ class StallTrack:
         """Voted on often enough, and empty nearly every time."""
         return self.hits >= config["min_hits"] \
             and self.occupied_share() <= config["free_share"]
+
+    def seen_from(self, pose_now):
+        """The stall in `pose_now`'s ego frame, carried from the last sighting.
+
+        Only the motion since that frame is applied, so a yaw bias that has
+        been growing all along the aisle does not turn the stall.
+        """
+        if self.ref_pose is None or self.ref_stall is None:
+            return None
+        stall, ref = self.ref_stall, self.ref_pose
+
+        def into(u, v):
+            ego = stall.world(u, v)
+            world = ref.to_parent([float(ego[0]), float(ego[1]), ref.z])
+            return pose_now.from_parent(world)[:2]
+
+        centre = into(0.0, 0.0)
+        tip = into(1.0, 0.0)
+        delta = tip - centre
+        yaw = math.degrees(math.atan2(float(delta[1]), float(delta[0])))
+        return Stall(float(centre[0]), float(centre[1]), yaw,
+                     stall.length, stall.width)
 
 
 class StallTracker:
@@ -140,7 +184,7 @@ class StallTracker:
         xy = np.where(ok[..., None], xy, 0.0)
         world = capture.to_parent(np.concatenate(
             [xy, np.full(xy.shape[:-1] + (1,), self.rig.ground_z)], axis=-1))[..., :2]
-        return world, np.hypot(xy[..., 0] - self.rig.x, xy[..., 1] - self.rig.y), ok
+        return world, np.hypot(xy[..., 0] - self.rig.x, xy[..., 1] - self.rig.y), ok, xy
 
     def update(self, stalls, points, capture, sim_ns):
         """The stall detections and divider ends of one frame, taken from the
@@ -166,9 +210,9 @@ class StallTracker:
         for point in sorted(points, key=lambda p: -float(p["confidence"])):
             if float(point["confidence"]) < config["confidence"]:
                 continue
-            xy, distance, ok = self.ground(np.array(float(point["x"])),
-                                           np.array(float(point["y"])), capture,
-                                           config["end_range_m"])
+            xy, distance, ok, ego_xy = self.ground(np.array(float(point["x"])),
+                                                   np.array(float(point["y"])), capture,
+                                                   config["end_range_m"])
             if not ok:
                 continue
             distance = float(distance)
@@ -177,7 +221,8 @@ class StallTracker:
                 end = End(self.next_id)
                 self.next_id += 1
                 self.ends.append(end)
-            end.add(xy, 1.0 / (distance ** 2 + self.height ** 2) ** 2,
+            end.add(xy, ego_xy, capture,
+                    1.0 / (distance ** 2 + self.height ** 2) ** 2,
                     point["class"] == "back", distance, sim_ns, config["forget"])
             made.append(end.id)
         return made
@@ -259,6 +304,48 @@ class StallTracker:
         centre = middle - length / 2.0 * out
         track.fitted = Stall(centre[0], centre[1], math.degrees(math.atan2(out[1], out[0])),
                              length, float(np.hypot(*(a - b))))
+        self._remember_sighting(track, out, length)
+
+    def _remember_sighting(self, track, out, length):
+        """The stall from the two mouth ends as last seen, for steering.
+
+        The world fit above averages a whole row and keeps old yaw error.
+        These two ends, moved only since their own frames, do not.
+        """
+        plus, minus = track.plus, track.minus
+        if plus.latest_pose is None or minus.latest_pose is None:
+            track.ref_pose = None
+            track.ref_stall = None
+            return
+        ref = plus.latest_pose if plus.last_ns >= minus.last_ns else minus.latest_pose
+
+        def at_ref(end):
+            if end.latest_pose is ref:
+                return np.asarray(end.latest_ego, dtype=float)
+            world = end.latest_pose.to_parent(
+                [end.latest_ego[0], end.latest_ego[1], end.latest_pose.z])
+            return ref.from_parent(world)[:2]
+
+        ae, be = at_ref(plus), at_ref(minus)
+        along = ae - be
+        norm = float(np.hypot(*along))
+        if norm < 1e-6:
+            track.ref_pose = None
+            track.ref_stall = None
+            return
+        # +v runs from the minus end to the plus end, so out is to its left
+        out_e = np.array([along[1], -along[0]]) / norm
+        mid = (plus.xy + minus.xy) / 2.0
+        probed = ref.from_parent([mid[0] + out[0], mid[1] + out[1], ref.z])[:2] \
+            - ref.from_parent([mid[0], mid[1], ref.z])[:2]
+        if float(out_e @ probed) < 0.0:
+            out_e = -out_e
+        middle = (ae + be) / 2.0
+        centre = middle - (length / 2.0) * out_e
+        yaw = math.degrees(math.atan2(float(out_e[1]), float(out_e[0])))
+        track.ref_pose = ref
+        track.ref_stall = Stall(float(centre[0]), float(centre[1]), yaw,
+                                float(length), norm)
 
     def vote(self, stalls, capture):
         config = self.config
