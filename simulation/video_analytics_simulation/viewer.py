@@ -206,9 +206,13 @@ class Viewer:
         cv2.imshow(WINDOW, picture)
         # Closed by its button: Qt says not visible; GTK, which answers -1 for
         # visible whatever the window, no longer has it (-1 for any property)
-        if cv2.waitKey(1) & 0xFF == ord("q") \
+        try:
+            gone = cv2.waitKey(1) & 0xFF == ord("q") \
                 or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) == 0 \
-                or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_AUTOSIZE) < 0:
+                or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_AUTOSIZE) < 0
+        except cv2.error:
+            gone = True  # Qt, once its window is closed, raises for any property
+        if gone:
             self.close()
         return not self.closed
 
@@ -241,4 +245,7 @@ class Viewer:
     def close(self):
         if not self.closed:
             self.closed = True
-            self.cv2.destroyWindow(WINDOW)
+            try:
+                self.cv2.destroyWindow(WINDOW)
+            except self.cv2.error:
+                pass  # closed by its button already

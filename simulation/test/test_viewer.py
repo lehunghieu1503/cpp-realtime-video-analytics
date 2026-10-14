@@ -155,6 +155,14 @@ class Window(unittest.TestCase):
         self.view.pump()
         self.view.close()
 
+    def test_a_window_qt_has_lost_is_closed_without_an_error(self):
+        def lost(*a):
+            raise cv2.error("NULL guiReceiver")
+        cv2.getWindowProperty = cv2.destroyWindow = lost
+        self.view.frame("front", 1, np.zeros((720, 1280, 4), np.uint8))
+        self.assertFalse(self.view.show(0, 0.0, {}))
+        self.view.close()
+
 
 if __name__ == "__main__":
     unittest.main()
