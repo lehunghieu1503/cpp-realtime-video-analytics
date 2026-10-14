@@ -157,6 +157,11 @@ class Viewer:
         """Draws the window. False once the person has closed it or pressed q."""
         if self.closed:
             return False
+        return self.display(self.picture(tick, speed_mps, applied))
+
+    def picture(self, tick, speed_mps, applied):
+        """The window's picture. Touches no window: it may be made on another
+        thread than the one that shows it."""
         cv2 = self.cv2
         panels = {name: self.with_vehicle(name, panel) for name, panel in self.panels.items()}
         above = panels.pop("bev", None)
@@ -186,7 +191,14 @@ class Viewer:
         for i, text in enumerate(lines):
             cv2.putText(bar, text, (8, 18 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (255, 255, 255), 1, cv2.LINE_AA)
-        picture = np.vstack([view, bar])
+        return np.vstack([view, bar])
+
+    def display(self, picture):
+        """Shows a picture made by picture(). False once the person has
+        closed the window or pressed q."""
+        if self.closed:
+            return False
+        cv2 = self.cv2
         if self.size != picture.shape[:2]:
             # A window that may be resized opens small, whatever it shows
             self.size = picture.shape[:2]

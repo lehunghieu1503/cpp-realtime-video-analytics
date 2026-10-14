@@ -368,7 +368,9 @@ class Simulator:
         self.actors = []
         self.sensors = []
         self.chase_image = None  # the camera behind the vehicle, for the viewer
-        self.viewer_due = 0.0  # monotonic time of the viewer's next picture
+        self.viewer_lock = threading.Condition()
+        self.viewer_job = None  # the newest tick's images, for the viewer's thread
+        self.viewer_picture = None  # made by that thread, shown by the tick
         self.scripted = []
         self.original_settings = None
         self.world = None
@@ -909,6 +911,32 @@ class Simulator:
                 self.ledger.update(frame, "dropped", reason="sender_queue_full")
                 self.stats["dropped"] += 1
 
+    def viewer_loop(self):
+        """Viewer's thread: the window's picture of the newest tick. The
+        window itself is shown by the tick's thread."""
+        while True:
+            with self.viewer_lock:
+                while self.viewer_job is None:
+                    self.viewer_lock.wait()
+                job, self.viewer_job = self.viewer_job, None
+            sim_ns, images, park, chase, tick, speed_mps, applied = job
+            if images is not None:
+                self.viewer.frame("front", images[2], images[0])
+            for name in ("rear", "left", "right"):
+                if "carla-" + name in park:
+                    self.viewer.frame(name, sim_ns, park["carla-" + name])
+            if chase is not None:
+                self.viewer.chase_frame(np.frombuffer(chase.raw_data, dtype=np.uint8).reshape(
+                    chase.height, chase.width, 4))
+            if self.stitcher and len(park) == len(self.park_cameras) and images is not None:
+                # What the device makes of the same frames, for the person
+                # watching; the device's own view is not sent back
+                frames = dict(park, **{SOURCE: images[0]})
+                self.viewer.frame("bev", sim_ns, self.stitcher.compose(
+                    [np.ascontiguousarray(frames[source][:, :, :3])
+                     for source, _, _ in bev.cameras_of(self.config)]))
+            self.viewer_picture = self.viewer.picture(tick, speed_mps, applied)
+
     def tick(self, tick):
         started = time.monotonic()
         last = self.last_ego
@@ -992,27 +1020,16 @@ class Simulator:
         images = self.collect_images(frame)
         park = self.collect_park(frame) if self.park_cameras else {}
         self.stats["wait_images_ms"] += (time.monotonic() - wait) * 1e3
-        if self.viewer and time.monotonic() >= self.viewer_due:
-            # 10 pictures a second are enough to watch; one each tick took a
-            # third of the tick
-            self.viewer_due = time.monotonic() + 0.1
-            if images is not None:
-                self.viewer.frame("front", images[2], images[0])
-            for name in ("rear", "left", "right"):
-                if "carla-" + name in park:
-                    self.viewer.frame(name, sim_ns, park["carla-" + name])
-            if self.chase_image is not None:
-                image = self.chase_image
-                self.viewer.chase_frame(np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
-                    image.height, image.width, 4))
-            if self.stitcher and len(park) == len(self.park_cameras) and images is not None:
-                # What the device makes of the same frames, for the person
-                # watching; the device's own view is not sent back
-                frames = dict(park, **{SOURCE: images[0]})
-                self.viewer.frame("bev", sim_ns, self.stitcher.compose(
-                    [np.ascontiguousarray(frames[source][:, :, :3])
-                     for source, _, _ in bev.cameras_of(self.config)]))
-            self.viewer.show(tick, ego["speed_mps"], applied)
+        if self.viewer:
+            # Made on the viewer's thread, the newest tick only: made here it
+            # took a third of the tick
+            with self.viewer_lock:
+                self.viewer_job = (sim_ns, images, park, self.chase_image, tick,
+                                   ego["speed_mps"], applied)
+                self.viewer_lock.notify()
+            picture, self.viewer_picture = self.viewer_picture, None
+            if picture is not None:
+                self.viewer.display(picture)
         self.publish_state(sim_ns, ego)
         if images is None:
             if frame in self.ledger.registered:
@@ -1115,6 +1132,7 @@ class Simulator:
                     vehicle=self.vehicle)
                 if self.args.follow:
                     self.spawn_chase()
+                threading.Thread(target=self.viewer_loop, daemon=True).start()
             self.start_ros()
             s = self.c.get("sender", {})
             sender = JpegSender(s.get("bind", "0.0.0.0"), int(s.get("port", 5000)),
