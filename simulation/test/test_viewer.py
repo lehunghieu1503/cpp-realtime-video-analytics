@@ -144,6 +144,13 @@ class Window(unittest.TestCase):
         rows[1]["corners"] = [[x + 10.0, y] for x, y in rows[1]["corners"]]
         view.status({"park": dict(park, stalls=rows)})
         self.assertEqual(view.drawn, {6, 7})
+        # Seen again after the pose drifted: the one seen last, though seen less
+        drifted = Stall(stall.centre[0] + 1.7, stall.centre[1] + 1.1, 0.0, 5.0, 2.8)
+        rows = [dict(s.as_dict(), id=key, hits=hits, seen_ns=seen, corners=[
+            [float(x), float(y)] for x, y, _ in s.corners()])
+            for s, key, hits, seen in ((stall, 8, 900, 10**9), (drifted, 9, 40, 9 * 10**9))]
+        view.status({"park": dict(park, stalls=rows)})
+        self.assertEqual(view.drawn, {9})
 
     def test_with_the_image_from_behind_it_is_big_and_every_camera_under_it(self):
         from video_analytics_simulation.bev import BevRig

@@ -396,5 +396,6 @@ class StallTracker:
         return [dict(track.fitted.as_dict(), id=track.id, hits=track.hits,
                      occupied_share=round(track.occupied_share(), 2),
                      free=track.free(self.config), backs=len(track.backs),
-                     nearest_m=round(min(track.plus.nearest_m, track.minus.nearest_m), 2))
+                     nearest_m=round(min(track.plus.nearest_m, track.minus.nearest_m), 2),
+                     seen_ns=track.last_ns)
                 for track in self.tracks if track.fitted is not None]

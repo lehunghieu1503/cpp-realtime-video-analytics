@@ -57,9 +57,12 @@ MAP_M = 20.0  # metres a side of the map
 # there if that changes
 MIN_HITS = 10
 # Of two stalls that cover each other more than this share of the smaller,
-# only the one seen more often is drawn: the controller may follow one stall
-# twice, or half a stall apart beside a parked car
-MAX_OVERLAP = 0.3
+# only the one seen last is drawn. The controller may follow one stall twice:
+# its pose drifts, and a stall seen again far from where it was first put
+# starts a new track. The one seen last is where the stall is from the pose
+# it has now.
+MAX_OVERLAP = 0.1
+SAME_TIME_NS = 500_000_000  # stalls seen this close in time count as seen together
 
 
 class Viewer:
@@ -249,11 +252,14 @@ class Viewer:
 
     def stalls_drawn(self, park):
         """Ids of the stalls followed worth drawing: seen often enough, and
-        none covering one seen more often. The one it parks in always."""
+        none covering one seen later, or as late and more often. The one it
+        parks in always."""
         cv2, target = self.cv2, park.get("target")
         rows = sorted((row for row in park.get("stalls", [])
                        if row.get("hits", MIN_HITS) >= MIN_HITS or row["id"] == target),
-                      key=lambda row: (row["id"] != target, -row.get("hits", 0)))
+                      key=lambda row: (row["id"] != target,
+                                       -(row.get("seen_ns", 0) // SAME_TIME_NS),
+                                       -row.get("hits", 0)))
         kept = []
         for row in rows:
             corners = np.array(row["corners"], np.float32)
