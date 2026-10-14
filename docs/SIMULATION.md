@@ -327,8 +327,8 @@ simulation/run.sh --scenario brake_person --arm \
     --device machineai@100.85.110.98 --remote-dir hieule/carla-sim
 ```
 
-- `--gui` mở cửa sổ CARLA với camera bám sau xe; không có thì server chạy
-  off-screen. Server off-screen còn lại từ lần chạy trước sẽ bị tắt và mở lại.
+- `--gui` mở một cửa sổ gộp cả lần chạy: ảnh nhìn từ sau xe, các camera của
+  xe và ảnh nhìn từ trên. Server CARLA luôn chạy off-screen (từ 2026-10-14).
 - Không có `--arm` thì xe đứng yên, phanh suốt lần chạy, dù mọi điều kiện đã
   đạt. Có `--arm` mà điều kiện chưa đạt thì controller từ chối.
 - `--device local` (mặc định) chạy inference ngay trên laptop, bằng backend ghi
@@ -503,11 +503,13 @@ simulation/run.sh --scenario show_park_next --arm --gui
 simulation/run.sh --scenario show_park_occupied --arm --gui
 ```
 
-`--gui` mở hai cửa sổ:
+`--gui` mở một cửa sổ (`CARLA cameras`, từ 2026-10-14; trước đó là hai cửa
+sổ, cửa sổ CARLA riêng):
 
-- **Cửa sổ CARLA**: thế giới mô phỏng, camera bám sau xe. Không vẽ hộp hay
-  vạch gì lên đó.
-- **Cửa sổ camera** (`CARLA cameras`): ảnh các camera của xe đặt cạnh nhau,
+- **Ảnh nhìn từ sau xe**, lớn, bên trái trên: một camera 1280x720 gắn sau xe
+  8 m, cao 4 m. Không vẽ hộp hay vạch gì lên đó.
+- **Các camera của xe** xếp một hàng bên dưới (trước, sau, trái, phải), **ảnh
+  nhìn từ trên** bên phải. Cả cửa sổ 1880x946, vừa màn 1920x1080. Ảnh
   lấy thẳng từ simulator, vẽ đè những gì thiết bị tìm thấy. Camera trước: hộp
   detection, số track, và vạch làn. Ở màn đỗ không có vạch làn: bãi không có
   làn, nên thiết bị không chạy lane model ở đó. Camera sau (chỉ có ở màn
@@ -982,8 +984,7 @@ Lần hủy là lần chạy đầu tiên sau khi server CARLA vừa mở: mô p
 dừng lại, không va. Ở tốc độ lùi mới, độ trễ gấp đôi là đủ để mất ô. Xe cũng
 dừng sâu hơn tâm ô 0,12 đến 0,16 m: lùi nhanh hơn thì phanh trễ hơn.
 
-`simulation/run.sh --view` mở riêng cửa sổ camera, server CARLA vẫn chạy không
-cửa sổ: cửa sổ CARLA làm mô phỏng chậm từ khoảng 14 xuống 8 tick/giây.
+`simulation/run.sh --view` mở cửa sổ đó mà không có ảnh nhìn từ sau xe.
 
 Trong cửa sổ `--gui`, panel nhìn từ trên vẽ thân xe ở giữa (không camera nào
 thấy nó), và các ô controller theo dõi được vẽ từ pose mà chính controller
@@ -1100,6 +1101,20 @@ tại; hai điểm đã thay đổi.
 - **Jetson chưa chạy màn đỗ.** Image trên board có trước model ô đỗ và camera
   sau. Màn đỗ gửi hai luồng ảnh; đường truyền tới board (khoảng 10 Mbit/s) đã
   không đủ cho một luồng ở chất lượng JPEG 75.
+
+### Tốc độ trên laptop và đồ họa CARLA (2026-10-14)
+
+`show_park_bev` trên laptop (RTX 5060), mỗi số một lần chạy, đều đạt: 16,7
+tick/giây không cửa sổ, 10,0 với `--gui`. Lần chạy đầu sau khi CARLA vừa khởi
+động chậm gần gấp đôi (8,7 và 9,5), nên CARLA được để chạy tiếp. Cửa sổ vẽ
+tối đa 10 lần mỗi giây: vẽ mỗi tick tốn khoảng 28 ms của tick.
+
+**Hạ đồ họa CARLA: chưa có cách dùng được.** `-quality-level=Low` làm server
+0.9.16 crash (segfault): ngay ở `reload_world()`, và sau khoảng 1100 khung
+hình khi đã bỏ bước đó. Tắt bóng đổ, hậu kỳ, hiệu ứng bằng
+`-ExecCmds=sg.ShadowQuality 0, ...` không đổi ảnh và không nhanh hơn. Muốn
+nhẹ hơn: dùng `--view` thay `--gui` (bớt camera sau xe), hoặc màn đỗ chỉ có
+camera sau (`show_park`) thay màn `_bev` (bốn camera).
 
 ## Nguồn
 

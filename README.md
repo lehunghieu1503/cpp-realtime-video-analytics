@@ -724,9 +724,9 @@ both FP16:
 | Braking for a car, a truck, a person, a cut-in | stopped 3.9 to 11.3 m short in 12 runs, no collision |
 | Data lost or controller killed | braked within the budget: 500 ms, 303 ms |
 
-Scenarios on one PC show it driving and parking. `--gui` opens the CARLA
-window and a second one with the vehicle's cameras and what the device finds
-in them. `--web` serves the device's dashboard as well
+Scenarios on one PC show it driving and parking. `--gui` opens one window:
+the vehicle seen from behind, its cameras and the view from above, with what
+the device finds in them; the CARLA server stays off-screen. `--web` serves the device's dashboard as well
 (`http://127.0.0.1:9011`); without it the device draws and encodes nothing
 for a browser. A scenario says what the vehicle may do (`overtake: true`,
 `park: true`), never when or where: it overtakes after 10 s behind a slower
