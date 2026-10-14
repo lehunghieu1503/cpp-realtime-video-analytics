@@ -189,7 +189,9 @@ class ControlCore:
         # Measured speed may sit above the command cap (a test does that on
         # purpose). Reject only a sample no car in this project reaches.
         cap = float(self.c.get("speed_cap_kmh", 60.0)) / 3.6
-        self.motion = EgoMotion(self.c.get("odometry"), max(cap, 40.0))
+        # The rear axle half a wheelbase behind the origin, as Aisle takes it
+        self.motion = EgoMotion(self.c.get("odometry"), max(cap, 40.0),
+                                -vehicle["wheelbase_m"] / 2.0)
         self.applied_reverse = False
         self.tracker = MetricTracker(self.rig, config.get("metric"))
         self.depth = protocol.LiveCache(int(self.c.get("depth_cache_entries", 45)))

@@ -985,6 +985,25 @@ Với cả hai thay đổi, không cửa sổ, 9 lần chạy, 8 đạt:
 | `show_park_next_bev`, pose thật | 0,16 m | 0,07 m | 1,2° | đạt |
 | `show_park`, pose thật | 0,15 m | 0,07 m | 1,1° | đạt |
 
+**Dead reckoning tính ở trục sau (2026-10-14).** Lần hủy `stall_lost` ở trên
+xảy ra 5 / 28 lần `show_park_bev` trong ngày, lần nào cũng lúc `align`: hai
+đầu vạch ở miệng ô đích cách nhau quá 3,6 m nên track bị xóa. Một đầu được
+thấy lại trong khúc lùi quay vào ô, lúc pose dead reckoning sai thêm 1,3 m
+trong 3 m: `ego_motion.py` coi gốc xe chạy theo hướng đầu xe, nhưng khi quay,
+gốc xe (trước trục sau nửa chiều dài cơ sở) trượt ngang, vận tốc lệch 17,6°.
+Nay nó tích phân trục sau rồi suy ra gốc xe. Phát lại `ego.jsonl` của hai lần
+chạy: sai số vị trí cuối từ 1,60 và 2,66 m còn 0,09 và 0,32 m. Sau đó, không
+cửa sổ, 6 / 6 đạt:
+
+| Lần chạy | Dọc trục | Ngang trục | Lệch hướng | Kết quả |
+|----------|----------|------------|------------|---------|
+| `show_park_bev`, 5 lần | 0,13 đến 0,19 m | 0,04 đến 0,06 m | 0,0 đến 1,3° | 5 / 5 đạt |
+| `show_park` (camera sau) | 0,08 m | 0,01 m | 2,0° | đạt |
+
+Nới cửa rộng của track (giữ tới 4,0 m) đã được thử trước và bỏ: track sống
+sót nhưng ô bị méo theo đầu vạch sai, xe lùi xiên 31° và bị phanh vì
+`rear_obstacle`.
+
 Lần hủy là lần chạy đầu tiên sau khi server CARLA vừa mở: mô phỏng chỉ đạt
 8,5 tick/giây và lệnh được áp trễ 238 ms sau tick (bình thường 117 ms). Xe
 dừng lại, không va. Ở tốc độ lùi mới, độ trễ gấp đôi là đủ để mất ô. Xe cũng

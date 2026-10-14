@@ -3,6 +3,11 @@
 The integrator keeps yaw in radians. Pose.yaw is degrees, which is what
 every consumer of a CARLA transform expects. Noise is a fixed config, not
 a filter: a wheel-radius scale and a gyro bias, plus white noise.
+
+The point integrated is the rear axle: it moves along the heading, the
+vehicle's origin does not. In a turn the origin, ahead of the axle, also
+moves sideways; taken to move along the heading, a pose that backed into a
+stall was 1.3 m out after 3 m of the turn.
 """
 
 import math
@@ -15,8 +20,13 @@ from .calibration import Pose
 class EgoMotion:
     """Pose after ARM. Before seed(), the caller still reads the message."""
 
-    def __init__(self, config, speed_cap_mps):
+    def __init__(self, config, speed_cap_mps, rear_axle_m=0.0):
+        """rear_axle_m: where the rear axle is on the vehicle's x axis, from
+        its origin (negative: behind it)."""
         config = config or {}
+        self.axle = -float(rear_axle_m)  # the origin is this far ahead of the axle
+        if not 0.0 <= self.axle <= 3.0:
+            raise ValueError("a rear axle %.2f m from the vehicle's origin" % self.axle)
         self.speed_scale = float(config.get("speed_scale", 1.0))
         self.speed_noise = float(config.get("speed_noise_mps", 0.0))
         self.yaw_bias = float(config.get("yaw_rate_bias_radps", 0.0))
@@ -36,9 +46,12 @@ class EgoMotion:
 
     def seed(self, pose, sim_ns):
         self.seeded = True
-        self.x, self.y, self.z = pose.x, pose.y, pose.z
+        self.z = pose.z
         self.roll, self.pitch = pose.roll, pose.pitch
         self.yaw_rad = math.radians(pose.yaw)
+        # The rear axle's place
+        self.x = pose.x - self.axle * math.cos(self.yaw_rad)
+        self.y = pose.y - self.axle * math.sin(self.yaw_rad)
         self.pose = pose
         self.last_ns = int(sim_ns)
         self.poses[self.last_ns] = pose
@@ -70,7 +83,9 @@ class EgoMotion:
             return "ego_speed"
         if not math.isfinite(yaw_rate) or abs(yaw_rate) > 2.0:
             return "ego_yaw_rate"
-        v = self.speed_scale * speed
+        # The speed is the origin's; the axle's is what is left of it once
+        # the origin's turning about the axle is taken out
+        v = self.speed_scale * math.sqrt(max(0.0, speed ** 2 - (yaw_rate * self.axle) ** 2))
         if self.speed_noise:
             v += float(self.rng.normal(0.0, self.speed_noise))
         if reverse:
@@ -79,11 +94,14 @@ class EgoMotion:
         if self.yaw_noise:
             w += float(self.rng.normal(0.0, self.yaw_noise))
         self.yaw_rad += w * dt
-        self.x += v * math.cos(self.yaw_rad) * dt
-        self.y += v * math.sin(self.yaw_rad) * dt
+        cos, sin = math.cos(self.yaw_rad), math.sin(self.yaw_rad)
+        self.x += v * cos * dt
+        self.y += v * sin * dt
         yaw_deg = math.degrees(self.yaw_rad)
-        self.pose = Pose(self.x, self.y, self.z, self.roll, self.pitch, yaw_deg)
-        self.velocity = (v * math.cos(self.yaw_rad), v * math.sin(self.yaw_rad), 0.0)
+        self.pose = Pose(self.x + self.axle * cos, self.y + self.axle * sin, self.z,
+                         self.roll, self.pitch, yaw_deg)
+        # The origin's: the axle's, and its turning about the axle
+        self.velocity = (v * cos - w * self.axle * sin, v * sin + w * self.axle * cos, 0.0)
         self.yaw_rate = w
         self.last_ns = sim_ns
         self.poses[sim_ns] = self.pose

@@ -54,6 +54,26 @@ class EgoMotionTest(unittest.TestCase):
             step(motion, i, 1.0, reverse=True)
         self.assertAlmostEqual(motion.pose.x, -1.0, delta=0.01)
 
+    def test_backing_round_a_quarter_circle_the_origin_ends_where_it_is(self):
+        # The rear axle backs round a 5 m circle about (0, 5) from (0, 0),
+        # facing +x, to (-5, 5) facing -y; the origin is 1.5 m ahead of it,
+        # so its own speed is more than the axle's
+        motion = EgoMotion(ZERO, speed_cap_mps=20.0, rear_axle_m=-1.5)
+        motion.seed(Pose(1.5, 0, 0), 0)
+        axle_speed, radius = 1.5, 5.0
+        rate = -axle_speed / radius
+        ticks = int(round(math.pi / 2 / abs(rate) / DT))
+        for i in range(1, ticks + 1):
+            step(motion, i, math.hypot(axle_speed, rate * 1.5), rate, reverse=True)
+        self.assertAlmostEqual(motion.pose.yaw, -90.0, delta=0.5)
+        self.assertAlmostEqual(motion.pose.x, -5.0, delta=0.05)
+        self.assertAlmostEqual(motion.pose.y, 5.0 - 1.5, delta=0.05)
+
+    def test_a_rear_axle_no_car_has_is_refused(self):
+        for metres in (1.0, -17.0):
+            with self.assertRaises(ValueError):
+                EgoMotion(ZERO, speed_cap_mps=20.0, rear_axle_m=metres)
+
     def test_rejects_a_bad_sample_without_moving(self):
         motion = EgoMotion(ZERO, speed_cap_mps=10.0)
         motion.seed(Pose(0, 0, 0), 0)
