@@ -40,6 +40,7 @@ is. Nothing in the control path reads this module; without --view it is
 never imported.
 """
 
+import math
 from collections import OrderedDict
 
 import numpy as np
@@ -82,6 +83,9 @@ class Viewer:
                                       np.uint8) for name, r in rigs.items()}
         self.park = None
         self.drawn = set()  # ids of the stalls followed that are drawn
+        self.sprite = None  # the vehicle from above, BGRA, nose up (sprite_from)
+        self.parked = None  # the same, grey: the cars in occupied stalls
+        self.history = None  # the last view from above, filled, and its pose
         self.chase = None
         self.size = None  # of the picture the window was last fitted to
         self.state = ""
@@ -288,6 +292,8 @@ class Viewer:
                     tint = panel.copy()
                     cv2.fillPoly(tint, [outline], (200, 120, 30), cv2.LINE_AA)
                     cv2.addWeighted(tint, 0.6, panel, 0.4, 0.0, panel)
+                elif not row.get("free", True) and self.parked is not None:
+                    self.paste(panel, self.parked, self.parked_in(corners, rig))
                 elif not row.get("free", True):
                     # A car, a little smaller than the stall
                     middle = corners.mean(axis=0)
@@ -320,9 +326,79 @@ class Viewer:
                          [front - 1.4, half - 0.25, 0.0]])
         body, tip = (np.round(rig.project(p)[0] * scale).astype(np.int32)
                      for p in (outline, nose))
+        if self.sprite is not None:
+            # Front left, front right, rear left
+            self.paste(panel, self.sprite, rig.project(outline[[0, 1, 3]])[0] * scale)
+            return
         cv2.fillPoly(panel, [body], (120, 70, 40), cv2.LINE_AA)
         cv2.polylines(panel, [body], True, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.fillPoly(panel, [tip], (255, 255, 255), cv2.LINE_AA)
+
+    def set_sprite(self, sprite):
+        """The vehicle from above (sprite_from): drawn in place of its
+        outline, and grey in the occupied stalls of the map."""
+        cv2 = self.cv2
+        grey = cv2.cvtColor(cv2.cvtColor(sprite[:, :, :3], cv2.COLOR_BGR2GRAY),
+                            cv2.COLOR_GRAY2BGR)
+        self.parked = np.dstack([cv2.addWeighted(grey, 0.6, grey, 0.0, 70), sprite[:, :, 3]])
+        self.sprite = sprite
+
+    def parked_in(self, corners, rig):
+        """Where the car in a stall goes: its front left, front right and
+        rear left, in pixels, nose to the stall's mouth (its first two
+        corners)."""
+        v, k = self.vehicle, 1.0 / rig.metres_per_pixel
+        middle = corners.mean(axis=0)
+        along = (corners[0] + corners[1]) / 2.0 - middle
+        along /= np.linalg.norm(along)
+        across = corners[1] - corners[0]
+        across /= np.linalg.norm(across)
+        length = (v["front_bumper_m"] - v.get("rear_bumper_m", -v["front_bumper_m"])) * k
+        half = v["width_m"] / 2.0 * k
+        front = middle + along * length / 2.0
+        return np.array([front - across * half, front + across * half,
+                         front - along * length - across * half])
+
+    def paste(self, panel, sprite, corners):
+        """sprite onto panel, its corners top left, top right and bottom left
+        at those three points; its transparent pixels leave the panel."""
+        cv2 = self.cv2
+        corners = np.float32(corners)
+        # Down to about its size first: an affine warp alone aliases
+        size = (max(2, int(round(np.linalg.norm(corners[1] - corners[0])))),
+                max(2, int(round(np.linalg.norm(corners[2] - corners[0])))))
+        small = cv2.resize(sprite, size, interpolation=cv2.INTER_AREA)
+        h, w = small.shape[:2]
+        matrix = cv2.getAffineTransform(np.float32([[0, 0], [w, 0], [0, h]]), corners)
+        x, y, bw, bh = cv2.boundingRect(np.round(np.vstack([
+            corners, [corners[1] + corners[2] - corners[0]]])).astype(np.int32))
+        x0, y0 = max(x - 1, 0), max(y - 1, 0)
+        x1, y1 = min(x + bw + 1, panel.shape[1]), min(y + bh + 1, panel.shape[0])
+        if x1 <= x0 or y1 <= y0:
+            return
+        matrix[:, 2] -= (x0, y0)
+        warped = cv2.warpAffine(small, matrix, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR,
+                                borderValue=(0, 0, 0, 0))
+        alpha = warped[:, :, 3:].astype(np.float32) / 255.0
+        roi = panel[y0:y1, x0:x1]
+        roi[:] = (roi * (1.0 - alpha) + warped[:, :, :3] * alpha).astype(np.uint8)
+
+    def fill(self, view, unseen, sim_ns):
+        """The view from above with the ground no camera sees now taken from
+        the views before it, carried by how the vehicle moved since. For the
+        person watching: the device's own view keeps those pixels black."""
+        cv2, rig = self.cv2, self.rigs["bev"]
+        pose = self.pose_at(sim_ns)
+        if pose is None:
+            return view
+        if self.history is not None:
+            before, at = self.history
+            view = view.copy()
+            view[unseen] = cv2.warpAffine(before, carried(rig, at, pose),
+                                          (rig.width, rig.height),
+                                          flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)[unseen]
+        self.history = (view, pose)
+        return view
 
     def pump(self):
         """Lets the window answer while nothing new is drawn (the run is
@@ -337,3 +413,30 @@ class Viewer:
                 self.cv2.destroyWindow(WINDOW)
             except self.cv2.error:
                 pass  # closed by its button already
+
+
+def sprite_from(bgra, tags, car_tags, fov_deg, distance_m, vehicle):
+    """The vehicle from above, BGRA, nose up, cut to its box: a camera
+    straight above its origin looking down, image top forward, gave bgra;
+    tags is the semantic camera's tag of each pixel, car_tags the vehicles'.
+    distance_m: from the camera to about half the vehicle's height."""
+    height, width = bgra.shape[:2]
+    metres = distance_m * 2.0 * math.tan(math.radians(fov_deg) / 2.0) / width
+    front, half = vehicle["front_bumper_m"], vehicle["width_m"] / 2.0
+    rear = vehicle.get("rear_bumper_m", -front)
+    top, bottom = (int(round(height / 2.0 - x / metres)) for x in (front, rear))
+    left, right = (int(round(width / 2.0 + y / metres)) for y in (-half, half))
+    sprite = np.ascontiguousarray(bgra[top:bottom, left:right]).copy()
+    sprite[:, :, 3] = np.where(np.isin(tags[top:bottom, left:right], car_tags), 255, 0)
+    return sprite
+
+
+def carried(rig, before, now):
+    """The 2x3 matrix from a pixel of the view from above at pose `now` to
+    the pixel of the same ground in the view at pose `before`."""
+    import cv2
+    pixels = np.float32([[0, 0], [rig.width - 1, 0], [0, rig.height - 1]])
+    ground, _ = rig.uv_to_ground(pixels[:, 0], pixels[:, 1])
+    points = np.concatenate([ground, np.zeros((3, 1))], axis=-1)
+    then = before.from_parent(now.to_parent(points))
+    return cv2.getAffineTransform(pixels, np.float32(rig.project(then)[0]))

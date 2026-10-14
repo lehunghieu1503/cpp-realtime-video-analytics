@@ -54,6 +54,10 @@ from .parking import Stall
 
 SOURCE = "carla-front"
 REAR_SOURCE = "carla-rear"
+# The camera that takes the vehicle from above for the viewer: this high
+# over its origin, seeing a little more than its length
+PORTRAIT_M = 30.0
+PORTRAIT_FOV_DEG = 12.0
 
 
 def mono_ns():
@@ -368,6 +372,7 @@ class Simulator:
         self.actors = []
         self.sensors = []
         self.chase_image = None  # the camera behind the vehicle, for the viewer
+        self.portrait_sensors = []  # the cameras that take the vehicle from above
         self.viewer_lock = threading.Condition()
         self.viewer_job = None  # the newest tick's images, for the viewer's thread
         self.viewer_picture = None  # made by that thread, shown by the tick
@@ -648,6 +653,62 @@ class Simulator:
             attach_to=self.ego, attachment_type=carla.AttachmentType.Rigid)
         self.sensors.append(sensor)
         sensor.listen(lambda image: setattr(self, "chase_image", image))
+
+    def spawn_portrait(self):
+        """Two cameras straight above the vehicle, for one picture each: how
+        it looks from above, and which of its pixels are a vehicle. The
+        viewer draws that in place of an outline (take_portrait)."""
+        carla = self.carla
+        self.portrait = {}  # (frame, kind) -> image
+        for kind in ("sensor.camera.rgb", "sensor.camera.semantic_segmentation"):
+            bp = self.world.get_blueprint_library().find(kind)
+            for name, value in (("image_size_x", "512"), ("image_size_y", "512"),
+                                ("fov", str(PORTRAIT_FOV_DEG)), ("sensor_tick", "0.0")):
+                bp.set_attribute(name, value)
+            # Pitch -90: looking down, the top of the image forward
+            sensor = self.world.spawn_actor(
+                bp, carla.Transform(carla.Location(z=PORTRAIT_M), carla.Rotation(pitch=-90.0)),
+                attach_to=self.ego, attachment_type=carla.AttachmentType.Rigid)
+            sensor.listen(lambda image, kind=kind: self.portrait.__setitem__(
+                (image.frame, kind), image))
+            self.portrait_sensors.append(sensor)
+
+    def take_portrait(self):
+        """The vehicle's picture to the viewer; the two cameras go."""
+        rgb = tags = None
+        # Their images come on the sensors' thread, after the tick
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            both = [frame for frame, kind in list(self.portrait)
+                    if kind == "sensor.camera.rgb"
+                    and (frame, "sensor.camera.semantic_segmentation") in self.portrait]
+            if both:
+                rgb = self.portrait[(max(both), "sensor.camera.rgb")]
+                tags = self.portrait[(max(both), "sensor.camera.semantic_segmentation")]
+                break
+            time.sleep(0.05)
+        for sensor in self.portrait_sensors:
+            sensor.stop()
+            sensor.destroy()
+        self.portrait_sensors = []
+        self.portrait = {}
+        if rgb is None:
+            print("WARNING: no picture of the vehicle from above; the viewer draws "
+                  "its outline", flush=True)
+            return
+        from .viewer import sprite_from
+        label = self.carla.CityObjectLabel
+        cars = [int(getattr(label, n)) for n in ("Car", "Truck", "Bus") if hasattr(label, n)]
+
+        def pixels(image):
+            return np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
+                image.height, image.width, 4)
+        sprite = sprite_from(pixels(rgb), pixels(tags)[:, :, 2], cars, PORTRAIT_FOV_DEG,
+                             # to about half the vehicle's height
+                             PORTRAIT_M - 0.75, self.vehicle)
+        import cv2
+        cv2.imwrite(os.path.join(self.run_dir, "vehicle-from-above.png"), sprite)
+        self.viewer.set_sprite(sprite)
 
     def on_image(self, kind, image):
         """Sensor thread. The ledger entry comes first: whatever happens to
@@ -932,9 +993,11 @@ class Simulator:
                 # What the device makes of the same frames, for the person
                 # watching; the device's own view is not sent back
                 frames = dict(park, **{SOURCE: images[0]})
-                self.viewer.frame("bev", sim_ns, self.stitcher.compose(
+                view = self.stitcher.compose(
                     [np.ascontiguousarray(frames[source][:, :, :3])
-                     for source, _, _ in bev.cameras_of(self.config)]))
+                     for source, _, _ in bev.cameras_of(self.config)])
+                self.viewer.frame("bev", sim_ns,
+                                  self.viewer.fill(view, self.stitcher.source < 0, sim_ns))
             self.viewer_picture = self.viewer.picture(tick, speed_mps, applied)
 
     def tick(self, tick):
@@ -1132,6 +1195,7 @@ class Simulator:
                     vehicle=self.vehicle)
                 if self.args.follow:
                     self.spawn_chase()
+                self.spawn_portrait()
                 threading.Thread(target=self.viewer_loop, daemon=True).start()
             self.start_ros()
             s = self.c.get("sender", {})
@@ -1147,6 +1211,8 @@ class Simulator:
             # Let the vehicle settle on its wheels before anything is measured
             for _ in range(int(self.c.get("settle_ticks", 30))):
                 self.world.tick()
+            if self.viewer:
+                self.take_portrait()
             while True:  # images of the settling ticks are not part of the run
                 try:
                     self.image_queue.get_nowait()

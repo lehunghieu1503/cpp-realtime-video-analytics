@@ -510,8 +510,17 @@ sổ, cửa sổ CARLA riêng):
 - **Bản đồ** được vẽ ra, không phải ảnh camera: các ô controller theo dõi,
   quanh xe, đầu xe hướng lên, 20 m mỗi cạnh. Ô có xe vẽ hình xe xám; ô đích
   tô xanh. Chỉ vẽ ô đã được thấy cả ô ít nhất 10 lần (như
-  `park.min_sightings`). Hai ô chồng nhau hơn 30% thì chỉ vẽ ô được thấy
-  nhiều hơn. Panel nhìn từ trên dùng cùng bộ lọc.
+  `park.min_sightings`). Hai ô chồng nhau hơn 10% thì chỉ vẽ ô được thấy gần
+  đây nhất: pose của controller trôi, một ô thấy lại xa chỗ cũ thành track
+  thứ hai. Panel nhìn từ trên dùng cùng bộ lọc.
+- **Xe thật thay khối**: lúc xe ổn định trước run, hai camera đặt thẳng trên
+  xe 30 m (RGB và semantic, 12°) chụp một ảnh rồi bị gỡ; phần semantic là xe
+  thành sprite có nền trong suốt (`<run>/vehicle-from-above.png`). Viewer dán
+  nó vào chỗ xe trên ảnh nhìn từ trên và bản đồ; xe trong ô có người đỗ trên
+  bản đồ là cùng sprite, màu xám.
+- **Vùng đen của ảnh nhìn từ trên được lấp**: chỗ không camera nào thấy lúc
+  này lấy từ ảnh trước, dời theo chuyển động thật của xe (pose của simulator).
+  Chỉ cho người xem: ảnh thiết bị dựng và đưa cho model vẫn đen ở đó.
 - Ảnh của cửa sổ được dựng ở một thread riêng: trên laptop, `show_park_bev`
   với `--gui` từ 9,9 lên 11 đến 12,4 tick/giây. Ảnh
   lấy thẳng từ simulator, vẽ đè những gì thiết bị tìm thấy. Camera trước: hộp

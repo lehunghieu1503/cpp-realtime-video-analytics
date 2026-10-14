@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import unittest
@@ -193,6 +194,64 @@ class Window(unittest.TestCase):
         self.view.frame("front", 1, np.zeros((720, 1280, 4), np.uint8))
         self.assertFalse(self.view.show(0, 0.0, {}))
         self.view.close()
+
+    def test_the_vehicle_from_above_in_place_of_its_outline(self):
+        from video_analytics_simulation.bev import BevRig
+        vehicle = {"width_m": 2.0, "front_bumper_m": 2.4, "rear_bumper_m": -2.4}
+        # A camera 29.25 m above, 12 degrees: 0.012 m a pixel; a red vehicle
+        # tagged 14 under it, nose up, and a road around it
+        metres = 29.25 * 2.0 * math.tan(math.radians(6.0)) / 512
+        picture = np.full((512, 512, 4), 128, np.uint8)
+        tags = np.full((512, 512), 1, np.uint8)
+        rows = slice(int(256 - 2.4 / metres) + 4, int(256 + 2.4 / metres) - 4)
+        cols = slice(int(256 - 1.0 / metres) + 4, int(256 + 1.0 / metres) - 4)
+        picture[rows, cols] = (0, 0, 255, 255)
+        tags[rows, cols] = 14
+        sprite = viewer.sprite_from(picture, tags, [14], 12.0, 29.25, vehicle)
+        self.assertAlmostEqual(sprite.shape[0], 4.8 / metres, delta=2)
+        self.assertAlmostEqual(sprite.shape[1], 2.0 / metres, delta=2)
+        self.assertEqual(sprite[0, 0, 3], 0)  # the road is not part of it
+        self.assertEqual(tuple(sprite[sprite.shape[0] // 2, sprite.shape[1] // 2]),
+                         (0, 0, 255, 255))
+
+        view = viewer.Viewer({"front": FRONT, "rear": REAR,
+                              "bev": BevRig.from_config(CONFIG["bev"])},
+                             lambda ns: None, vehicle=vehicle)
+        view.set_sprite(sprite)
+        panel = view.with_vehicle("bev", np.zeros((400, 400, 3), np.uint8))
+        self.assertEqual(tuple(panel[200, 200]), (0, 0, 255))
+        self.assertEqual(tuple(panel[200, 150]), (0, 0, 0))  # beside it, nothing drawn
+        # In the map, an occupied stall holds the same car, grey
+        stall = Stall(self.pose.x - 5.0, self.pose.y, 0.0, 5.0, 2.8)
+        view.status({"park": {"phase": "search", "target": None,
+                              "pose": {"x": self.pose.x, "y": self.pose.y, "z": 0.0,
+                                       "roll": 0.0, "pitch": 0.0, "yaw": self.pose.yaw},
+                              "stalls": [dict(stall.as_dict(), id=1, free=False, corners=[
+                                  [float(x), float(y)] for x, y, _ in stall.corners()])]}})
+        drawn = view.map()
+        grey = (drawn[:, :, 0] == drawn[:, :, 2]) & (drawn[:, :, 0] > 80) \
+            & (drawn[:, :, 0] < 200)
+        self.assertGreater(int(grey.sum()), 3000)
+        self.assertEqual(tuple(drawn[300, 300]), (0, 0, 255))
+
+    def test_ground_no_camera_sees_now_is_the_ground_seen_before(self):
+        from video_analytics_simulation.bev import BevRig
+        rig = BevRig.from_config(CONFIG["bev"])
+        poses = {1: Pose(0.0, 0.0, 0.0), 2: Pose(1.0, 0.0, 0.0)}  # 1 m forward
+        view = viewer.Viewer({"front": FRONT, "bev": rig}, poses.get)
+        np.testing.assert_allclose(viewer.carried(rig, poses[1], poses[1]),
+                                   [[1, 0, 0], [0, 1, 0]], atol=1e-6)
+        first = np.zeros((800, 800, 3), np.uint8)
+        first[300:310, 395:405] = 255  # a patch 2.5 m ahead of the vehicle
+        seen_all = np.zeros((800, 800), bool)
+        view.fill(first, seen_all, 1)
+        filled = view.fill(np.zeros_like(first), ~seen_all, 2)
+        # 1 m on, the patch is 1.5 m ahead: 40 pixels further down
+        self.assertTrue((filled[341:349, 396:404] == 255).all())
+        self.assertEqual(int(filled[300:338].sum()), 0)
+        # What a camera sees now is kept as it is
+        now = np.full_like(first, 7)
+        self.assertTrue((view.fill(now, seen_all, 2) == 7).all())
 
 
 if __name__ == "__main__":
