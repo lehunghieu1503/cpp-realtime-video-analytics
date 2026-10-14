@@ -33,6 +33,11 @@
 #   --run-dir DIR      default .cache/carla/<run id>; must not exist
 #   --local-backend B  backend of a local device instead of the config's
 #                      (cpu is too slow to keep up with 30 frames a second)
+#   --fp16             every model of the config as its FP16 file,
+#                      models/<name>_fp16.onnx, made with
+#                      scripts/quantize-fp16.py. TensorRT 11 takes the
+#                      precision from the file: the config's `precision: fp16`
+#                      alone leaves the models FP32 there.
 # Environment:
 #   CARLA_ROOT   CARLA 0.9.16 (default ~/opt/carla-0.9.16); its server is
 #                started off-screen when nothing listens on port 2000, and
@@ -51,7 +56,7 @@ set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
 TICKS=0 CONFIG=simulation/config/carla.yaml SCENARIOS=simulation/config/carla-scenarios.yaml
-RUN_DIR="" LOCAL_BACKEND="" GUI="" WEB=""
+RUN_DIR="" LOCAL_BACKEND="" GUI="" WEB="" FP16=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="$2"; shift 2 ;;
@@ -67,11 +72,12 @@ while [ $# -gt 0 ]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    --fp16) FP16=1; shift ;;
+    *) sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -145,6 +151,13 @@ RUN_DIR="${RUN_DIR:-.cache/carla/$RUN_ID}"
 [ -e "$RUN_DIR" ] && { echo "$RUN_DIR exists; a run directory is never reused" >&2; exit 1; }
 mkdir -p "$RUN_DIR"
 echo "== Run $RUN_ID in $RUN_DIR"
+if [ -n "$FP16" ]; then
+  # The config the whole run uses, kept with the run
+  sed -E 's#^( *model: .*)\.onnx$#\1_fp16.onnx#' "$CONFIG" >"$RUN_DIR/config.yaml"
+  # The simulator reads the map's stalls from beside the config
+  cp "$(dirname "$CONFIG")/carla-stalls.yaml" "$RUN_DIR/"
+  CONFIG=$RUN_DIR/config.yaml
+fi
 
 PIDS=()
 REMOTE_STARTED=0
@@ -224,6 +237,13 @@ else:
 config["dashboard"] = bool(web)
 yaml.safe_dump(config, sys.stdout, sort_keys=False)
 PY
+
+# Only the models this scenario loads have to exist
+if [ -n "$FP16" ]; then
+  for model in $(sed -n 's/^ *model: *//p' "$RUN_DIR/device.yaml"); do
+    [ -f "$model" ] || { echo "Missing $model; make it with: scripts/quantize-fp16.py ${model%_fp16.onnx}.onnx -o $model" >&2; exit 1; }
+  done
+fi
 
 echo "== Starting the controller and the bridge"
 "$CARLA_PYTHON" -m video_analytics_simulation.controller --config "$CONFIG" \
