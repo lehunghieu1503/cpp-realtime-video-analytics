@@ -98,11 +98,7 @@ kiểm tra lại phần phiên bản và cấu hình máy.
 
 ## 5. Autoware đặt ở đâu
 
-Autoware sẽ thay pipeline của dự án chứ không kiểm thử nó. Thứ tự hợp lý:
-
-1. Chạy CARLA với pipeline hiện tại và một bộ điều khiển lái đơn giản.
-2. Chỉ đưa Autoware vào sau, nếu muốn chứng minh tích hợp được với một stack
-   công nghiệp.
+Autoware sẽ thay pipeline của dự án chứ không kiểm thử nó. Hướng đó không còn là bước tiếp. Việc tiếp theo là vòng lái bỏ depth và pose hoàn hảo, trong `plans/261013-1025-honest-camera-control/`.
 
 ## 6. Cấu hình máy
 
@@ -760,6 +756,8 @@ km/h thì trượt. Chuyển làn xong, vạch ngoài của làn mới bị đ�
 làn ra hơn 4,6 m năm kết quả liên tiếp và xe dừng. Với lane model train trên
 ảnh CARLA thì không còn, nên đoạn bám xe và chuyển làn giờ ở 30 km/h.
 
+`show_drive_right` thêm một xe không physics ở làn trái để lần vượt phải sang phải. Cửa đạt là `lane_change: done` và `lane_id` của ego nhỏ hơn lúc xuất phát (OpenDRIVE: làn bên phải có id nhỏ hơn), không phải chữ phía trong debug. `lane_curve`, `lane_night` (`ClearNight`) và `lane_rain` (`HardRainNoon`) chỉ đòi `lane_report: safe`: đi hết trên làn hợp lệ, hoặc khóa dừng vì mất làn, hoặc không ARM và giữ phanh. Chưa chạy lại ba scenario đó trên CARLA trong phiên cài dead reckoning.
+
 ### Màn đỗ: `show_park`
 
 Làm lại ngày 2026-10-13. Bản đầu (2026-10-12) lùi vào một ô có toạ độ ghi sẵn
@@ -1060,13 +1058,14 @@ tại; hai điểm đã thay đổi.
 - **Model ô đỗ chỉ biết một bãi.** Ảnh train và ảnh lúc chạy là cùng bãi đỗ
   của Town05, cùng kiểu vạch sơn. Các số đo cho biết model thuộc bãi này tới
   đâu; chúng không nói gì về bãi khác, vạch khác, hay ảnh thật.
-- **Vị trí của xe lấy từ simulator, không có sai số.** Giữa hai frame, mọi
-  thứ đã thấy được giữ ở toạ độ thế giới bằng pose mà CARLA báo. Xe thật không
-  có pose như vậy; phần này chưa chứng minh gì về định vị.
-- **Lúc lùi không có gì phát hiện vật cản phía sau.** YOLO11s vẫn chạy trên
-  ảnh camera sau, nhưng camera sau không có depth nên controller không dùng
-  các hộp đó. Một người đi vào sau xe lúc lùi sẽ không làm xe dừng; chỉ một xe
-  hiện ra trong chính ô đang lùi vào mới hủy lần đỗ.
+- **Sau ARM, controller tích phân tốc độ và vận tốc góc.** Pose thật của
+  CARLA vẫn nằm trong `truth.jsonl` để chấm. Message ego vẫn có pose cho lúc
+  xe chưa ARM. Nhiễu cố định nằm ở `control.odometry`. Evaluator chỉ báo độ
+  trôi, không dùng nó để kết luận đỗ hay làn.
+- **Lúc lùi, hộp hazard của camera sau trong hành lang sau cản làm xe phanh.**
+  Không có depth. Cạnh gần là điểm sát cản hơn, không phải góc xa. Người đứng
+  bên hông cung quay lúc `align` vẫn có thể không bị thấy. Xe trong ô bên,
+  tâm đáy ngoài hành lang, không hủy đỗ.
 - **Phiếu trống/có xe của ô ở xa không đáng tin.** Trong một lần chạy, ô có xe
   pickup cách hai ô nhận 53 % phiếu `empty` (trong 174 phiếu) lúc xe đang lùi
   vào ô của mình.
