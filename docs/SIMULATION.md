@@ -324,7 +324,7 @@ simulation/run.sh --scenario brake_person --arm \
 ```
 
 - `--gui` mở một cửa sổ gộp cả lần chạy: ảnh nhìn từ sau xe, các camera của
-  xe và ảnh nhìn từ trên. Server CARLA luôn chạy off-screen (từ 2026-10-14).
+  xe, ảnh nhìn từ trên và bản đồ ô đỗ. Server CARLA luôn chạy off-screen (từ 2026-10-14).
 - Không có `--arm` thì xe đứng yên, phanh suốt lần chạy, dù mọi điều kiện đã
   đạt. Có `--arm` mà điều kiện chưa đạt thì controller từ chối.
 - `--device local` (mặc định) chạy inference ngay trên laptop, bằng backend ghi
@@ -504,8 +504,16 @@ sổ, cửa sổ CARLA riêng):
 
 - **Ảnh nhìn từ sau xe**, lớn, bên trái trên: một camera 1280x720 gắn sau xe
   8 m, cao 4 m. Không vẽ hộp hay vạch gì lên đó.
-- **Các camera của xe** xếp một hàng bên dưới (trước, sau, trái, phải), **ảnh
-  nhìn từ trên** bên phải. Cả cửa sổ 1880x946, vừa màn 1920x1080. Ảnh
+- **Các camera của xe** xếp một hàng bên dưới (trước, sau, trái, phải). Bên
+  phải là **ảnh nhìn từ trên** và, ở màn đỗ, **bản đồ** bên dưới nó, mỗi panel
+  450x450. Cả cửa sổ 1730x946, vừa màn 1920x1080.
+- **Bản đồ** được vẽ ra, không phải ảnh camera: các ô controller theo dõi,
+  quanh xe, đầu xe hướng lên, 20 m mỗi cạnh. Ô có xe vẽ hình xe xám; ô đích
+  tô xanh. Chỉ vẽ ô đã được thấy cả ô ít nhất 10 lần (như
+  `park.min_sightings`). Hai ô chồng nhau hơn 30% thì chỉ vẽ ô được thấy
+  nhiều hơn. Panel nhìn từ trên dùng cùng bộ lọc.
+- Ảnh của cửa sổ được dựng ở một thread riêng: trên laptop, `show_park_bev`
+  với `--gui` từ 9,9 lên 11 đến 12,4 tick/giây. Ảnh
   lấy thẳng từ simulator, vẽ đè những gì thiết bị tìm thấy. Camera trước: hộp
   detection, số track, và vạch làn. Ở màn đỗ không có vạch làn: bãi không có
   làn, nên thiết bị không chạy lane model ở đó. Camera sau (chỉ có ở màn

@@ -11,14 +11,21 @@ own images, with what the device found in them drawn on top.
     +--------------------------------+----------------+
     | the vehicle from behind (chase)|  bird's-eye    |
     | or, without it, front camera   |  view          |
+    |                                +----------------+
+    |                                |  map           |
     +--------+--------+--------+-----+                |
     | front  | rear   | left   | right|               |
     +--------+--------+--------+-----+----------------+
     | two lines of state                              |
 
-Only the panels the run has are there: rear, left, right and the view from
-above come with the scenarios that park, the chase image with --follow. The
-window fits a 1920x1080 screen and can be resized.
+Only the panels the run has are there: rear, left, right and the map come
+with the scenarios that park, the view from above with those that make one,
+the chase image with --follow. The window fits a 1920x1080 screen and can be
+resized.
+
+The map is drawn, not seen: the stalls the controller follows, where it
+believes they are around the vehicle, forward up. Occupied ones hold a car,
+the one it parks in is blue.
 
 The bird's-eye view (the `bev` section of the configuration) is the view from
 above of the cameras around the vehicle, forward up; the stalls and the ends
@@ -37,11 +44,22 @@ from collections import OrderedDict
 
 import numpy as np
 
+from .bev import BevRig
 from .calibration import Pose
 
 WINDOW = "CARLA cameras"
 KEPT = 45  # images a late result can still be joined with
-SIDE = 600  # pixels a side of the view from above
+SIDE = 600  # pixels a side of the view from above, and of the map
+MAP_M = 20.0  # metres a side of the map
+# Stalls the controller follows but has seen whole fewer times than this are
+# not drawn: guesses from the ends of dividers, often askew beside parked
+# cars. shortcut: the value of park.min_sightings in carla.yaml, read it from
+# there if that changes
+MIN_HITS = 10
+# Of two stalls that cover each other more than this share of the smaller,
+# only the one seen more often is drawn: the controller may follow one stall
+# twice, or half a stall apart beside a parked car
+MAX_OVERLAP = 0.3
 
 
 class Viewer:
@@ -60,10 +78,12 @@ class Viewer:
         self.panels = {name: np.zeros((int(r.height * scale), int(r.width * scale), 3),
                                       np.uint8) for name, r in rigs.items()}
         self.park = None
+        self.drawn = set()  # ids of the stalls followed that are drawn
         self.chase = None
         self.size = None  # of the picture the window was last fitted to
         self.state = ""
         self.closed = False
+        self.map_rig = BevRig(SIDE, SIDE, MAP_M / SIDE) if "rear" in rigs else None
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
 
     def frame(self, name, sim_ns, bgra):
@@ -97,6 +117,7 @@ class Viewer:
         if status.get("stop_reason"):
             self.state += " " + status["stop_reason"]
         self.park = status.get("park")
+        self.drawn = self.stalls_drawn(self.park) if self.park else set()
 
     def draw(self, name, panel, envelope, sim_ns):
         cv2, k = self.cv2, self.scale
@@ -143,6 +164,8 @@ class Viewer:
         if pose is None:
             return
         for row in self.park.get("stalls", []):
+            if not self.shown(row):
+                continue
             world = np.array([[x, y, pose.z + rig.ground_z] for x, y in row["corners"]])
             uv, depth = rig.project(pose.from_parent(world))
             if (depth < 0.3).any():
@@ -164,7 +187,9 @@ class Viewer:
         thread than the one that shows it."""
         cv2 = self.cv2
         panels = {name: self.with_vehicle(name, panel) for name, panel in self.panels.items()}
-        above = panels.pop("bev", None)
+        right = [panels.pop("bev")] if "bev" in panels else []
+        if self.map_rig:
+            right.append(self.map())
         big = self.chase if self.chase is not None else panels.pop("front")
         width = big.shape[1]
         column = [big]
@@ -175,10 +200,12 @@ class Viewer:
             row = np.hstack(small)
             column.append(np.pad(row, ((0, 0), (0, width - row.shape[1]), (0, 0))))
         view = np.vstack(column)
-        if above is not None:
-            side = min(SIDE, view.shape[0])
-            above = cv2.resize(above, (side, side), interpolation=cv2.INTER_LINEAR)
-            view = np.hstack([view, np.pad(above, ((0, view.shape[0] - side), (0, 0), (0, 0)))])
+        if right:
+            side = min(SIDE, view.shape[0] // len(right))
+            column = np.vstack([cv2.resize(p, (side, side), interpolation=cv2.INTER_AREA)
+                                for p in right])
+            view = np.hstack([view, np.pad(column, ((0, view.shape[0] - column.shape[0]),
+                                                    (0, 0), (0, 0)))])
         widest = view.shape[1]
         bar = np.zeros((46, widest, 3), np.uint8)
         gear = "R" if applied.get("reverse") else "D"
@@ -216,25 +243,80 @@ class Viewer:
             self.close()
         return not self.closed
 
+    def shown(self, row):
+        """Whether a stall the controller follows is drawn."""
+        return row["id"] in self.drawn
+
+    def stalls_drawn(self, park):
+        """Ids of the stalls followed worth drawing: seen often enough, and
+        none covering one seen more often. The one it parks in always."""
+        cv2, target = self.cv2, park.get("target")
+        rows = sorted((row for row in park.get("stalls", [])
+                       if row.get("hits", MIN_HITS) >= MIN_HITS or row["id"] == target),
+                      key=lambda row: (row["id"] != target, -row.get("hits", 0)))
+        kept = []
+        for row in rows:
+            corners = np.array(row["corners"], np.float32)
+            area = cv2.contourArea(corners)
+            if all(cv2.intersectConvexConvex(corners, other)[0]
+                   <= MAX_OVERLAP * min(area, cv2.contourArea(other))
+                   for _, other in kept):
+                kept.append((row["id"], corners))
+        return {key for key, _ in kept}
+
+    def map(self):
+        """The stalls the controller follows, around the vehicle, forward up."""
+        cv2, rig = self.cv2, self.map_rig
+        panel = np.full((rig.height, rig.width, 3), (60, 52, 46), np.uint8)
+        park = self.park or {}
+        if park.get("pose"):
+            # Its own pose, of the frame the corners are in
+            pose = Pose.from_dict(park["pose"])
+            for row in park.get("stalls", []):
+                if not self.shown(row):
+                    continue
+                world = np.array([[x, y, pose.z] for x, y in row["corners"]])
+                corners = rig.project(pose.from_parent(world))[0]
+                outline = np.round(corners).astype(np.int32)
+                if row["id"] == park.get("target"):
+                    tint = panel.copy()
+                    cv2.fillPoly(tint, [outline], (200, 120, 30), cv2.LINE_AA)
+                    cv2.addWeighted(tint, 0.6, panel, 0.4, 0.0, panel)
+                elif not row.get("free", True):
+                    # A car, a little smaller than the stall
+                    middle = corners.mean(axis=0)
+                    car = np.round(middle + 0.7 * (corners - middle)).astype(np.int32)
+                    cv2.fillPoly(panel, [car], (170, 170, 170), cv2.LINE_AA)
+                    cv2.polylines(panel, [car], True, (90, 90, 90), 2, cv2.LINE_AA)
+                cv2.polylines(panel, [outline], True, (235, 235, 235), 2, cv2.LINE_AA)
+        if self.vehicle:
+            self.draw_vehicle(panel, rig, 1.0)
+        return panel
+
     def with_vehicle(self, name, panel):
         """A view from above with the vehicle drawn where it is: no camera
         sees it, and the ground under it is black."""
-        rig, v = self.rigs[name], self.vehicle
-        if not v or not hasattr(rig, "metres_per_pixel"):
+        rig = self.rigs[name]
+        if not self.vehicle or not hasattr(rig, "metres_per_pixel"):
             return panel
-        cv2, panel = self.cv2, panel.copy()
+        panel = panel.copy()
+        self.draw_vehicle(panel, rig, self.scale)
+        return panel
+
+    def draw_vehicle(self, panel, rig, scale):
+        """The vehicle seen from above, nose up, where rig puts its origin."""
+        cv2, v = self.cv2, self.vehicle
         front, half = v["front_bumper_m"], v["width_m"] / 2.0
         rear = v.get("rear_bumper_m", -front)
         outline = np.array([[front, -half, 0.0], [front, half, 0.0],
                             [rear, half, 0.0], [rear, -half, 0.0]])
         nose = np.array([[front - 0.3, 0.0, 0.0], [front - 1.4, -half + 0.25, 0.0],
                          [front - 1.4, half - 0.25, 0.0]])
-        body, tip = (np.round(rig.project(p)[0] * self.scale).astype(np.int32)
+        body, tip = (np.round(rig.project(p)[0] * scale).astype(np.int32)
                      for p in (outline, nose))
         cv2.fillPoly(panel, [body], (120, 70, 40), cv2.LINE_AA)
         cv2.polylines(panel, [body], True, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.fillPoly(panel, [tip], (255, 255, 255), cv2.LINE_AA)
-        return panel
 
     def pump(self):
         """Lets the window answer while nothing new is drawn (the run is

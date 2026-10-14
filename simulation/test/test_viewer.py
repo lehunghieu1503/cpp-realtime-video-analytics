@@ -48,10 +48,11 @@ class Window(unittest.TestCase):
         view.frame("rear", 100, grey)
         self.assertTrue(view.show(0, 0.0, {}))
         raw = self.shown[-1]
-        # The front camera 640 wide, the rear a quarter of that under it, the text
-        self.assertEqual(raw.shape, (360 + 90 + 46, 640, 3))
+        # The front camera 640 wide, the rear a quarter of that under it, the
+        # map right of them, the text
+        self.assertEqual(raw.shape, (360 + 90 + 46, 640 + 450, 3))
         self.assertTrue((raw[:450, :160] == 90).all())  # no result yet: the images as they are
-        self.assertEqual(int(raw[360:450, 160:].sum()), 0)
+        self.assertEqual(int(raw[360:450, 160:640].sum()), 0)
 
         stall = Stall(0.0, 2.8, 0.0, 5.0, 2.8)
         found = {"simulation": {"sim_ns": 100}, "detections": [],
@@ -107,8 +108,9 @@ class Window(unittest.TestCase):
                             "stall_points": fixtures.stall_points([stall], self.pose, above)})
         self.assertTrue(view.show(3, 0.0, {}))
         shown = self.shown[-1]
-        # The cameras 640 wide, the view as high as they are right of them, the text
-        self.assertEqual(shown.shape, (360 + 90 + 46, 640 + 450, 3))
+        # The cameras 640 wide, the view and the map under it as high as they
+        # are right of them, the text
+        self.assertEqual(shown.shape, (360 + 90 + 46, 640 + 225, 3))
         self.assertGreater((shown[:450, 640:] == (120, 70, 40)).all(axis=2).sum(), 100)
         panel = view.with_vehicle("bev", view.panels["bev"])
         # Its ends as crosses, and the stall the controller takes in yellow,
@@ -120,6 +122,28 @@ class Window(unittest.TestCase):
         # The vehicle itself, in the middle, nose up
         self.assertTrue((panel[200, 200] == (120, 70, 40)).all())
         self.assertTrue((panel[165, 200] == (255, 255, 255)).all())
+        # The map: the stall it parks in blue, left of the vehicle in its middle
+        drawn = view.map()
+        blue = np.argwhere((np.abs(drawn.astype(int) - (144, 93, 36)) < 4).all(axis=2))
+        self.assertGreater(len(blue), 1000)
+        self.assertLess(blue[:, 1].max(), 300)
+        self.assertTrue((drawn[300, 300] == (120, 70, 40)).all())
+        # A stall never seen whole is not on it
+        park = dict(view.park, target=None)
+        view.status({"park": dict(park, stalls=[dict(park["stalls"][0], id=5, hits=0)])})
+        self.assertEqual(len(np.argwhere((np.abs(view.map().astype(int) - (144, 93, 36)) < 4)
+                                         .all(axis=2))), 0)
+        self.assertEqual(int((view.map() == 235).all(axis=2).sum()), 0)
+        # Of one stall followed twice, the one seen more often only
+        shifted = Stall(stall.centre[0] + 0.5, stall.centre[1], 0.0, 5.0, 2.8)
+        rows = [dict(s.as_dict(), id=key, hits=hits, corners=[
+            [float(x), float(y)] for x, y, _ in s.corners()])
+            for s, key, hits in ((stall, 6, 20), (shifted, 7, 50))]
+        view.status({"park": dict(park, stalls=rows)})
+        self.assertEqual(view.drawn, {7})
+        rows[1]["corners"] = [[x + 10.0, y] for x, y in rows[1]["corners"]]
+        view.status({"park": dict(park, stalls=rows)})
+        self.assertEqual(view.drawn, {6, 7})
 
     def test_with_the_image_from_behind_it_is_big_and_every_camera_under_it(self):
         from video_analytics_simulation.bev import BevRig
@@ -129,9 +153,9 @@ class Window(unittest.TestCase):
         view.chase_frame(np.full((720, 1280, 4), 200, np.uint8))
         view.show(1, 0.0, {})
         shown = self.shown[-1]
-        # 1280x720 behind, four cameras of 320x180 under it, the view 600 wide:
-        # a 1920x1080 screen holds it
-        self.assertEqual(shown.shape, (720 + 180 + 46, 1280 + 600, 3))
+        # 1280x720 behind, four cameras of 320x180 under it, the view and the
+        # map 450 wide: a 1920x1080 screen holds it
+        self.assertEqual(shown.shape, (720 + 180 + 46, 1280 + 450, 3))
         self.assertTrue((shown[:720, :1280] == 200).all())
 
     def test_a_result_of_a_frame_no_longer_kept_changes_nothing(self):
@@ -140,7 +164,7 @@ class Window(unittest.TestCase):
         view.result("front", {"simulation": {"sim_ns": 999}, "detections": [
             {"class": "car", "confidence": 0.9, "bbox": {"x": 0, "y": 0, "w": 500, "h": 300}}]})
         view.show(0, 0.0, {})
-        self.assertEqual(int(self.shown[-1][:360].sum()), 0)
+        self.assertEqual(int(self.shown[-1][:360, :640].sum()), 0)
         for sim_ns in range(viewer.KEPT + 5):
             view.frame("front", sim_ns, np.zeros((720, 1280, 4), np.uint8))
         self.assertEqual(len(view.images["front"]), viewer.KEPT)
