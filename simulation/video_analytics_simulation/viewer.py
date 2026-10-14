@@ -1,4 +1,4 @@
-"""A window with the run's cameras, for a person watching: the simulator's
+"""One window with the whole run, for a person watching: the simulator's
 own images, with what the device found in them drawn on top.
 
     front camera                      boxes, track ids, lane lines
@@ -8,12 +8,21 @@ own images, with what the device found in them drawn on top.
                                       in yellow the one it parks in
     two lines: tick, state, phase, speed; what is applied to the vehicle
 
-One under the other: side by side they were wider than half a screen. The
-window can be resized.
+    +--------------------------------+----------------+
+    | the vehicle from behind (chase)|  bird's-eye    |
+    | or, without it, front camera   |  view          |
+    +--------+--------+--------+-----+                |
+    | front  | rear   | left   | right|               |
+    +--------+--------+--------+-----+----------------+
+    | two lines of state                              |
 
-With a bird's-eye view (the `bev` section of the configuration) there is a
-third panel, lowest, the view from above of the cameras around the vehicle, forward
-up; the stalls and the ends are then found in it and drawn on it.
+Only the panels the run has are there: rear, left, right and the view from
+above come with the scenarios that park, the chase image with --follow. The
+window fits a 1920x1080 screen and can be resized.
+
+The bird's-eye view (the `bev` section of the configuration) is the view from
+above of the cameras around the vehicle, forward up; the stalls and the ends
+are then found in it and drawn on it.
 
 In a scenario that parks there are no lane lines: the device does not run
 the lane model there (simulation/run.sh leaves it out of its config).
@@ -32,6 +41,7 @@ from .calibration import Pose
 
 WINDOW = "CARLA cameras"
 KEPT = 45  # images a late result can still be joined with
+SIDE = 600  # pixels a side of the view from above
 
 
 class Viewer:
@@ -50,6 +60,8 @@ class Viewer:
         self.panels = {name: np.zeros((int(r.height * scale), int(r.width * scale), 3),
                                       np.uint8) for name, r in rigs.items()}
         self.park = None
+        self.chase = None
+        self.size = None  # of the picture the window was last fitted to
         self.state = ""
         self.closed = False
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
@@ -64,6 +76,10 @@ class Viewer:
             images.popitem(last=False)
         if self.results[name] is None:
             self.panels[name] = small
+
+    def chase_frame(self, bgra):
+        """The image of the camera behind the vehicle; nothing is drawn on it."""
+        self.chase = bgra[:, :, :3]
 
     def result(self, name, envelope):
         """The device's result for one frame of this camera."""
@@ -142,11 +158,23 @@ class Viewer:
         if self.closed:
             return False
         cv2 = self.cv2
-        # The panels are not of one width: a narrower one has black beside it
-        widest = max(panel.shape[1] for panel in self.panels.values())
-        column = np.vstack([np.pad(self.with_vehicle(name, panel),
-                                   ((0, 0), (0, widest - panel.shape[1]), (0, 0)))
-                            for name, panel in self.panels.items()])
+        panels = {name: self.with_vehicle(name, panel) for name, panel in self.panels.items()}
+        above = panels.pop("bev", None)
+        big = self.chase if self.chase is not None else panels.pop("front")
+        width = big.shape[1]
+        column = [big]
+        if panels:
+            # Four to a row whatever their number: a camera keeps one size
+            small = [cv2.resize(p, (width // 4, p.shape[0] * (width // 4) // p.shape[1]),
+                                interpolation=cv2.INTER_AREA) for p in panels.values()]
+            row = np.hstack(small)
+            column.append(np.pad(row, ((0, 0), (0, width - row.shape[1]), (0, 0))))
+        view = np.vstack(column)
+        if above is not None:
+            side = min(SIDE, view.shape[0])
+            above = cv2.resize(above, (side, side), interpolation=cv2.INTER_LINEAR)
+            view = np.hstack([view, np.pad(above, ((0, view.shape[0] - side), (0, 0), (0, 0)))])
+        widest = view.shape[1]
         bar = np.zeros((46, widest, 3), np.uint8)
         gear = "R" if applied.get("reverse") else "D"
         lines = ("tick %d  %s  %s%4.1f km/h  %s" % (
@@ -158,9 +186,17 @@ class Viewer:
         for i, text in enumerate(lines):
             cv2.putText(bar, text, (8, 18 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.imshow(WINDOW, np.vstack([column, bar]))
+        picture = np.vstack([view, bar])
+        if self.size != picture.shape[:2]:
+            # A window that may be resized opens small, whatever it shows
+            self.size = picture.shape[:2]
+            cv2.resizeWindow(WINDOW, picture.shape[1], picture.shape[0])
+        cv2.imshow(WINDOW, picture)
+        # Closed by its button: Qt says not visible; GTK, which answers -1 for
+        # visible whatever the window, no longer has it (-1 for any property)
         if cv2.waitKey(1) & 0xFF == ord("q") \
-                or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) == 0 \
+                or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_AUTOSIZE) < 0:
             self.close()
         return not self.closed
 

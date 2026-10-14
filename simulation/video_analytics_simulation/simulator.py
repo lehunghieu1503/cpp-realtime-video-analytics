@@ -367,6 +367,8 @@ class Simulator:
         self.stop_requested = False
         self.actors = []
         self.sensors = []
+        self.chase_image = None  # the camera behind the vehicle, for the viewer
+        self.viewer_due = 0.0  # monotonic time of the viewer's next picture
         self.scripted = []
         self.original_settings = None
         self.world = None
@@ -442,6 +444,7 @@ class Simulator:
         if self.viewer:
             # Only to draw them: the simulator makes nothing of a result
             for name, source in (("front", SOURCE), ("rear", REAR_SOURCE),
+                                 ("left", "carla-left"), ("right", "carla-right"),
                                  ("bev", (self.view or {}).get("id", ""))):
                 if name in self.viewer.rigs:
                     self.node.create_subscription(
@@ -629,6 +632,20 @@ class Simulator:
                      for o in self.world.get_environment_objects(getattr(label, name))]
         return [dict(spec, occupied=any(Stall.from_dict(spec).contains(car) for car in cars))
                 for spec in park["stalls"]]
+
+    def spawn_chase(self):
+        """A camera 8 m behind and 4 m above the vehicle, looking at it: the
+        big panel of the viewer, where the CARLA window was."""
+        carla = self.carla
+        bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
+        for name, value in (("image_size_x", "1280"), ("image_size_y", "720"),
+                            ("fov", "90"), ("sensor_tick", "0.0")):
+            bp.set_attribute(name, value)
+        sensor = self.world.spawn_actor(
+            bp, carla.Transform(carla.Location(x=-8.0, z=4.0), carla.Rotation(pitch=-15.0)),
+            attach_to=self.ego, attachment_type=carla.AttachmentType.Rigid)
+        self.sensors.append(sensor)
+        sensor.listen(lambda image: setattr(self, "chase_image", image))
 
     def on_image(self, kind, image):
         """Sensor thread. The ledger entry comes first: whatever happens to
@@ -973,11 +990,19 @@ class Simulator:
         images = self.collect_images(frame)
         park = self.collect_park(frame) if self.park_cameras else {}
         self.stats["wait_images_ms"] += (time.monotonic() - wait) * 1e3
-        if self.viewer:
+        if self.viewer and time.monotonic() >= self.viewer_due:
+            # 10 pictures a second are enough to watch; one each tick took a
+            # third of the tick
+            self.viewer_due = time.monotonic() + 0.1
             if images is not None:
                 self.viewer.frame("front", images[2], images[0])
-            if REAR_SOURCE in park:
-                self.viewer.frame("rear", sim_ns, park[REAR_SOURCE])
+            for name in ("rear", "left", "right"):
+                if "carla-" + name in park:
+                    self.viewer.frame(name, sim_ns, park["carla-" + name])
+            if self.chase_image is not None:
+                image = self.chase_image
+                self.viewer.chase_frame(np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
+                    image.height, image.width, 4))
             if self.stitcher and len(park) == len(self.park_cameras) and images is not None:
                 # What the device makes of the same frames, for the person
                 # watching; the device's own view is not sent back
@@ -1076,6 +1101,9 @@ class Simulator:
                 rigs = {"front": self.rig}
                 if self.rear_rig:
                     rigs["rear"] = self.rear_rig
+                for name in ("left", "right"):
+                    if "carla-" + name in self.park_cameras:
+                        rigs[name] = self.park_cameras["carla-" + name][0]
                 if self.view:
                     rigs["bev"] = bev.BevRig.from_config(self.view)
                     self.stitcher = bev.Stitcher(
@@ -1083,6 +1111,8 @@ class Simulator:
                 self.viewer = Viewer(rigs, lambda ns: Pose.from_dict(
                     self.ego_states.get(ns)["pose"]) if ns in self.ego_states else None,
                     vehicle=self.vehicle)
+                if self.args.follow:
+                    self.spawn_chase()
             self.start_ros()
             s = self.c.get("sender", {})
             sender = JpegSender(s.get("bind", "0.0.0.0"), int(s.get("port", 5000)),

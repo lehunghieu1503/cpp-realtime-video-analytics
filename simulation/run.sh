@@ -19,14 +19,11 @@
 #   --arm              arm the controller once its gates pass. Without it the
 #                      vehicle stays braked for the whole run.
 #   --ticks N          run N ticks instead of the scenario's number
-#   --gui              show the CARLA window, with its camera behind the
-#                      vehicle, and a second window with the vehicle's own
-#                      cameras and what the device finds in them: boxes, lane
-#                      lines, parking stalls. An off-screen server left by an
-#                      earlier run is stopped and started again with a window.
-#   --view             only that second window: the server stays off-screen.
-#                      The CARLA window costs about as much as the run's
-#                      cameras together: 8 ticks a second with it, 14 without
+#   --gui              one window with the whole run: the vehicle seen from
+#                      behind, its own cameras and the view from above, with
+#                      what the device finds in them: boxes, lane lines,
+#                      parking stalls. The CARLA server itself stays off-screen.
+#   --view             that window without the image from behind the vehicle
 #   --web              serve the device's dashboard too: a page with each
 #                      camera's video and what was found in it, at the
 #                      address the script prints. Off by default: then the
@@ -38,7 +35,7 @@
 #                      (cpu is too slow to keep up with 30 frames a second)
 # Environment:
 #   CARLA_ROOT   CARLA 0.9.16 (default ~/opt/carla-0.9.16); its server is
-#                started (off-screen without --gui) when nothing listens on port 2000, and
+#                started off-screen when nothing listens on port 2000, and
 #                left running for the next run. One that listens but does not
 #                answer is stopped and started again.
 #   CARLA_PYTHON python with the carla 0.9.16 client (default
@@ -54,7 +51,7 @@ set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
 TICKS=0 CONFIG=simulation/config/carla.yaml SCENARIOS=simulation/config/carla-scenarios.yaml
-RUN_DIR="" LOCAL_BACKEND="" GUI="" OFFSCREEN=-RenderOffScreen WEB=""
+RUN_DIR="" LOCAL_BACKEND="" GUI="" WEB=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="$2"; shift 2 ;;
@@ -62,7 +59,7 @@ while [ $# -gt 0 ]; do
     --remote-dir) REMOTE_DIR="$2"; shift 2 ;;
     --sim-host) SIM_HOST="$2"; shift 2 ;;
     --arm) ARM=--arm; shift ;;
-    --gui) GUI="--follow --view" OFFSCREEN=""; shift ;;
+    --gui) GUI="--follow --view"; shift ;;
     --view) GUI="--view"; shift ;;
     --web) WEB=1; shift ;;
     --ticks) TICKS="$2"; shift 2 ;;
@@ -70,11 +67,11 @@ while [ $# -gt 0 ]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    *) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -109,10 +106,6 @@ print("carla client %s, GStreamer %s" % (carla.Client("127.0.0.1", 1).get_client
                                         Gst.version_string()))
 PY
 
-if [ -z "$OFFSCREEN" ] && pkill -f 'CarlaUE4.*-RenderOffScreen'; then
-  echo "== Stopping the off-screen CARLA server"
-  while (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; do sleep 1; done
-fi
 # A server that listens but does not answer is stopped: one left running for
 # hours was found like that, and the simulator then waited on it for a minute
 # before it gave up
@@ -137,9 +130,10 @@ if ! (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null; then
   echo "== Starting the CARLA server (left running after this script)"
   mkdir -p .cache/carla
   # shellcheck disable=SC2086
-  nohup "$CARLA_ROOT/CarlaUE4.sh" $OFFSCREEN -nosound -prefernvidia \
+  nohup "$CARLA_ROOT/CarlaUE4.sh" -RenderOffScreen -nosound -prefernvidia \
     -carla-rpc-port=2000 >.cache/carla/server.log 2>&1 &
-  for _ in $(seq 60); do
+  # The laptop took 90 s to open the port
+  for _ in $(seq 180); do
     (exec 3<>/dev/tcp/127.0.0.1/2000) 2>/dev/null && break
     sleep 1
   done
