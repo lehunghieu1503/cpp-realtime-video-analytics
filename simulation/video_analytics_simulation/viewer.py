@@ -49,6 +49,8 @@ from .bev import BevRig
 from .calibration import Pose
 
 WINDOW = "CARLA cameras"
+LABELS = {"front": "FRONT CAMERA", "rear": "REAR CAMERA",
+          "left": "LEFT CAMERA", "right": "RIGHT CAMERA"}
 KEPT = 45  # images a late result can still be joined with
 SIDE = 600  # pixels a side of the view from above, and of the map
 MAP_M = 20.0  # metres a side of the map
@@ -204,6 +206,8 @@ class Viewer:
             # Four to a row whatever their number: a camera keeps one size
             small = [cv2.resize(p, (width // 4, p.shape[0] * (width // 4) // p.shape[1]),
                                 interpolation=cv2.INTER_AREA) for p in panels.values()]
+            for name, image in zip(panels, small):
+                self.label(image, LABELS.get(name, name))
             row = np.hstack(small)
             column.append(np.pad(row, ((0, 0), (0, width - row.shape[1]), (0, 0))))
         view = np.vstack(column)
@@ -304,6 +308,14 @@ class Viewer:
         if self.vehicle:
             self.draw_vehicle(panel, rig, 1.0)
         return panel
+
+    def label(self, image, text):
+        """Which camera an image is, white on a dark box in its top left."""
+        cv2 = self.cv2
+        (w, h), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        image[:h + base + 8, :w + 12] //= 3
+        cv2.putText(image, text, (6, h + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA)
 
     def with_vehicle(self, name, panel):
         """A view from above with the vehicle drawn where it is: no camera

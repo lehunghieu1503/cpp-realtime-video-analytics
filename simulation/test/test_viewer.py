@@ -52,7 +52,10 @@ class Window(unittest.TestCase):
         # The front camera 640 wide, the rear a quarter of that under it, the
         # map right of them, the text
         self.assertEqual(raw.shape, (360 + 90 + 46, 640 + 450, 3))
-        self.assertTrue((raw[:450, :160] == 90).all())  # no result yet: the images as they are
+        # No result yet: the images as they are, the small one under its name
+        self.assertTrue((raw[:360, :160] == 90).all())
+        self.assertTrue((raw[390:450, :160] == 90).all())
+        self.assertGreater(int((raw[360:385, :160] == 255).all(axis=2).sum()), 20)
         self.assertEqual(int(raw[360:450, 160:640].sum()), 0)
 
         stall = Stall(0.0, 2.8, 0.0, 5.0, 2.8)
