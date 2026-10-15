@@ -85,6 +85,7 @@ endif()
 
 if(WITH_TENSORRT)
     target_sources(va_core PRIVATE
+        analytics/bev-remap.cu
         inference/backends/tensorrt-backend.cpp
         inference/backends/cuda-frame.cpp
         inference/backends/cuda-preprocess.cu)

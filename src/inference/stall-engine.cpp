@@ -145,3 +145,28 @@ StallResult StallEngine::detect(const cv::Mat& bgr, double* preMs,
   if (postMs) *postMs = ms(inferDone, done);
   return result;
 }
+
+StallResult StallEngine::detect(DeviceFrame& frame, double* preMs,
+                                double* inferMs, double* postMs) {
+  if (!backend_) throw std::runtime_error("the stall model is not loaded");
+  using Clock = std::chrono::steady_clock;
+  auto ms = [](Clock::time_point from, Clock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  auto start = Clock::now();
+  double deviceMs = 0.0;
+  std::vector<int64_t> outputShape;
+  // Timing the pre-process waits for the GPU, which costs a context switch
+  // when another process (the simulator) uses it too: only when asked
+  const float* output = backend_->runDeviceFrame(
+      frame, outputShape, preMs ? &deviceMs : nullptr);
+  if (!output) return detect(frame.toBgr(), preMs, inferMs, postMs);
+  auto inferDone = Clock::now();
+  auto result = decode(output, outputShape, config_.confidence, config_.nms,
+                       frame.width(), frame.height(), inputWidth_,
+                       inputHeight_);
+  if (preMs) *preMs = deviceMs;
+  if (inferMs) *inferMs = ms(start, inferDone) - deviceMs;
+  if (postMs) *postMs = ms(inferDone, Clock::now());
+  return result;
+}

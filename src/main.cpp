@@ -588,6 +588,10 @@ int runLive(const AppConfig& app) {
   const size_t bevStream = app.sources.size();
   FpsTracker bevFps;
   uint64_t bevFrames = 0;
+  // Stitched on the GPU when the stall model reads its input there: the
+  // frames the detector uploaded are read in place, and the view comes to
+  // the CPU only when somebody looks at it
+  bool bevOnGpu = false;
   if (app.bev.isSet()) {
     std::vector<CameraRig> rigs;
     for (size_t c = 0; c < app.bev.cameras.size(); c++) {
@@ -600,9 +604,11 @@ int runLive(const AppConfig& app) {
     }
     bev = std::make_unique<BevStitcher>(app.bev.width, app.bev.height,
                                         app.bev.metresPerPixel, rigs);
+    bevOnGpu = stallEngine->readsDeviceFrames() && BevStitcher::canUseGpu();
     std::cout << "Bird's-eye view " << app.bev.id << ": " << app.bev.width
               << "x" << app.bev.height << " from " << rigs.size()
-              << " cameras\n";
+              << " cameras, stitched on the " << (bevOnGpu ? "GPU" : "CPU")
+              << "\n";
   }
   const std::string calibrationId =
       app.calibration.isSet() ? app.calibration.calibrationId() : "";
@@ -774,7 +780,10 @@ int runLive(const AppConfig& app) {
     StallResult stalls;
     if (app.sources[s].stall) {
       try {
-        stalls = stallEngine->detect(result.cpuFrame());
+        // Read where the detector uploaded it, when the model can
+        stalls = result.device && stallEngine->readsDeviceFrames()
+                     ? stallEngine->detect(*result.device)
+                     : stallEngine->detect(result.cpuFrame());
       } catch (const std::exception& e) {
         std::cerr << "Stall model failed, stopping: " << e.what() << "\n";
         failed = true;
@@ -788,10 +797,20 @@ int runLive(const AppConfig& app) {
     // shortcut: equal timestamps only, cameras with clocks of their own
     // would need a tolerance.
     cv::Mat view;
+    std::shared_ptr<DeviceFrame> deviceView;
     if (bev && bevCamera[s] >= 0 && result.sourcePtsNs) {
       try {
-        view = bev->offer(static_cast<size_t>(bevCamera[s]),
-                          *result.sourcePtsNs, result.cpuFrame());
+        // cpuFrame() copies nothing here: a frame captured on the CPU keeps
+        // its pixels there, and one captured on the device that is not a
+        // GPU frame (Jetson NVMM) must come to the CPU either way
+        if (bevOnGpu) {
+          deviceView = bev->offerOnGpu(static_cast<size_t>(bevCamera[s]),
+                                       *result.sourcePtsNs,
+                                       result.device, result.cpuFrame());
+        } else {
+          view = bev->offer(static_cast<size_t>(bevCamera[s]),
+                            *result.sourcePtsNs, result.cpuFrame());
+        }
       } catch (const std::exception& e) {
         std::cerr << e.what() << ", stopping\n";
         failed = true;
@@ -878,10 +897,11 @@ int runLive(const AppConfig& app) {
     // This frame was the last its moment waited for: the view is whole.
     // Its result is a stream's, of the moment the frames share; the
     // detector does not run on it.
-    if (!view.empty()) {
+    if (!view.empty() || deviceView) {
       StallResult found;
       try {
-        found = stallEngine->detect(view);
+        found = deviceView ? stallEngine->detect(*deviceView)
+                           : stallEngine->detect(view);
       } catch (const std::exception& e) {
         std::cerr << "Stall model failed, stopping: " << e.what() << "\n";
         failed = true;
@@ -899,7 +919,7 @@ int runLive(const AppConfig& app) {
                       10) /
                10},
           {"fps", std::round(bevFps.fps * 10) / 10},
-          {"image", {{"width", view.cols}, {"height", view.rows}}},
+          {"image", {{"width", bev->width()}, {"height", bev->height()}}},
           {"stalls", serializeStalls(found.stalls)},
           {"stall_points", serializeStallPoints(found.points)}};
       if (app.simulation.enabled) {
@@ -907,6 +927,8 @@ int runLive(const AppConfig& app) {
                                   {"sim_ns", *result.sourcePtsNs}};
       }
       bool viewWatched = !app.headless || sseServer.hasViewers(bevStream);
+      // The one copy of a GPU view to the CPU, for whoever watches
+      if (viewWatched && deviceView) view = deviceView->toBgr();
       if (viewWatched) drawStalls(view, found);
       if (!app.headless) cv::imshow(app.bev.id, view);
       sseServer.broadcast(viewJson.dump(), bevStream);

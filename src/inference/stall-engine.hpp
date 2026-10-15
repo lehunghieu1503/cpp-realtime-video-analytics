@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backends/inference-backend.hpp"
+#include "capture/device-frame.hpp"
 
 #include <array>
 #include <memory>
@@ -69,6 +70,15 @@ public:
   // Throws when inference fails
   StallResult detect(const cv::Mat& bgr, double* preMs = nullptr,
                      double* inferMs = nullptr, double* postMs = nullptr);
+  // The same for a frame in device memory, which a backend that can (see
+  // readsDeviceFrames()) reads in place; others get a CPU copy of it
+  StallResult detect(DeviceFrame& frame, double* preMs = nullptr,
+                     double* inferMs = nullptr, double* postMs = nullptr);
+  // Whether the backend pre-processes on its device, and so may read a
+  // frame there
+  bool readsDeviceFrames() const {
+    return backend_ && backend_->preprocessesFrames();
+  }
 
   // The output tensor to the stalls and divider ends of a width x height
   // frame. NMS runs among the stalls, whatever their class: a stall is found

@@ -1,9 +1,11 @@
 #pragma once
 
+#include "capture/device-frame.hpp"
 #include "lane-geometry.hpp"
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <opencv2/core.hpp>
 #include <string>
 #include <vector>
@@ -56,6 +58,17 @@ public:
   // the frame is not of the size the camera's calibration says.
   cv::Mat offer(size_t camera, uint64_t stamp, const cv::Mat& bgr);
 
+  // Whether offerOnGpu() can run here: built with CUDA, and a GPU is there
+  static bool canUseGpu();
+  // The same on the GPU: the view is stitched and given out in GPU memory,
+  // for a model that reads it there (StallEngine::detect(DeviceFrame&)).
+  // `device` is read in place when it is a frame in GPU memory (a
+  // CudaFrame, as the detector uploaded it); otherwise `bgr` is uploaded.
+  // The moments of one stitcher are all made on the CPU or all on the GPU.
+  std::shared_ptr<DeviceFrame> offerOnGpu(size_t camera, uint64_t stamp,
+                                          std::shared_ptr<DeviceFrame> device,
+                                          const cv::Mat& bgr);
+
   // Views given out, and moments dropped because a camera's frame of them
   // never came: when the device does not keep up, each camera loses other
   // frames and few moments are whole
@@ -65,12 +78,29 @@ public:
 private:
   struct Pending {
     cv::Mat view;
-    unsigned have = 0;  // bit per camera
+    std::shared_ptr<DeviceFrame> device;  // the view, made by offerOnGpu()
+    // The frames the GPU reads it from, kept until it is whole: the GPU is
+    // waited for once a moment, not once a frame
+    std::vector<std::shared_ptr<DeviceFrame>> frames;
+    unsigned have = 0;                    // bit per camera
   };
+  // The tables below in GPU memory, made by the first offerOnGpu()
+  struct GpuTables;
+
+  void checkSize(size_t camera, int width, int height) const;
+  // A bit per camera, as Pending::have once a moment is whole
+  unsigned allCameras() const {
+    return rigs_.size() == 32 ? ~0u : (1u << rigs_.size()) - 1;
+  }
+  // The moment `stamp` has `camera`'s frame now. Returns it once whole,
+  // forgetting every older one; an empty moment until then.
+  Pending finish(size_t camera, uint64_t stamp);
+
   std::vector<CameraRig> rigs_;
   cv::Mat source_;  // CV_8S
   std::vector<cv::Mat> mapX_, mapY_;
   std::map<uint64_t, Pending> pending_;
   uint64_t made_ = 0;
   uint64_t dropped_ = 0;
+  std::shared_ptr<GpuTables> gpu_;
 };
