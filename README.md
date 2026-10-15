@@ -237,6 +237,7 @@ NPU is the one to use. Each worker uses 4 threads.
 |:-------|-------:|------:|:------------|
 | Talk to TensorRT directly and pre-process in a CUDA kernel | 68.3 FPS | 135.2 FPS | Jetson, YOLO11s FP16 |
 | Read the decoder's buffer in place instead of copying it out | 209% CPU | 70% CPU | Jetson, 1080p H.264 |
+| Stitch the bird's-eye view on the GPU from the frames the detector uploaded, and run the stall model on it there | 7.8 ms | 3.8 ms | per view (4 cameras 1280x720 to 800x800 + stall model), laptop RTX 5060 beside CARLA |
 | Serve streams round-robin instead of one shared queue | slowest camera: 0.7 FPS | every camera: 13.5 FPS | Jetson, 6 cameras at 25 FPS, 1 worker |
 | Cap ONNX Runtime threads to the available cores | 22.6 FPS | 30.8 FPS | x86 pinned to 6 cores, 2 workers |
 | Size the live frame queue to the worker count | 343 ms | 147 ms | capture-to-result delay, inference at 20 FPS |

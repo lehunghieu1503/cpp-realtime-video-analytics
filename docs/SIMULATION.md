@@ -915,13 +915,35 @@ Cái được thêm:
 | Phần | Làm gì | Ở đâu |
 |------|--------|-------|
 | Hai camera dưới gương | 1280×720, góc ngang 120°, chúc 45°, quay 15° về phía sau | `left_calibration`, `right_calibration` trong `simulation/config/carla.yaml` |
-| Ghép ảnh trên thiết bị | Frame của camera sau, trái, phải và trước có cùng timestamp được chiếu xuống mặt đất thành một ảnh 800×800, 2,5 cm mỗi pixel, mũi xe hướng lên, gốc xe ở giữa. Mỗi pixel lấy từ camera gần chỗ đó nhất | `src/analytics/bev.cpp`, mục `bev` trong config |
+| Ghép ảnh trên thiết bị | Frame của camera sau, trái, phải và trước có cùng timestamp được chiếu xuống mặt đất thành một ảnh 800×800, 2,5 cm mỗi pixel, mũi xe hướng lên, gốc xe ở giữa. Mỗi pixel lấy từ camera gần chỗ đó nhất. Khi model ô đỗ chạy `tensorrt-native`, ghép trên GPU từ chính frame detector đã upload, và model đọc ảnh ghép tại chỗ (xem dưới) | `src/analytics/bev.cpp`, `bev-remap.cu`, mục `bev` trong config |
 | Model ô đỗ trên ảnh ghép | Cùng kiến trúc và bốn lớp như model cũ, train trên ảnh ghép. Kết quả ra thành một luồng riêng, `carla-bev` | `src/main.cpp`, `simulation/stall-dataset.py make --bev` |
 | Controller | Kết quả camera sau và kết quả ảnh ghép của cùng frame được gộp làm một; tracker coi ảnh ghép là một camera (`BevRig`). Logic chọn ô và lùi không đổi | `bev.py`, hai chỗ trong `controller.py` |
 | Cửa sổ `--gui` | Thêm panel thứ ba: ảnh nhìn từ trên, ô và đầu vạch vẽ đè | `viewer.py` |
 
 Bản tham chiếu là `simulation/video_analytics_simulation/bev.py`; code C++ được
 kiểm với nó qua `tests/fixtures/bev.json` (`test_bev`).
+
+Ghép trên GPU (2026-10-15). Frame camera chỉ qua PCIe một lần, 8 bit, khi
+detector upload nó (`TensorRtBackend::runFrame`); frame đó ở lại GPU
+(`CudaFrame`, bộ nhớ lấy từ pool) và đi theo kết quả (`AnalyticsResult::device`).
+Kernel `cudaBevRemap` đọc nó tại chỗ để ghép, model ô đỗ đọc ảnh ghép tại chỗ
+(`runDeviceFrame`). Ảnh ghép chỉ về CPU khi có người xem (`--gui`, dashboard).
+GPU được chờ một lần mỗi ảnh ghép, không phải mỗi camera: khi CARLA dùng chung
+GPU, mỗi lần chờ tốn một lượt chuyển context. Ảnh ghép trên GPU khớp ảnh ghép
+trên CPU tới 1 mức xám, trừ 1 pixel `cv::remap` để đen ở mép ảnh (`test_bev`).
+
+Đo trên laptop RTX 5060, CARLA đang chạy, 300 lần, trung vị:
+
+| Bước | CPU (`cv::remap`, `blobFromImage`, upload float) | GPU, tại chỗ |
+|------|---------------------------------------------------|--------------|
+| Ghép 4 camera 1280×720 thành 800×800 | 2,5 ms | 0,66 ms |
+| Model ô đỗ, kể cả tiền xử lý | 5,3 ms | 3,1 ms |
+| Cộng | 7,8 ms | 3,8 ms |
+
+`show_park_bev` và `show_park` vẫn đạt; tick tới kết quả, trung vị: 113 ms
+trước, 105 và 108 ms sau (một lần chạy mỗi bản, phần lớn là JPEG và mô phỏng).
+Còn lại trên CPU: giải mã JPEG (`jpegdec`) và một lần chép frame ra khỏi
+buffer GStreamer.
 
 Bật theo scenario, mặc định tắt. Ba scenario đỗ cũ vẫn dùng camera sau:
 
