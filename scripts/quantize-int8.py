@@ -9,8 +9,9 @@ in the config: the file itself says which layers are INT8, and `int8` makes
 TensorRT 11 stop (no calibrator any more). The calibration images must not be
 the ones the model is evaluated on.
 
-  --tool ort       ONNX Runtime quantize_static (pip install onnxruntime);
-                   Conv and MatMul in INT8, the rest stays FP32
+  --tool ort       ONNX Runtime quantize_static (pip install onnxruntime
+                   onnxconverter-common); Conv and MatMul in INT8, the rest
+                   converted to FP16
   --tool modelopt  NVIDIA ModelOpt (pip install "nvidia-modelopt[onnx]"); puts
                    the nodes where TensorRT fuses them, the rest in FP16
 """
@@ -82,6 +83,13 @@ def quantize_ort(model_path, output, images, method, exclude):
         extra_options={"ActivationSymmetric": True, "WeightSymmetric": True,
                        "QuantizeBias": False})
 
+    # TensorRT 11 runs what is not quantized in the type the file gives it:
+    # FP16 instead of FP32, which needs opset 19 for FP16 quantize nodes
+    from onnx import version_converter
+    from onnxconverter_common import float16
+    model = version_converter.convert_version(onnx.load(output), 19)
+    onnx.save(float16.convert_float_to_float16(
+        model, keep_io_types=True, op_block_list=float16.DEFAULT_OP_BLOCK_LIST), output)
 
 
 def quantize_modelopt(model_path, output, images, method, exclude):
