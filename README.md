@@ -553,6 +553,22 @@ The first writes `models/yolo11s.calibration` and
 model with quantize/dequantize nodes). The second writes `models/yolo11s_int8.xml`,
 to be passed as `--model`.
 
+TensorRT 11 builds INT8 only from such a model:
+
+```bash
+scripts/quantize-int8.py models/yolo11s.onnx IMAGES          # models/yolo11s_int8.onnx
+scripts/quantize-int8.py --exclude '^/model\.2/' \
+    models/stall-bev-town05.onnx data/stalls-bev/images/train
+scripts/quantize-int8.py --fp8 models/yolo11s.onnx IMAGES    # _fp8.onnx, with ModelOpt
+simulation/run.sh --scenario show_park_bev --arm --int8     # or --fp8, --fp16
+```
+
+They run with `precision: fp16`; the file says which layers are INT8 or FP8.
+`IMAGES` must not be the images the model is then measured on. INT8 everywhere
+makes the bird's-eye-view stall model take empty stalls for occupied ones;
+keeping `/model.2/` out of INT8 brings it back to FP32's classes. FP8 needs
+Ada, Hopper or Blackwell, not a Jetson.
+
 ## Deploy to a Jetson
 
 Source, scripts and configuration stay on the PC. The board only runs.

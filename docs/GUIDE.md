@@ -316,7 +316,19 @@ scripts/calibrate-int8.py models/yolo11s.onnx data/coco/val2017
 
 # OpenVINO: sinh model INT8 bằng NNCF, truyền qua --model
 scripts/quantize-openvino.py models/yolo11s.onnx data/coco/val2017
+
+# TensorRT 11 (PC): không còn calibrator, cần model có node Q/DQ
+scripts/quantize-int8.py models/yolo11s.onnx IMAGES          # models/yolo11s_int8.onnx
+scripts/quantize-int8.py --exclude '^/model\.2/' \
+    models/stall-bev-town05.onnx data/stalls-bev/images/train
+scripts/quantize-int8.py --fp8 models/yolo11s.onnx IMAGES    # _fp8.onnx, dùng ModelOpt
+simulation/run.sh --scenario show_park_bev --arm --int8     # hoặc --fp8, --fp16
 ```
+
+Các file này chạy với `precision: fp16`; file tự nói layer nào INT8/FP8.
+`IMAGES` không được trùng ảnh dùng để đo. Model stall bird's-eye-view INT8 toàn
+bộ thì nhầm ô trống thành có xe; giữ `/model.2/` ngoài INT8 thì phân loại như
+FP32. FP8 cần GPU Ada, Hopper hoặc Blackwell, Jetson không có.
 
 Số đo trên Jetson Orin Nano Super 8GB, trong container, chế độ MAXN SUPER,
 video 640x480, model YOLO11s 640x640, mAP trên 500 ảnh COCO val2017:
