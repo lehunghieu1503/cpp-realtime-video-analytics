@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Make an INT8 model with quantize/dequantize nodes, the only INT8 TensorRT 11 builds.
 
-  scripts/quantize-int8.py models/stall-bev-town05.onnx data/stalls-bev/images/train
-  scripts/quantize-int8.py --tool modelopt models/stall-bev-town05.onnx data/stalls-bev/images/train
+  scripts/quantize-int8.py --exclude '^/model\.2/' models/stall-bev-town05.onnx data/stalls-bev/images/train
+  scripts/quantize-int8.py --fp8 models/stall-bev-town05.onnx data/stalls-bev/images/train
 
-Writes models/stall-bev-town05_int8-<tool>.onnx. Run it with `precision: fp16`
+Writes models/stall-bev-town05_int8.onnx (_fp8 with --fp8), the files
+simulation/run.sh --int8 (--fp8) runs. Run it with `precision: fp16`
 in the config: the file itself says which layers are INT8, and `int8` makes
 TensorRT 11 stop (no calibrator any more). The calibration images must not be
-the ones the model is evaluated on.
+the ones the model is evaluated on. Keeping /model.2/ out of INT8 is what
+makes the bird's-eye-view stall model class stalls as FP32 does.
 
   --tool ort       ONNX Runtime quantize_static (pip install onnxruntime
                    onnxconverter-common); Conv and MatMul in INT8, the rest
                    converted to FP16
   --tool modelopt  NVIDIA ModelOpt (pip install "nvidia-modelopt[onnx]"); puts
                    the nodes where TensorRT fuses them, the rest in FP16
+  --fp8            FP8 (E4M3) instead of INT8, with ModelOpt; needs a GPU with
+                   FP8 tensor cores (Ada, Hopper, Blackwell), not the Jetson's
 """
 import argparse
 import itertools
@@ -92,13 +96,13 @@ def quantize_ort(model_path, output, images, method, exclude):
         model, keep_io_types=True, op_block_list=float16.DEFAULT_OP_BLOCK_LIST), output)
 
 
-def quantize_modelopt(model_path, output, images, method, exclude):
+def quantize_modelopt(model_path, output, images, method, exclude, mode="int8"):
     from modelopt.onnx.quantization import quantize
 
     # ModelOpt saves the model it is given back over its path: give it a copy
     with tempfile.TemporaryDirectory() as work:
         copy = shutil.copy(model_path, work)
-        quantize(copy, quantize_mode="int8", calibration_data=images,
+        quantize(copy, quantize_mode=mode, calibration_data=images,
                  calibration_method=method, output_path=output,
                  high_precision_dtype="fp16", nodes_to_exclude=exclude)
 
@@ -113,18 +117,23 @@ def main():
     parser.add_argument("-n", type=int, default=200, help="images to use (default: 200)")
     parser.add_argument("--exclude", metavar="REGEX",
                         help="nodes whose name matches stay unquantized, e.g. '/model.23/cv3'")
-    parser.add_argument("-o", "--output", help="default: MODEL_int8-TOOL.onnx")
+    parser.add_argument("--fp8", action="store_true", help="FP8 instead of INT8, with ModelOpt")
+    parser.add_argument("-o", "--output", help="default: MODEL_int8.onnx, MODEL_fp8.onnx with --fp8")
     args = parser.parse_args()
 
-    output = args.output or f"{os.path.splitext(args.model)[0]}_int8-{args.tool}.onnx"
+    mode = "fp8" if args.fp8 else "int8"
+    output = args.output or f"{os.path.splitext(args.model)[0]}_{mode}.onnx"
     model = onnx.load(args.model, load_external_data=False)
     exclude = [n.name for n in model.graph.node
                if args.exclude and re.search(args.exclude, n.name)]
     if args.exclude and not exclude:
         sys.exit(f"no node name matches {args.exclude}")
     images = calibration_images(model, args.images, args.n)
-    {"ort": quantize_ort, "modelopt": quantize_modelopt}[args.tool](
-        args.model, output, images, args.method, exclude)
+    if args.fp8:
+        quantize_modelopt(args.model, output, images, args.method, exclude, "fp8")
+    else:
+        {"ort": quantize_ort, "modelopt": quantize_modelopt}[args.tool](
+            args.model, output, images, args.method, exclude)
     print(f"Saved {output}")
 
 
