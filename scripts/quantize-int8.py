@@ -17,6 +17,7 @@ the ones the model is evaluated on.
 import argparse
 import itertools
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -42,7 +43,7 @@ def calibration_images(model, image_dir, count):
     return images
 
 
-def quantize_ort(model_path, output, images, method):
+def quantize_ort(model_path, output, images, method, exclude):
     from onnxruntime.quantization import (CalibrationDataReader, CalibrationMethod,
                                           QuantFormat, QuantType, quantize_static)
     from onnxruntime.quantization.calibrate import HistogramCalibrater
@@ -72,6 +73,7 @@ def quantize_ort(model_path, output, images, method):
         model_path, output, Reader(batches),
         quant_format=QuantFormat.QDQ,
         op_types_to_quantize=["Conv", "MatMul"],
+        nodes_to_exclude=exclude,
         per_channel=True,
         # TensorRT takes only signed INT8 with a zero point of 0, and no Int32 bias
         activation_type=QuantType.QInt8, weight_type=QuantType.QInt8,
@@ -81,7 +83,8 @@ def quantize_ort(model_path, output, images, method):
                        "QuantizeBias": False})
 
 
-def quantize_modelopt(model_path, output, images, method):
+
+def quantize_modelopt(model_path, output, images, method, exclude):
     from modelopt.onnx.quantization import quantize
 
     # ModelOpt saves the model it is given back over its path: give it a copy
@@ -89,7 +92,7 @@ def quantize_modelopt(model_path, output, images, method):
         copy = shutil.copy(model_path, work)
         quantize(copy, quantize_mode="int8", calibration_data=images,
                  calibration_method=method, output_path=output,
-                 high_precision_dtype="fp16")
+                 high_precision_dtype="fp16", nodes_to_exclude=exclude)
 
 
 def main():
@@ -100,14 +103,20 @@ def main():
     parser.add_argument("--method", choices=["entropy", "max"], default="entropy",
                         help="how a tensor's range is chosen (default: entropy)")
     parser.add_argument("-n", type=int, default=200, help="images to use (default: 200)")
+    parser.add_argument("--exclude", metavar="REGEX",
+                        help="nodes whose name matches stay unquantized, e.g. '/model.23/cv3'")
     parser.add_argument("-o", "--output", help="default: MODEL_int8-TOOL.onnx")
     args = parser.parse_args()
 
     output = args.output or f"{os.path.splitext(args.model)[0]}_int8-{args.tool}.onnx"
-    images = calibration_images(onnx.load(args.model, load_external_data=False),
-                                args.images, args.n)
+    model = onnx.load(args.model, load_external_data=False)
+    exclude = [n.name for n in model.graph.node
+               if args.exclude and re.search(args.exclude, n.name)]
+    if args.exclude and not exclude:
+        sys.exit(f"no node name matches {args.exclude}")
+    images = calibration_images(model, args.images, args.n)
     {"ort": quantize_ort, "modelopt": quantize_modelopt}[args.tool](
-        args.model, output, images, args.method)
+        args.model, output, images, args.method, exclude)
     print(f"Saved {output}")
 
 
