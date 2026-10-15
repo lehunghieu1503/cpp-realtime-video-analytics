@@ -86,6 +86,7 @@ endif()
 if(WITH_TENSORRT)
     target_sources(va_core PRIVATE
         inference/backends/tensorrt-backend.cpp
+        inference/backends/cuda-frame.cpp
         inference/backends/cuda-preprocess.cu)
     target_compile_definitions(va_core PUBLIC WITH_TENSORRT)
     target_include_directories(va_core PRIVATE ${TENSORRT_INCLUDE_DIR})

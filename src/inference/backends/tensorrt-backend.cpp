@@ -1,4 +1,5 @@
 #include "tensorrt-backend.hpp"
+#include "cuda-frame.hpp"
 #include "cuda-preprocess.hpp"
 
 #ifdef WITH_NVMM
@@ -233,10 +234,25 @@ struct TensorRtBackend::Impl {
   float* inputDevice = nullptr;
   float* outputDevice = nullptr;
   float* outputHost = nullptr;  // page-locked, so the copy back is direct
-  unsigned char* frameDevice = nullptr;
-  size_t frameCapacity = 0;
+  std::shared_ptr<CudaFrame> uploaded;  // the frame of the last runFrame()
   size_t inputBytes = 0;
   size_t outputBytes = 0;
+
+  // Resizes, reorders and normalises an image on the GPU into the engine's
+  // input; preprocessMs, when given, receives the time since `start`
+  void preprocess(const GpuImage& image, const std::vector<int64_t>& shape,
+                  std::chrono::steady_clock::time_point start,
+                  double* preprocessMs) {
+    cudaPreprocess(image, inputDevice, static_cast<int>(shape[3]),
+                   static_cast<int>(shape[2]), stream);
+    if (preprocessMs) {
+      // Waits for the kernel only to time it; the cost is a few microseconds
+      check(cudaStreamSynchronize(stream), "pre-process");
+      *preprocessMs = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - start)
+                          .count();
+    }
+  }
 
   ~Impl() {
     // The context and engine go before the buffers they point into
@@ -245,7 +261,6 @@ struct TensorRtBackend::Impl {
     runtime.reset();
     cudaFree(inputDevice);
     cudaFree(outputDevice);
-    cudaFree(frameDevice);
     cudaFreeHost(outputHost);
     if (stream) cudaStreamDestroy(stream);
   }
@@ -461,34 +476,28 @@ const float* TensorRtBackend::runFrame(const cv::Mat& bgr,
                                        std::vector<int64_t>& outputShape,
                                        double* preprocessMs) {
   auto start = std::chrono::steady_clock::now();
+  if (bgr.type() != CV_8UC3) {
+    throw std::runtime_error("runFrame() takes an 8-bit BGR frame");
+  }
   // Rows of a cropped Mat are not adjacent in memory
   cv::Mat frame = bgr.isContinuous() ? bgr : bgr.clone();
-  size_t frameBytes = frame.step * frame.rows;
-  if (frameBytes > impl_->frameCapacity) {
-    cudaFree(impl_->frameDevice);
-    impl_->frameDevice = nullptr;
-    check(cudaMalloc(&impl_->frameDevice, frameBytes), "cudaMalloc");
-    impl_->frameCapacity = frameBytes;
-  }
   // The only copy of the image: 8-bit, as captured. Resize, colour order,
-  // scaling and layout all happen on the GPU, into the engine's input.
-  check(cudaMemcpyAsync(impl_->frameDevice, frame.data, frameBytes,
-                        cudaMemcpyHostToDevice, impl_->stream),
+  // scaling and layout all happen on the GPU, into the engine's input, and
+  // the frame stays there for whoever reads it next (uploadedFrame())
+  impl_->uploaded = CudaFrame::create(frame.cols, frame.rows);
+  check(cudaMemcpyAsync(impl_->uploaded->data(), frame.data,
+                        impl_->uploaded->bytes(), cudaMemcpyHostToDevice,
+                        impl_->stream),
         "upload frame");
-  GpuImage image{impl_->frameDevice, frame.cols, frame.rows,
-                 static_cast<int>(frame.step), frame.channels(),
-                 /*redIndex=*/2};
-  cudaPreprocess(image, impl_->inputDevice, static_cast<int>(inputShape_[3]),
-                 static_cast<int>(inputShape_[2]), impl_->stream);
-  if (preprocessMs) {
-    // Waits for the kernel only to time it; the cost is a few microseconds
-    check(cudaStreamSynchronize(impl_->stream), "pre-process");
-    *preprocessMs = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - start)
-                        .count();
-  }
-
+  impl_->preprocess({impl_->uploaded->data(), frame.cols, frame.rows,
+                     impl_->uploaded->pitch(), /*channels=*/3,
+                     /*redIndex=*/2},
+                    inputShape_, start, preprocessMs);
   return infer(outputShape);
+}
+
+std::shared_ptr<DeviceFrame> TensorRtBackend::uploadedFrame() {
+  return impl_->uploaded;
 }
 
 const float* TensorRtBackend::infer(std::vector<int64_t>& outputShape) {
@@ -507,11 +516,18 @@ const float* TensorRtBackend::infer(std::vector<int64_t>& outputShape) {
 const float* TensorRtBackend::runDeviceFrame(
     DeviceFrame& frame, std::vector<int64_t>& outputShape,
     double* preprocessMs) {
+  auto start = std::chrono::steady_clock::now();
+  // Uploaded by a runFrame() or stitched on the GPU: read where it is
+  if (auto* cuda = dynamic_cast<CudaFrame*>(&frame)) {
+    impl_->preprocess({cuda->data(), cuda->width(), cuda->height(),
+                       cuda->pitch(), /*channels=*/3, /*redIndex=*/2},
+                      inputShape_, start, preprocessMs);
+    return infer(outputShape);
+  }
 #ifdef WITH_NVMM
   auto* nvmm = dynamic_cast<NvmmFrame*>(&frame);
   if (!nvmm) return nullptr;
 
-  auto start = std::chrono::steady_clock::now();
   // The driver API below needs this thread's CUDA context, which the
   // runtime API sets up on its first call from a thread
   check(cudaStreamSynchronize(impl_->stream), "stream");

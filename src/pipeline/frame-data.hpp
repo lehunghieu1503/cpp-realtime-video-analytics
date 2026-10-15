@@ -32,6 +32,8 @@ struct AnalyticsResult {
   // Original frame for overlay drawing; empty when the frame stayed in
   // device memory, see cpuFrame()
   cv::Mat frame;
+  // The frame in device memory: as captured there, or as the backend
+  // uploaded it; both may be set
   std::shared_ptr<DeviceFrame> device;
   std::vector<Detection> detections;
   double inferenceLatencyMs;  // capture → inference done, includes queue wait

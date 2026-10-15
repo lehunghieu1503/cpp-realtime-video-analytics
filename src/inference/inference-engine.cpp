@@ -40,7 +40,8 @@ bool InferenceEngine::isLoaded() const { return backend_ != nullptr; }
 
 std::vector<Detection> InferenceEngine::detect(const cv::Mat& input,
                                                StageTimes* times,
-                                               DeviceFrame* device) {
+                                               DeviceFrame* device,
+                                               std::shared_ptr<DeviceFrame>* uploaded) {
   if (!isLoaded()) return {};
 
   using Clock = std::chrono::steady_clock;
@@ -85,6 +86,7 @@ std::vector<Detection> InferenceEngine::detect(const cv::Mat& input,
     // The backend takes the frame as captured and prepares it on its device
     double preMs = 0.0;
     outputData = backend_->runFrame(frame, outputShape, &preMs);
+    if (uploaded) *uploaded = backend_->uploadedFrame();
     preDone = start + std::chrono::duration_cast<Clock::duration>(
                           std::chrono::duration<double, std::milli>(preMs));
   } else {
