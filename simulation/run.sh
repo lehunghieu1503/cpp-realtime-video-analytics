@@ -38,6 +38,8 @@
 #                      scripts/quantize-fp16.py. TensorRT 11 takes the
 #                      precision from the file: the config's `precision: fp16`
 #                      alone leaves the models FP32 there.
+#   --int8, --fp8      the same with models/<name>_int8.onnx or _fp8.onnx,
+#                      made with scripts/quantize-int8.py [--fp8]
 # Environment:
 #   CARLA_ROOT   CARLA 0.9.16 (default ~/opt/carla-0.9.16); its server is
 #                started off-screen when nothing listens on port 2000, and
@@ -56,7 +58,7 @@ set -euo pipefail
 
 SCENARIO="" DEVICE=local REMOTE_DIR=video-analytics-carla SIM_HOST="" ARM=""
 TICKS=0 CONFIG=simulation/config/carla.yaml SCENARIOS=simulation/config/carla-scenarios.yaml
-RUN_DIR="" LOCAL_BACKEND="" GUI="" WEB="" FP16=""
+RUN_DIR="" LOCAL_BACKEND="" GUI="" WEB="" PRECISION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="$2"; shift 2 ;;
@@ -72,12 +74,12 @@ while [ $# -gt 0 ]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --local-backend) LOCAL_BACKEND="$2"; shift 2 ;;
-    --fp16) FP16=1; shift ;;
-    *) sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    --fp16|--int8|--fp8) PRECISION=${1#--}; shift ;;
+    *) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
   esac
 done
 if [ -z "$SCENARIO" ]; then
-  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
@@ -151,9 +153,9 @@ RUN_DIR="${RUN_DIR:-.cache/carla/$RUN_ID}"
 [ -e "$RUN_DIR" ] && { echo "$RUN_DIR exists; a run directory is never reused" >&2; exit 1; }
 mkdir -p "$RUN_DIR"
 echo "== Run $RUN_ID in $RUN_DIR"
-if [ -n "$FP16" ]; then
+if [ -n "$PRECISION" ]; then
   # The config the whole run uses, kept with the run
-  sed -E 's#^( *model: .*)\.onnx$#\1_fp16.onnx#' "$CONFIG" >"$RUN_DIR/config.yaml"
+  sed -E "s#^( *model: .*)\\.onnx\$#\\1_$PRECISION.onnx#" "$CONFIG" >"$RUN_DIR/config.yaml"
   # The simulator reads the map's stalls from beside the config
   cp "$(dirname "$CONFIG")/carla-stalls.yaml" "$RUN_DIR/"
   CONFIG=$RUN_DIR/config.yaml
@@ -239,9 +241,16 @@ yaml.safe_dump(config, sys.stdout, sort_keys=False)
 PY
 
 # Only the models this scenario loads have to exist
-if [ -n "$FP16" ]; then
+if [ -n "$PRECISION" ]; then
   for model in $(sed -n 's/^ *model: *//p' "$RUN_DIR/device.yaml"); do
-    [ -f "$model" ] || { echo "Missing $model; make it with: scripts/quantize-fp16.py ${model%_fp16.onnx}.onnx -o $model" >&2; exit 1; }
+    [ -f "$model" ] && continue
+    case $PRECISION in
+      fp16) make="scripts/quantize-fp16.py ${model%_fp16.onnx}.onnx -o $model" ;;
+      int8) make="scripts/quantize-int8.py ${model%_int8.onnx}.onnx IMAGES -o $model" ;;
+      fp8) make="scripts/quantize-int8.py --fp8 ${model%_fp8.onnx}.onnx IMAGES -o $model" ;;
+    esac
+    echo "Missing $model; make it with: $make" >&2
+    exit 1
   done
 fi
 
