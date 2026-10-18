@@ -24,12 +24,13 @@
 
 A C++17 perception stack for the edge, from cameras to a car that drives and
 parks itself. The device reads any number of video sources, runs **object
-detection** (YOLO with TensorRT FP16, INT8 or FP8, ONNX Runtime or OpenVINO),
+detection** (YOLO with TensorRT FP16 or INT8, or FP8 from a pre-quantized model, ONNX
+Runtime or OpenVINO),
 tracks the objects with ByteTrack, finds the **lane** (UFLD) and, from a
-**bird's-eye view** stitched on the GPU out of three cameras, the **parking
+**bird's-eye view** stitched on the GPU out of four cameras, the **parking
 stalls**. In the [CARLA simulation](#carla-simulation) a ROS 2 controller
-uses only those results, joined with the depth and the vehicle's own pose of
-the same frame, to keep the lane, brake for obstacles, overtake and back into
+uses only those results, joined with the depth of the same frame and the
+pose it reckons from its own speed and yaw rate, to keep the lane, brake for obstacles, overtake and back into
 a free stall; on a Jetson Orin Nano Super the device runs hardware in the
 loop.
 
@@ -46,8 +47,9 @@ objects cross a line or enter, leave or linger in a zone, publishes them over
 dashboard, Prometheus metrics and a Grafana board.
 
 ```bash
-build/src/video_analytics --config deploy/config/config.yaml
-# then open http://localhost:9001
+build/src/video_analytics --model models/yolo11s.onnx --backend cpu --rtsp rtsp://CAMERA/stream
+# then open http://localhost:9001; deploy/config/config.yaml is the full
+# setup (zones, MQTT, snapshots) for the Docker stack
 ```
 
 ## Highlights
@@ -67,7 +69,7 @@ backend fails loudly at startup; it never falls back to CPU.
 ### Tracking, zones and lines
 ByteTrack gives every object an id. Zones and lines defined in YAML turn
 tracks into `line_cross`, `zone_enter`, `zone_exit` and `dwell_time` events,
-each with a snapshot of the frame.
+each with a snapshot of the frame when `snapshots.dir` is set.
 
 </td>
 <td width="33%" valign="top">
@@ -146,7 +148,8 @@ stall, every frame joined by the simulator's own timestamp.
 YOLO11s at 640x640, 640x480 video, inside the `Dockerfile.jetson` container,
 MAXN SUPER power mode. Latency is the time inside `detect()`: pre-process,
 inference and post-process. Power is the whole board (INA3221 input rail).
-mAP is on the first 500 images of COCO val2017.
+mAP is on the first 500 images of COCO val2017; the INT8 rows were calibrated
+on the same images, so their mAP may read slightly high.
 
 | Backend | Precision | FPS | Latency p50 | p95 | Power | FPS/W | mAP50-95 |
 |:--------|:----------|----:|------------:|----:|------:|------:|---------:|
@@ -349,8 +352,10 @@ For the OpenVINO backends, install the
 and add `-DOpenVINO_DIR=/path/to/openvino/runtime/cmake`. CMake prints
 `OpenVINO backend: ON` when it is found. The other optional parts are found
 the same way and reported at configure time: MQTT (`libmosquitto-dev`),
-HTTPS (`libssl-dev`), the native GStreamer capture, and `tensorrt-native`
-(TensorRT headers and the CUDA compiler).
+the native GStreamer capture, and `tensorrt-native` (TensorRT headers and
+the CUDA compiler). HTTPS is enabled whenever OpenSSL (`libssl-dev`) is
+found; nothing reports it, and a build without it fails at startup when
+`tls` is set.
 
 On an NVIDIA GPU whose driver is older than the CUDA toolkit, compile the
 pre-processing kernel for the GPU's architecture so that the driver does
@@ -379,7 +384,7 @@ docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
 <br/>
 
 ```bash
-scripts/download-model.sh yolo11s
+scripts/download-model.sh        # yolov8n, the model laptop.yaml names
 scripts/run-laptop.sh            # build, then docker compose up
 scripts/run-laptop.sh down
 ```
@@ -387,8 +392,8 @@ scripts/run-laptop.sh down
 Runs the analytics on the NPU together with Mosquitto, Prometheus and
 Grafana, all bound to `127.0.0.1` (MQTT on port 1884). Sources and backend
 are set in [deploy/config/laptop.yaml](deploy/config/laptop.yaml); it expects
-test frames under `data/videos/`. In the container YOLO11s ran at 49.8 FPS on
-the NPU. `openvino:GPU` does not work in the image on Core Ultra: the
+test frames under `data/videos/`. With yolov8n the NPU holds 4 cameras at 25
+FPS; YOLO11s (change `model:` there) ran at 49.8 FPS on the NPU. `openvino:GPU` does not work in the image on Core Ultra: the
 Ubuntu 22.04 OpenCL driver does not detect Arc graphics.
 
 </details>
@@ -424,7 +429,7 @@ a commented example.
 
 ```yaml
 model: models/yolo11s.onnx
-backend: tensorrt            # cpu | cuda | tensorrt | openvino:CPU|GPU|NPU
+backend: tensorrt            # cpu | cuda | tensorrt | tensorrt-native | openvino:CPU|GPU|NPU
 precision: fp16              # tensorrt only: fp32 | fp16 | int8
 classes: [person]            # keep only these COCO classes
 dwell_seconds: 5
@@ -455,7 +460,9 @@ Passwords and certificates go in `auth`, `tls` and `mqtt`
 `VA_HTTP_*`, `VA_TLS_*` and `VA_MQTT_*` variables override the file.
 
 An object is located by the bottom centre of its box. Crossing a line from
-the right of `a → b` to its left counts as `in`, the other way as `out`.
+the right of `a → b` to its left counts as `in`, the other way as `out`,
+with left and right taken with y up: for a line drawn left to right on the
+image, `in` is moving down the image.
 
 ## What the server exposes
 
@@ -485,7 +492,7 @@ the right of `a → b` to its left counts as `in`, the other way as `out`.
 ```
 
 Every result also carries `"image": {"width": W, "height": H}`, the size of
-the source frame the boxes are in. Two more blocks appear only when asked
+the source frame the boxes are in. Three more blocks appear only when asked
 for in the configuration:
 
 - `simulation: {enabled: true}`: `"simulation": {"run_id": ..., "sim_ns": ...}`,
@@ -495,6 +502,9 @@ for in the configuration:
   of the vehicle and its centreline in metres, the lateral error, heading
   and curvature, and `valid: false` with a reason and `null` values when
   there is no usable lane. See [CARLA simulation](#carla-simulation).
+- `stall: true` on a source: `"stalls"`, each stall's class (empty or
+  occupied), confidence, box and corners, and `"stall_points"`, the ends of
+  the stall dividers the model found.
 
 The objects under `events` are what MQTT subscribers receive, one message
 each, at QoS 1:
@@ -611,14 +621,17 @@ change ships as a few megabytes instead of the 11 GB image.
 
 To change cameras, zones or the model, edit
 [deploy/config/config.yaml](deploy/config/config.yaml) and run the script
-again. `VIDEO_DIR=/path/on/board` mounts a directory of test videos at
-`/data/videos`.
+again. A second argument, `scripts/deploy-jetson.sh USER@BOARD REMOTE_DIR`,
+changes the directory on the board (default `~/video-analytics`).
+`VIDEO_DIR=/path/on/board` mounts a directory of test videos at
+`/data/videos` (default `REMOTE_DIR/videos`).
 
 | Option | Effect |
 |:-------|:-------|
 | `SECURE=1` | HTTPS and a password on the dashboard and `/metrics`, TLS and a password on MQTT (port 8883, no anonymous access), a Grafana login, Prometheus reachable only from the board. `scripts/make-secrets.sh` creates a CA, a server certificate and random passwords under `deploy/secrets/` on the PC; the CA key is not shipped. The script prints where each password is. |
-| `SIM=1` | Adds an RTSP server that loops video files as H.264 and H.265 cameras, read with `rtspsrc`, the hardware decoder and zero-copy frames ([deploy/config/rtsp-sim.yaml](deploy/config/rtsp-sim.yaml)). |
+| `SIM=1` | Adds an RTSP server that loops video files as H.264 and H.265 cameras, read with `rtspsrc`, the hardware decoder and zero-copy frames ([deploy/config/rtsp-sim.yaml](deploy/config/rtsp-sim.yaml)). Needs `walk-1080p-h264.mp4` and `walk-1080p-h265.mp4` in `VIDEO_DIR`. |
 | `SKIP_BUILD=1` | Ships the image already built; for configuration-only changes. |
+| `IMAGE_ONLY=1` | Builds and ships the application image and stops: nothing on the board is changed or restarted (`simulation/run.sh` starts its own container). |
 
 Requirements: on the PC, Docker with buildx and QEMU (`qemu-user-static`,
 `binfmt-support`), `rsync` and Python 3. On the board, JetPack 6 (L4T r36.x)
@@ -629,7 +642,9 @@ with Docker, the compose plugin and the NVIDIA container runtime.
 
 <br/>
 
-Any pipeline works as long as it ends in `appsink` and delivers BGR frames.
+Any pipeline works as long as it ends in `appsink` and delivers BGR,
+BGRx/BGRA or RGBx/RGBA frames (RGBA in NVMM memory in a `WITH_NVMM` build,
+such as the Jetson image).
 
 ```yaml
 # H.264 RTSP camera, hardware decoder, zero-copy: the frame stays in the
@@ -661,8 +676,8 @@ Things worth knowing on a Jetson:
   `tensorrt` backend does not: delete its files in `models/trt-cache/` after
   switching between a native build and the container.
 - The GPU shares the system memory, and CUDA counts only free pages:
-  memory held by the page cache looks taken. `tensorrt-native` evicts cache
-  before it builds an engine; with `tensorrt`, a build that fails with
+  memory held by the page cache looks taken. `tensorrt-native` evicts page
+  cache before it builds an engine when free memory is low; with `tensorrt`, a build that fails with
   "Could not find any implementation for node" wants
   `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`.
 - Use the top power mode for real runs: `sudo nvpmodel -m 2 && sudo jetson_clocks`
@@ -718,9 +733,9 @@ and every measurement (Vietnamese).
 
 ```mermaid
 flowchart LR
-    carla["CARLA, 30 ticks/s<br/>RGB + depth camera"] -->|"one JPEG per frame,<br/>timestamp = sim_ns (GDP/TCP)"| device["Device<br/>YOLO + ByteTrack + lane model<br/>stall model on the rear camera"]
+    carla["CARLA, 30 ticks/s<br/>RGB + depth camera"] -->|"one JPEG per frame,<br/>timestamp = sim_ns (GDP/TCP)"| device["Device<br/>YOLO + ByteTrack + lane model<br/>stall model on the rear camera<br/>or a bird's-eye view"]
     device -->|"/events: boxes, lane,<br/>run_id, sim_ns"| bridge["ROS 2 bridge"]
-    bridge --> controller["Controller<br/>depth + ego pose of the same frame<br/>objects in metres, pure pursuit, brake"]
+    bridge --> controller["Controller<br/>depth of the same frame, pose from<br/>speed and yaw rate (dead reckoning)<br/>objects in metres, pure pursuit, brake"]
     carla -->|"depth, ego state"| controller
     controller -->|"command with a lease"| carla
     carla -.->|"actors, map: truth"| eval["Evaluation"]
@@ -729,7 +744,7 @@ flowchart LR
 
 ```bash
 # once: the lane model, trained on the simulator's own images
-simulation/lane-dataset.py --out data/lanes/town04    # 8000 images, needs CARLA
+simulation/lane-dataset.py --out data/lanes/town04 --count 8000   # needs CARLA
 scripts/train-lane-model.py --data data/lanes/town04 --output models/lane-town04.onnx
 # once: the image on the board
 IMAGE_ONLY=1 scripts/deploy-jetson.sh user@board
@@ -749,7 +764,7 @@ both FP16:
 |:-----|:---------|
 | Frame identity | 0 results naming a frame that was not sent, in every run |
 | Device, both models | detector 8.0 ms from capture to result, lane 3.5 + 3.9 + 0.3 ms; 29.6 results/s; 11.3 W |
-| Tick to result / to command applied | 216 / 237 ms median, 235 / 273 ms at P95 (64 / 100 ms with both on one PC) |
+| Tick to result / to command applied | 216 / 237 ms median, 233 / 273 ms at P95 (64 / 100 ms with both on one PC) |
 | Car recall by distance, 0-30 / 30-60 / 60-90 / 90-120 m | 1.00 / 0.99 / 0.99 / 0.00 |
 | Person recall, same bins | 0.35 / 0.34 / 0.00 / 0.00 |
 | Range from depth at 5 to 20 m | within 0.04 m |
@@ -785,19 +800,19 @@ scripts/train-stall-model.py --data data/stalls --output models/stall-town05.onn
 | Show | Measured |
 |:-----|:---------|
 | `show_drive`, 4 runs | follows a car at 30 km/h, 37 m behind, decides after 10 s to overtake on the left, changes lane in 2.1 s, speeds up to 50 km/h, stops 13 m before a person stepping out, drives on; no collision |
-| Lane keeping and braking at 50 km/h, 14 scenarios | 0.005 m RMSE from the lane centre on the straight, 0.10 to 0.11 m on the curves; a ramp of 100 m radius at 30 km/h within 0.19 m; stopped 8 to 12 m from a car, a truck, a person |
+| Lane keeping and braking at 50 km/h, 20 scenarios, 19 passed | 0.05 to 0.07 m RMSE from the lane centre on the straight and the curves; stopped 6.4 to 11.5 m from a car, a truck, a person |
 | Lane model, 845 validation images of Town04 | a lane in 97 % of the images whose labels give one (83 % with the authors' TuSimple weights), its centre 0.007 m off at the median; 90 % on a map it was not trained on (78 %) |
-| `show_park`, 4 runs | passes two parked cars, takes the first stall it may, backs in: 0.07 to 0.08 m beside its axis, 1.2 degree off, parking brake set |
+| `show_park`, 3 runs | passes two parked cars, takes the first stall it may, backs in: 0.07 to 0.08 m beside its axis, 1.2 degree off, parking brake set (CARLA's pose); with dead reckoning: 0.08 m along, 0.01 m beside, 2.0 degree off |
 | `show_park_next`, 2 runs | a car in that stall: it takes the next one |
 | `show_park_occupied`, 2 runs | no stall left that it may take: gives up at the end of the search without going backwards |
 | Stall model, 440 validation images | 87 % of the stalls found, 99 % of them with the right class; divider ends 3 to 9 m away: 98 % found, 1.8 pixels off at the median |
 
 Scenarios ending in `_bev` (`show_park_bev`) look for the stalls in a
 bird's-eye view instead: two more cameras under the mirrors, and the device
-puts the three images on the ground as one and runs a stall model trained on
-such views. With it the vehicle ended 0.03 to 0.15 m from the stall's centre in
-8 parks of 8, also when it reckons its own pose (the rear camera alone:
-0.18 to 0.57 m, 2 of 3 inside the 0.40 m gate); see `docs/SIMULATION.md`.
+puts the rear, mirror and front images on the ground as one and runs a stall
+model trained on such views. With dead reckoning it parked in 5 runs of 5,
+0.13 to 0.19 m along and 0.04 to 0.06 m beside the stall's axis, up to 1.3
+degree off; see `docs/SIMULATION.md`.
 
 | Searching | Backing in | Parked |
 |:---:|:---:|:---:|
@@ -811,9 +826,11 @@ in yellow), and the controller's map of the stalls.</sub>
 The lane model is trained the same way, on 8000 images of Town04 with the
 lane sides its map gives; the input and output are those of the authors'
 TuSimple weights, which are no longer used. It has seen only CARLA's roads.
-The stall model has seen only this car park, and the vehicle's place between
-frames is its pose as CARLA reports it, without error: the park shows the
-chain from pixels to a parked car, not parking in general.
+The stall model has seen only this car park. After ARM the vehicle knows its
+place between frames only by integrating its speed and yaw rate, with a fixed
+scale error, bias and noise (`control.odometry` in
+`simulation/config/carla.yaml`); CARLA's true pose only grades the run. The
+park shows the chain from pixels to a parked car, not parking in general.
 
 The numbers of the first table are from runs at 9 km/h; since 2026-10-13
 the scenarios drive at 50 km/h unless they say otherwise.
@@ -842,7 +859,7 @@ src/
 │                     a CUDA pre-processing kernel, OpenVINO
 ├── pipeline/         Capture threads, per-stream queue, inference workers
 ├── analytics/        ByteTrack wrapper, zone and line rules, events, lane
-│                     geometry
+│                     geometry, bird's-eye-view stitching (CPU and CUDA)
 ├── config/           YAML configuration
 ├── output/           MQTT publisher
 ├── server/           HTTP server: SSE, MJPEG, metrics, JSON serializer
@@ -853,8 +870,13 @@ deploy/               docker compose stack and overlays (Jetson, laptop,
                       secured, RTSP simulator, CARLA device), Grafana board
 simulation/           CARLA adapter, controller, scenarios, run and evaluation
 ros2/                 ROS 2 bridge from the device's events to topics
-tests/                Eight test binaries, no framework needed
-scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak
+tests/                Ten test binaries, no framework needed
+scripts/              Deploy, secrets, benchmark, mAP, INT8, sanitizers, soak,
+                      model training and export
+models/               ONNX models (not committed) and the TensorRT cache
+docs/                 Guides, simulation design and measurements, images
+cmake/                CMake helpers
+.github/              CI workflow
 Dockerfile            x86-64: CPU and OpenVINO (Intel NPU)
 Dockerfile.jetson     JetPack 6: TensorRT, CUDA, hardware decode, zero-copy
 ```
