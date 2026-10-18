@@ -1,0 +1,266 @@
+# CARLA stage 1: CARLA on a laptop, inference on the device, control on the
+# laptop. One file for both sides, so they cannot disagree:
+#
+#   the device (video_analytics --config) reads the top-level keys, `lane`,
+#   `stall`, `calibration`, `simulation` and `sources`
+#   the laptop (simulation/) reads `calibration`, `rear_calibration`, `lane`,
+#   `carla`, `metric`, `control` and `routes`
+#
+# simulation/run.sh copies it to the device for every run, with
+# SIM_HOST replaced by the laptop's address, and starts the device with the
+# run's id in VA_RUN_ID. See docs/SIMULATION.md.
+
+model: models/yolo11s.onnx
+backend: tensorrt-native
+precision: fp16
+workers: 1
+port: 9001
+bind: 0.0.0.0
+headless: true
+confidence: 0.25
+tracking: true
+# No `classes` key, on purpose: every class reaches the JSON, so a class the
+# controller does not brake for is still logged. The controller refuses to
+# arm when this key leaves out one of its six hazard classes.
+
+simulation:
+  enabled: true   # the run id comes from VA_RUN_ID
+
+# The camera, rigidly on the ego vehicle. Ego frame: x forward, y right, z
+# up, origin at the vehicle's origin (on the road, between the axles).
+# Source images are 1280x720; nothing is cropped or scaled before the device.
+calibration:
+  width: 1280
+  height: 720
+  fov_deg: 52.0
+  # Pitched down so that the road is in the image from about 3 m ahead of the
+  # camera: the lower edge looks 25 degrees below the horizon, the horizon is
+  # at row 129
+  camera: {x: 0.6, y: 0.0, z: 1.5, pitch_deg: -10.0}
+  ground_z: 0.0
+  distortion: [0, 0, 0, 0, 0]
+
+# The rear camera, of the scenarios that park: over the number plate, looking
+# back and down. Wide: beside a row of stalls it sees the ones just passed,
+# and the ground from 0.3 m behind the bumper.
+rear_calibration:
+  width: 1280
+  height: 720
+  fov_deg: 120.0
+  camera: {x: -2.45, y: 0.0, z: 1.0, pitch_deg: -30.0, yaw_deg: 180.0}
+  ground_z: 0.0
+  distortion: [0, 0, 0, 0, 0]
+
+# The cameras under the two mirrors, of the scenarios that park with
+# `bev: true`: looking down and turned 15 degrees to the rear. With the rear
+# camera they have 93 % of the ground within 4 m of the vehicle in view, from
+# 1 m ahead of its origin backwards: the stalls beside it, and the mouth of the
+# one it backs into until it is 0.9 m from where it stands.
+left_calibration:
+  width: 1280
+  height: 720
+  fov_deg: 120.0
+  camera: {x: 0.55, y: -1.05, z: 1.0, pitch_deg: -45.0, yaw_deg: -105.0}
+  ground_z: 0.0
+  distortion: [0, 0, 0, 0, 0]
+right_calibration:
+  width: 1280
+  height: 720
+  fov_deg: 120.0
+  camera: {x: 0.55, y: 1.05, z: 1.0, pitch_deg: -45.0, yaw_deg: 105.0}
+  ground_z: 0.0
+  distortion: [0, 0, 0, 0, 0]
+
+# The bird's-eye view, of the scenarios that park with `bev: true`: the device
+# puts the images of these cameras on the ground as one image, forward up, the
+# vehicle's origin in the middle, 20 m by 20 m, and looks for the stalls in
+# that instead of the rear camera's image. Its results come under `id`, as a
+# source's do. A pixel is taken from the camera nearest to its place on the
+# ground. `model` is the stall model trained on such views
+# (simulation/stall-dataset.py make --bev, scripts/train-stall-model.py); not
+# committed, like the other models. `port` is where the simulator sends a
+# camera's images; the source's `gst` below names the same one.
+bev:
+  id: carla-bev
+  width: 800
+  height: 800
+  metres_per_pixel: 0.025
+  model: models/stall-bev-town05.onnx
+  cameras:
+    - {source: carla-rear, calibration: rear_calibration, port: 5001}
+    - {source: carla-left, calibration: left_calibration, port: 5002}
+    - {source: carla-right, calibration: right_calibration, port: 5003}
+    # The front camera, which every scenario has: narrow, it adds the ground
+    # from 3.6 m ahead and costs no camera more to render
+    - {source: carla-front, calibration: calibration, port: 5000}
+
+# The lane model, on the front camera. Trained on the simulator's own images
+# with the lane sides its map gives (simulation/lane-dataset.py,
+# scripts/train-lane-model.py); not committed, like the other models.
+lane:
+  model: models/lane-town04.onnx
+  backend: tensorrt-native
+  precision: fp16
+  roi_x_min_m: 3.0
+  roi_x_max_m: 30.0
+  reference_x_m: 8.0
+  min_points: 5
+  min_support_m: 5.0
+  max_residual_m: 0.25
+  width_min_m: 2.5
+  width_max_m: 4.6
+
+# The parking stall model, on the rear camera: a stall, empty or occupied,
+# with its four corners, and the ends of the dividers between stalls, in
+# pixels. Trained on images of the car park the runs use
+# (simulation/stall-dataset.py, scripts/train-stall-model.py); not committed,
+# like the other models. A scenario with `bev: true` uses the model of the
+# `bev` section, on the bird's-eye view, in its place.
+stall:
+  model: models/stall-town05.onnx
+  precision: fp16
+  confidence: 0.5
+
+sources:
+  - id: carla-front
+    gst: "tcpclientsrc host=SIM_HOST port=5000 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+    lane: true
+  # Only in the scenarios that park: simulation/run.sh leaves this source
+  # and the stall model out of the device's copy for the others
+  - id: carla-rear
+    gst: "tcpclientsrc host=SIM_HOST port=5001 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+    stall: true
+  # Only in the scenarios that park with `bev: true`
+  - id: carla-left
+    gst: "tcpclientsrc host=SIM_HOST port=5002 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+  - id: carla-right
+    gst: "tcpclientsrc host=SIM_HOST port=5003 ! gdpdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false max-buffers=1 drop=true"
+
+# ── Laptop side ──────────────────────────────────────────────────────────────
+
+carla:
+  host: 127.0.0.1
+  port: 2000
+  map: Town04
+  fps: 30                  # fixed_delta_seconds = 1/30, synchronous
+  ego_blueprint: vehicle.tesla.model3
+  # 1280x720 at 30 FPS over the link between the two machines. Measured on
+  # the link used so far (a relayed VPN, 120 ms round trip, about 10 Mbit/s):
+  # quality 75 is 87 kB a frame, 20 Mbit/s, and only 69 % of the frames came
+  # back; quality 30 is 36 to 40 kB, under 10 Mbit/s, and 99 % came back.
+  # Quality 20 fits with more room but the detector then misses cars beyond
+  # 60 m that it finds at 30.
+  jpeg_quality: 30
+  sender: {bind: 0.0.0.0, port: 5000, rear_port: 5001, max_queued: 2, client_max_buffers: 30}
+  callback_queue: 8
+  live_cache_entries: 90   # 3 s of frames a late result can be joined with
+  depth_artifact_frames: 1000  # lossless depth kept per run, about 1 MB each;
+                               # a 900-tick run and its lead-in fit
+  rgb_artifact_every: 0        # keep every Nth JPEG as sent; 0: none
+  settle_ticks: 30
+
+metric:
+  q_accel: 4.0
+  r_floor_m: 0.15
+  r_range_fraction: 0.01
+  max_gap_s: 0.5
+
+control:
+  # Of every scenario that does not set its own: a town's speed. The lane is
+  # held at it (0.04 m RMSE on the straight) and a car, a truck and a person
+  # standing 30 to 50 m ahead are braked for in time. With max_throttle 0.5
+  # the vehicle does not go faster than this anyway.
+  target_speed_kmh: 50.0
+  speed_cap_kmh: 60.0      # no scenario drives faster, whatever it asks for
+  # Budgets, version 2. Version 1 was 200 ms of simulation and 300 ms of wall
+  # time, the targets of the plan. They cannot be met on the link used so
+  # far: from a tick to its result takes 216 ms at the median, 235 ms at the
+  # 95th percentile and up to 432 ms (120 ms of it is the round trip). With
+  # both machines on one network the same chain takes 64 ms and version 1
+  # holds. tau below covers the larger budget.
+  #
+  # Perception older than this, in simulation time, is not driven on
+  age_limit_ms: 500
+  # No accepted command for this long, in wall time: the simulator brakes
+  wall_lease_ms: 600
+  # The ego state a command was computed for may be this old
+  pose_budget_ms: 100
+  hazard_classes: [person, bicycle, car, motorcycle, bus, truck]
+  # Brake when gap <= v * tau + v^2 / (2 * a_min) + margin
+  # a_min: a full brake measured 10.3 m/s^2 from 2.6 m/s (scenario
+  # vehicle_response) and 7.0 m/s^2 from 12 m/s (standing 10.8 m and 1.4 s
+  # later); 5.0 is the bound used. With the 2.5 used before, the vehicle
+  # stood 28 m from what it braked for from 12 m/s. tau: the age limit plus
+  # the measured 0.1 s from brake command to first deceleration.
+  brake: {a_min_mps2: 5.0, tau_s: 0.6, margin_m: 2.0}
+  ttc_min_s: 2.0
+  # A ground-plane range past this is not a follow gap and not a
+  # time-to-collision brake. Inside the stopping distance it still brakes.
+  ground_range_max_m: 40.0
+  # After a brake for an object, this many results in a row must show the
+  # path clear before the vehicle drives on: 1 s, longer than the 0.5 s
+  # (metric.max_gap_s) a track that is no longer measured is still predicted
+  clear_frames: 30
+  # An object beyond the lane that was seen is placed against the lane
+  # continued by up to this much, when the lane is nearly straight
+  extrapolate_m: 20.0
+  corridor_margin_m: 0.3
+  unknown_closing_mps: 2.0
+  pure_pursuit: {lookahead_min_m: 6.0, lookahead_gain_s: 1.0}
+  steer: {gain: 1.0, rate_per_s: 2.0}
+  speed: {kp: 0.25, ki: 0.15, max_throttle: 0.5, integral_band_mps: 0.5}
+  # Fixed wheel and gyro error. The controller integrates this after ARM.
+  # Show runs that miss the park gate do not edit these numbers.
+  odometry:
+    speed_scale: 1.015
+    speed_noise_mps: 0.03
+    yaw_rate_bias_radps: 0.001745
+    yaw_rate_noise_radps: 0.003491
+    seed: 1
+  # Overtaking (scenarios with `overtake`): after this long behind a vehicle
+  # that keeps it under its target speed, it moves to the next lane, on the
+  # first of these sides that the image shows and that is free
+  overtake: {after_s: 10.0, sides: [left, right]}
+  # One park, backwards into a stall the rear camera finds (scenarios with
+  # `park`). Nothing here says where a stall is.
+  park:
+    approach_speed_mps: 4.0 # while it looks for a stall: 14 km/h
+    search_m: 32.0          # no stall it may take within this: the park is given up
+    min_sightings: 10       # times a stall must have been judged before it is taken
+    min_margin_m: 0.4       # a stall must be wider than the vehicle by this
+    past_margin_m: 0.5      # beyond the turning point before it stops to go back
+    # The quarter circle ends this far inside the mouth. Its radius follows
+    # from where the vehicle is on the aisle, and the share of the full lock
+    # from the radius; outside these shares the aisle does not fit.
+    turn_ends_inside_m: 1.0
+    k_min: 0.3
+    k_max: 0.65
+    turn_gain: 0.88         # measured wheel angle over the nominal one: scenario
+                            # vehicle_response, backwards at steer 0.45, puts
+                            # the rear axle on a circle of 5.7 m
+    # The most it goes backwards. 0.2 m/s this vehicle does not hold: with a
+    # throttle up to 0.25 it creeps at 0.07 m/s, and once it runs the same
+    # throttle gives 0.5 m/s. Held at 0.2 it moved in bursts of up to
+    # 0.48 m/s around a mean of 0.09.
+    # 2.0 since 2026-10-13 (0.5 at first): it then backs at 1.4 m/s, 5 km/h,
+    # and a park takes 18 s instead of 45.
+    reverse_speed_mps: 2.0
+    reverse_throttle: 0.38  # about what keeps it at three quarters of that
+    align_done_deg: 12.0    # from here the vehicle is steered onto the axis
+    lost_s: 3.0             # the stall not found for this long, outside it: given up
+  ready_frames: 3
+  arm_age_fraction: 0.6   # to arm, perception must be younger than 60 % of the limit
+
+# Where the ego vehicle starts, snapped to the lane centre. Town04, all on
+# level ground (z = 0). A route with yaw_deg is a pose as it stands, not
+# snapped to any lane.
+routes:
+  straight: {x: 13.0, y: 219.9}      # road 46 lane -3: 400 m straight, lanes both sides
+  curve_right: {x: -39.4, y: -231.6} # road 23 lane -3: radius about 340 m
+  curve_left: {x: -122.6, y: -148.2} # road 23 lane -3
+  ramp: {x: -225.0, y: -97.2}        # road 23 lane -3, 65 m before its ramp
+  # Town05, on the widest aisle of its car park, at the east end, heading
+  # west. The car park is a paved square 0.16 m above the streets, with a
+  # kerb and a fence around it: no lane leads into it and its aisles have no
+  # markings. Where the vehicle starts, not where it parks.
+  carpark: {x: 17.03, y: -13.10, z: 0.157, yaw_deg: -90.0}

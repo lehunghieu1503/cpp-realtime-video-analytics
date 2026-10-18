@@ -25,6 +25,7 @@ public:
   std::shared_ptr<DeviceFrame> takeDeviceFrame() override {
     return std::move(deviceFrame_);
   }
+  std::optional<uint64_t> sourceTimestampNs() const override { return pts_; }
   void release() override;
   bool isOpened() const override { return pipeline_ != nullptr; }
   double getActualFps() const override { return fps_ > 0 ? fps_ : 30.0; }
@@ -42,4 +43,5 @@ private:
   double fps_ = 0.0;
   std::string format_;
   std::shared_ptr<DeviceFrame> deviceFrame_;
+  std::optional<uint64_t> pts_;  // of the last frame read
 };

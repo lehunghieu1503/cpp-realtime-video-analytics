@@ -21,6 +21,10 @@ struct SseServerConfig {
   int port = 9001;
   std::string bindAddress = "127.0.0.1";
   std::string staticDir = "web/";
+  // false: no page and no video (GET /, /static/..., /video answer 404), so
+  // no frame is ever drawn or encoded for a browser. The results (/events),
+  // /streams, /health and /metrics are served all the same.
+  bool dashboard = true;
   int numStreams = 1;
   // Body of GET /streams: what the dashboard needs to lay itself out
   std::string streamsJson = "[]";

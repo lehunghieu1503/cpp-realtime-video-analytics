@@ -168,6 +168,15 @@ void Pipeline::captureLoop(int streamId) {
         std::chrono::duration<double, std::milli>(now - readStart).count();
     fd.frame = std::move(frame);
     fd.device = capture.takeDeviceFrame();
+    fd.sourcePtsNs = capture.sourceTimestampNs();
+    if (config_.requireSourceTimestamp && !fd.sourcePtsNs) {
+      // A time made up here would be joined to the wrong simulator frame
+      std::cerr << "Pipeline: " << source.id
+                << " delivered a frame without a timestamp, stopping\n";
+      running_ = false;
+      frameQueue_.stop();
+      break;
+    }
     stats.framesCaptured++;
 
     frameQueue_.push(std::move(fd));
@@ -190,8 +199,11 @@ void Pipeline::inferenceWorker(int workerId) {
     auto detectStart = std::chrono::steady_clock::now();
     std::vector<Detection> detections;
     StageTimes times;
+    // The frame as the backend uploaded it, for the bird's-eye view and the
+    // stall model to read on the GPU
+    std::shared_ptr<DeviceFrame> uploaded;
     try {
-      detections = engine->detect(fd.frame, &times, fd.device.get());
+      detections = engine->detect(fd.frame, &times, fd.device.get(), &uploaded);
     } catch (const std::exception& e) {
       // An exception leaving a std::thread would terminate the process
       std::cerr << "Pipeline: inference failed, stopping: " << e.what()
@@ -208,7 +220,11 @@ void Pipeline::inferenceWorker(int workerId) {
     result.captureTime = fd.captureTime;
     result.inferenceDoneTime = now;
     result.frame = std::move(fd.frame);
-    result.device = std::move(fd.device);
+    result.device = fd.device ? std::move(fd.device) : std::move(uploaded);
+    result.sourcePtsNs = fd.sourcePtsNs;
+    result.imageWidth = result.device ? result.device->width() : result.frame.cols;
+    result.imageHeight =
+        result.device ? result.device->height() : result.frame.rows;
     result.detections = std::move(detections);
     result.inferenceLatencyMs =
         std::chrono::duration<double, std::milli>(now - fd.captureTime).count();

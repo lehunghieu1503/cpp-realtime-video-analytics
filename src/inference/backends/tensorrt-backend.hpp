@@ -9,7 +9,8 @@
 // Runtime it owns the engine, so it can
 //   - keep the input on the GPU: runFrame() uploads the 8-bit frame once and
 //     resizes, reorders and normalises it in a CUDA kernel that writes
-//     straight into the engine's input; runDeviceFrame() skips even that
+//     straight into the engine's input; the frame stays on the GPU for
+//     others to read (uploadedFrame()). runDeviceFrame() skips even that
 //     upload for frames that are already in GPU-visible memory
 //   - report what the engine is made of and where the time goes, layer by
 //     layer
@@ -30,7 +31,9 @@ public:
   bool preprocessesFrames() const override { return true; }
   const float* runFrame(const cv::Mat& bgr, std::vector<int64_t>& outputShape,
                         double* preprocessMs) override;
-  // Reads a Jetson NVMM frame where the decoder left it: no copy at all
+  std::shared_ptr<DeviceFrame> uploadedFrame() override;
+  // Reads a frame of uploadedFrame(), or a Jetson NVMM frame where the
+  // decoder left it: no copy at all
   const float* runDeviceFrame(DeviceFrame& frame,
                               std::vector<int64_t>& outputShape,
                               double* preprocessMs) override;

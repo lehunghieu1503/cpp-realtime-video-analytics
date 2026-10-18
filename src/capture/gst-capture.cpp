@@ -89,6 +89,9 @@ bool GstCapture::reportBusError() {
 }
 
 bool GstCapture::read(cv::Mat& frame) {
+  // A read that fails, or a buffer without a timestamp, must not leave the
+  // previous frame's timestamp behind
+  pts_.reset();
   if (!pipeline_) return false;
 
   GstSample* sample =
@@ -98,6 +101,9 @@ bool GstCapture::read(cv::Mat& frame) {
     reportBusError();
     return false;
   }
+  // Read before the sample is handed over (NVMM) or released
+  GstClockTime pts = GST_BUFFER_PTS(gst_sample_get_buffer(sample));
+  if (GST_CLOCK_TIME_IS_VALID(pts)) pts_ = pts;
 
   GstCaps* caps = gst_sample_get_caps(sample);
   if (gst_caps_features_contains(gst_caps_get_features(caps, 0),
@@ -173,6 +179,7 @@ bool GstCapture::read(cv::Mat& frame) {
 }
 
 void GstCapture::release() {
+  pts_.reset();
   if (sink_) {
     gst_object_unref(sink_);
     sink_ = nullptr;

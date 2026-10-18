@@ -51,10 +51,13 @@ public:
   // Run object detection on a BGR frame, returns detected objects
   // `device`, when given, is the same frame in device memory; `frame` may
   // then be empty, and is filled from it only if the backend needs the CPU
-  // copy
-  std::vector<Detection> detect(const cv::Mat& frame,
-                                StageTimes* times = nullptr,
-                                DeviceFrame* device = nullptr);
+  // copy. `uploaded`, when given, receives the frame as the backend put it
+  // in device memory, if it keeps it there (see
+  // IInferenceBackend::uploadedFrame())
+  std::vector<Detection> detect(
+      const cv::Mat& frame, StageTimes* times = nullptr,
+      DeviceFrame* device = nullptr,
+      std::shared_ptr<DeviceFrame>* uploaded = nullptr);
 
   // Check if model was loaded successfully
   bool isLoaded() const;

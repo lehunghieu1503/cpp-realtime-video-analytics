@@ -5,6 +5,8 @@
 #include "benchmark/power-meter.hpp"
 #include "config/app-config.hpp"
 #include "inference/detection.hpp"
+#include "inference/lane-engine.hpp"
+#include "inference/stall-engine.hpp"
 #include "output/mqtt-publisher.hpp"
 #include "pipeline/pipeline.hpp"
 #include "server/result-serializer.hpp"
@@ -31,6 +33,29 @@ static std::atomic<bool> gShutdown{false};
 void signalHandler(int) { gShutdown = true; }
 
 // Draw detection bounding boxes and labels on frame
+// Green for an empty stall, red for one with a vehicle in it; only the
+// corners the model says it sees are joined. The ends of the dividers are
+// crosses: yellow at the mouth, magenta at the back.
+void drawStalls(cv::Mat& frame, const StallResult& found) {
+  for (const auto& point : found.points) {
+    cv::drawMarker(frame, point.at,
+                   point.back ? cv::Scalar(255, 0, 255) : cv::Scalar(0, 255, 255),
+                   cv::MARKER_CROSS, 14, 2, cv::LINE_AA);
+  }
+  for (const auto& stall : found.stalls) {
+    cv::Scalar color = stall.occupied ? cv::Scalar(0, 0, 255)
+                                      : cv::Scalar(0, 255, 0);
+    for (size_t k = 0; k < stall.corners.size(); k++) {
+      size_t next = (k + 1) % stall.corners.size();
+      if (stall.cornerConfidence[k] < 0.5f) continue;
+      cv::circle(frame, stall.corners[k], 5, color, 2, cv::LINE_AA);
+      if (stall.cornerConfidence[next] < 0.5f) continue;
+      cv::line(frame, stall.corners[k], stall.corners[next], color, 2,
+               cv::LINE_AA);
+    }
+  }
+}
+
 void drawDetections(cv::Mat& frame,
                     const std::vector<Detection>& detections) {
   for (const auto& det : detections) {
@@ -495,6 +520,12 @@ std::string streamsJson(const AppConfig& app) {
     streams.push_back(
         {{"id", source.capture.id}, {"zones", zones}, {"lines", lines}});
   }
+  // The bird's-eye view is a stream of its own, after the sources
+  if (app.bev.isSet()) {
+    streams.push_back({{"id", app.bev.id},
+                       {"zones", nlohmann::json::array()},
+                       {"lines", nlohmann::json::array()}});
+  }
   return streams.dump();
 }
 }  // namespace
@@ -510,6 +541,77 @@ int runLive(const AppConfig& app) {
   config.frameQueueSize = std::max<size_t>(
       1, static_cast<size_t>(app.workers) / app.sources.size());
   config.resultQueueSize = std::max<size_t>(16, app.sources.size() * 4);
+  config.requireSourceTimestamp = app.simulation.enabled;
+
+  // One lane model for the sources that ask for it; it runs here, on the
+  // main thread, on the frame as captured. Loaded before the pipeline starts:
+  // building its engine takes minutes, and the cameras must not be read, and
+  // their frames dropped, while nothing can use them.
+  std::unique_ptr<LaneEngine> laneEngine;
+  for (const auto& source : app.sources) {
+    if (!source.lane || laneEngine) continue;
+    LaneEngineConfig laneConfig;
+    laneConfig.modelPath = app.lane.model;
+    laneConfig.backend = app.lane.backend.empty() ? app.backend : app.lane.backend;
+    laneConfig.precision = app.lane.precision;
+    laneEngine = std::make_unique<LaneEngine>(laneConfig);
+    if (!laneEngine->isLoaded()) {
+      // No fallback: a controller would steer on a lane that is not there
+      std::cerr << "Failed to load the lane model\n";
+      return -1;
+    }
+  }
+  // The same for the parking stall model
+  std::unique_ptr<StallEngine> stallEngine;
+  bool stallsWanted = app.bev.isSet();
+  for (const auto& source : app.sources) {
+    stallsWanted = stallsWanted || source.stall;
+  }
+  if (stallsWanted) {
+    StallEngineConfig stallConfig;
+    stallConfig.modelPath = app.stall.model;
+    stallConfig.backend =
+        app.stall.backend.empty() ? app.backend : app.stall.backend;
+    stallConfig.precision = app.stall.precision;
+    stallConfig.confidence = app.stall.confidence;
+    stallEngine = std::make_unique<StallEngine>(stallConfig);
+    if (!stallEngine->isLoaded()) {
+      // No fallback: a controller would park on stalls nobody looked for
+      std::cerr << "Failed to load the stall model\n";
+      return -1;
+    }
+  }
+  // The bird's-eye view of some of the sources; the stall model runs on it.
+  // bevCamera: which of its cameras a source is, -1 for none.
+  std::unique_ptr<BevStitcher> bev;
+  std::vector<int> bevCamera(app.sources.size(), -1);
+  const size_t bevStream = app.sources.size();
+  FpsTracker bevFps;
+  uint64_t bevFrames = 0;
+  // Stitched on the GPU when the stall model reads its input there: the
+  // frames the detector uploaded are read in place, and the view comes to
+  // the CPU only when somebody looks at it
+  bool bevOnGpu = false;
+  if (app.bev.isSet()) {
+    std::vector<CameraRig> rigs;
+    for (size_t c = 0; c < app.bev.cameras.size(); c++) {
+      rigs.push_back(app.bev.cameras[c].rig);
+      for (size_t i = 0; i < app.sources.size(); i++) {
+        if (app.sources[i].capture.id == app.bev.cameras[c].source) {
+          bevCamera[i] = static_cast<int>(c);
+        }
+      }
+    }
+    bev = std::make_unique<BevStitcher>(app.bev.width, app.bev.height,
+                                        app.bev.metresPerPixel, rigs);
+    bevOnGpu = stallEngine->readsDeviceFrames() && BevStitcher::canUseGpu();
+    std::cout << "Bird's-eye view " << app.bev.id << ": " << app.bev.width
+              << "x" << app.bev.height << " from " << rigs.size()
+              << " cameras, stitched on the " << (bevOnGpu ? "GPU" : "CPU")
+              << "\n";
+  }
+  const std::string calibrationId =
+      app.calibration.isSet() ? app.calibration.calibrationId() : "";
 
   Pipeline pipeline(config);
   pipeline.start();
@@ -560,7 +662,8 @@ int runLive(const AppConfig& app) {
   sseConfig.port = app.port;
   sseConfig.bindAddress = app.bind;
   sseConfig.staticDir = "web/";
-  sseConfig.numStreams = static_cast<int>(app.sources.size());
+  sseConfig.dashboard = app.dashboard;
+  sseConfig.numStreams = static_cast<int>(app.sources.size()) + (bev ? 1 : 0);
   sseConfig.streamsJson = streamsJson(app);
   sseConfig.username = app.httpUser;
   sseConfig.password = app.httpPassword;
@@ -584,14 +687,16 @@ int runLive(const AppConfig& app) {
 
   std::cout << "Pipeline running. Press "
             << (app.headless ? "Ctrl+C" : "'q' or Ctrl+C") << " to stop.\n";
-  std::cout << "Dashboard: " << (app.tlsCert.empty() ? "http" : "https")
-            << "://localhost:" << app.port << "\n"
+  std::cout << (app.dashboard ? "Dashboard: " : "Dashboard off; results: ")
+            << (app.tlsCert.empty() ? "http" : "https") << "://localhost:"
+            << app.port << (app.dashboard ? "" : "/events") << "\n"
             << std::flush;
 
   // Create the windows up front so waitKey() can pump events before the
   // first frame arrives
   if (!app.headless) {
     for (const auto& stream : streams) cv::namedWindow(stream.id);
+    if (bev) cv::namedWindow(app.bev.id);
   }
 
   bool failed = false;
@@ -646,6 +751,73 @@ int runLive(const AppConfig& app) {
       events = stream.rules->update(result.detections, unixNow());
     }
 
+    // Before anything is drawn on the frame: the model must see the image
+    LaneResult lane;
+    if (app.sources[s].lane) {
+      cv::Mat& image = result.cpuFrame();
+      if (image.cols != app.calibration.width ||
+          image.rows != app.calibration.height) {
+        lane.reason = "image_size";
+      } else {
+        try {
+          double preMs = 0.0, inferMs = 0.0, postMs = 0.0;
+          auto pixels = laneEngine->detect(image, &preMs, &inferMs, &postMs);
+          auto geometryStart = Clock::now();
+          lane = estimateLane(pixels, app.calibration, app.lane.geometry);
+          lane.preMs = preMs;
+          lane.inferMs = inferMs;
+          lane.postMs = postMs + std::chrono::duration<double, std::milli>(
+                                     Clock::now() - geometryStart)
+                                     .count();
+        } catch (const std::exception& e) {
+          std::cerr << "Lane model failed, stopping: " << e.what() << "\n";
+          failed = true;
+          break;
+        }
+      }
+    }
+
+    StallResult stalls;
+    if (app.sources[s].stall) {
+      try {
+        // Read where the detector uploaded it, when the model can
+        stalls = result.device && stallEngine->readsDeviceFrames()
+                     ? stallEngine->detect(*result.device)
+                     : stallEngine->detect(result.cpuFrame());
+      } catch (const std::exception& e) {
+        std::cerr << "Stall model failed, stopping: " << e.what() << "\n";
+        failed = true;
+        break;
+      }
+    }
+
+    // The bird's-eye view takes this frame as captured, before anything is
+    // drawn on it. Frames are joined by the source's own timestamp, which
+    // the simulator's cameras share; a frame without one is not used.
+    // shortcut: equal timestamps only, cameras with clocks of their own
+    // would need a tolerance.
+    cv::Mat view;
+    std::shared_ptr<DeviceFrame> deviceView;
+    if (bev && bevCamera[s] >= 0 && result.sourcePtsNs) {
+      try {
+        // cpuFrame() copies nothing here: a frame captured on the CPU keeps
+        // its pixels there, and one captured on the device that is not a
+        // GPU frame (Jetson NVMM) must come to the CPU either way
+        if (bevOnGpu) {
+          deviceView = bev->offerOnGpu(static_cast<size_t>(bevCamera[s]),
+                                       *result.sourcePtsNs,
+                                       result.device, result.cpuFrame());
+        } else {
+          view = bev->offer(static_cast<size_t>(bevCamera[s]),
+                            *result.sourcePtsNs, result.cpuFrame());
+        }
+      } catch (const std::exception& e) {
+        std::cerr << e.what() << ", stopping\n";
+        failed = true;
+        break;
+      }
+    }
+
     // Drawing costs more than the rules; skip it when nobody will see it
     bool needFrame = !app.headless || sseServer.hasViewers(s) ||
                      (!events.empty() && !app.snapshotDir.empty());
@@ -654,13 +826,26 @@ int runLive(const AppConfig& app) {
       // because somebody is going to look at it
       result.cpuFrame();
       drawDetections(result.frame, result.detections);
+      for (const auto& points : lane.pixels) {
+        if (points.size() < 2) continue;
+        cv::polylines(result.frame, points, false, cv::Scalar(0, 255, 255), 2,
+                      cv::LINE_AA);
+      }
+      drawStalls(result.frame, stalls);
       if (stream.rules) drawRules(result.frame, *stream.rules);
       drawOverlay(result.frame, stream.fps.fps, result.inferenceLatencyMs,
                   static_cast<int>(result.detections.size()), result.frameId);
     }
 
-    auto json = serializeResult(result, stream.fps.fps);
+    auto json = serializeResult(
+        result, stream.fps.fps,
+        app.simulation.enabled ? app.simulation.runId : std::string());
     json["stream"] = stream.id;
+    if (app.sources[s].lane) json["lane"] = serializeLane(lane, calibrationId);
+    if (app.sources[s].stall) {
+      json["stalls"] = serializeStalls(stalls.stalls);
+      json["stall_points"] = serializeStallPoints(stalls.points);
+    }
     if (!events.empty()) {
       // One snapshot per frame, shared by the events it raised
       std::string snapshot = snapshots.save(result.frame, events.front());
@@ -708,6 +893,47 @@ int runLive(const AppConfig& app) {
     sseServer.broadcast(json.dump(), s);
     // Skipped by the server too when nobody watches this stream
     if (needFrame) sseServer.updateFrame(result.frame, s);
+
+    // This frame was the last its moment waited for: the view is whole.
+    // Its result is a stream's, of the moment the frames share; the
+    // detector does not run on it.
+    if (!view.empty() || deviceView) {
+      StallResult found;
+      try {
+        found = deviceView ? stallEngine->detect(*deviceView)
+                           : stallEngine->detect(view);
+      } catch (const std::exception& e) {
+        std::cerr << "Stall model failed, stopping: " << e.what() << "\n";
+        failed = true;
+        break;
+      }
+      bevFps.update();
+      nlohmann::json viewJson = {
+          {"stream", app.bev.id},
+          {"frame_id", bevFrames++},
+          {"detections", nlohmann::json::array()},
+          {"latency_ms",
+           std::round(std::chrono::duration<double, std::milli>(
+                          Clock::now() - result.captureTime)
+                          .count() *
+                      10) /
+               10},
+          {"fps", std::round(bevFps.fps * 10) / 10},
+          {"image", {{"width", bev->width()}, {"height", bev->height()}}},
+          {"stalls", serializeStalls(found.stalls)},
+          {"stall_points", serializeStallPoints(found.points)}};
+      if (app.simulation.enabled) {
+        viewJson["simulation"] = {{"run_id", app.simulation.runId},
+                                  {"sim_ns", *result.sourcePtsNs}};
+      }
+      bool viewWatched = !app.headless || sseServer.hasViewers(bevStream);
+      // The one copy of a GPU view to the CPU, for whoever watches
+      if (viewWatched && deviceView) view = deviceView->toBgr();
+      if (viewWatched) drawStalls(view, found);
+      if (!app.headless) cv::imshow(app.bev.id, view);
+      sseServer.broadcast(viewJson.dump(), bevStream);
+      if (viewWatched) sseServer.updateFrame(view, bevStream);
+    }
   }
 
   // A worker that gave up clears isRunning(); sources that simply ended
@@ -716,6 +942,10 @@ int runLive(const AppConfig& app) {
 
   sseServer.stop();
   pipeline.stop();
+  if (bev) {
+    std::cout << "Bird's-eye view: " << bev->made() << " views, "
+              << bev->dropped() << " moments without every camera's frame\n";
+  }
   if (!app.headless) cv::destroyAllWindows();
 
   return failed ? -1 : 0;
@@ -749,7 +979,9 @@ void printUsage(const char* prog) {
       << "  --bind ADDR      Bind address (default: 127.0.0.1)\n"
       << "  --workers N      Inference worker threads (default: 2, or 1 with\n"
       << "                   an accelerator)\n"
-      << "  --headless       No local window; dashboard only\n\n"
+      << "  --headless       No local window; dashboard only\n"
+      << "  --no-dashboard   No page and no video on the port: results\n"
+      << "                   (/events), /health and /metrics only\n\n"
       << "Benchmark options:\n"
       << "  --input FILE     Input video file (required)\n"
       << "  --frames N       Number of frames to measure (default: 300)\n"
@@ -856,6 +1088,8 @@ int main(int argc, char* argv[]) {
       app.profileLayers = true;
     } else if (is("--headless")) {
       app.headless = true;
+    } else if (is("--no-dashboard")) {
+      app.dashboard = false;
     } else if (is("--help")) {
       printUsage(argv[0]);
       return 0;
@@ -867,6 +1101,22 @@ int main(int argc, char* argv[]) {
   // Validate
   if (app.port < 1 || app.port > 65535) {
     std::cerr << "Error: --port must be between 1 and 65535\n";
+    return -1;
+  }
+  if (std::string reason = checkLane(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
+    return -1;
+  }
+  if (std::string reason = checkStall(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
+    return -1;
+  }
+  if (std::string reason = checkBev(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
+    return -1;
+  }
+  if (std::string reason = checkSimulation(app); !reason.empty()) {
+    std::cerr << "Error: " << reason << "\n";
     return -1;
   }
   if (!isKnownBackend(app.backend)) {

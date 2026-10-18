@@ -8,6 +8,9 @@
 #   VIDEO_DIR   directory on the board mounted at /data/videos (default:
 #               REMOTE_DIR/videos)
 #   SKIP_BUILD  set to 1 to ship the image already built
+#   IMAGE_ONLY  set to 1 to build and ship the application image and stop:
+#               nothing in REMOTE_DIR is changed and nothing is restarted
+#               (simulation/run.sh starts its own container)
 #   SIM         set to 1 to run simulated RTSP cameras on the board and read
 #               them with hardware decoding (docker-compose.sim.yml)
 #   SECURE      set to 1 for HTTPS and passwords on the dashboard, TLS and
@@ -25,7 +28,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 HOST="$1"
@@ -56,6 +59,7 @@ if [ "${SKIP_BUILD:-0}" != 1 ]; then
     -t "$APP_IMAGE" --load .
 fi
 
+[ "${IMAGE_ONLY:-0}" = 1 ] && OTHER_IMAGES=""
 for image in $OTHER_IMAGES; do
   # Pulled for the board's platform, not this PC's
   if ! docker image inspect "$image" --format '{{.Architecture}}' 2>/dev/null |
@@ -88,6 +92,10 @@ ship_image() {
 }
 
 ship_image "$APP_IMAGE"
+if [ "${IMAGE_ONLY:-0}" = 1 ]; then
+  echo "== $APP_IMAGE is on the board; nothing else was changed"
+  exit 0
+fi
 for image in $OTHER_IMAGES; do ship_image "$image"; done
 
 echo "== Copying configuration and model to $HOST:$REMOTE_DIR"

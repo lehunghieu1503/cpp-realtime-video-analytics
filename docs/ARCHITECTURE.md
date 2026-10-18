@@ -105,6 +105,33 @@ frame travels through the queues as a `shared_ptr`; the buffer returns to
 the decoder's pool when the last reference goes. `AnalyticsResult::cpuFrame()`
 makes the CPU copy on first use, which only happens when a frame is drawn.
 
+### A second model: the lane
+
+A source with `lane: true` also runs the lane model (`LaneEngine`: Ultra Fast
+Lane Detection, ResNet-18). It is a model of its own with its own backend
+instance, its own pre-processing (ImageNet mean and deviation, so always the
+tensor path, never a backend's frame pre-processing) and its own decoder.
+It is loaded before the pipeline starts, and runs on the main thread, on the
+frame as captured, before anything is drawn on it.
+
+`lane-geometry` turns the lane pixels into metres on the road with the
+camera calibration from the config (`CameraRig`: field of view, position and
+pitch on the vehicle, a flat road), fits the two boundaries around the
+vehicle and gives the centreline. Frames are x forward, y right. The same
+numbers are computed by the Python reference in
+`simulation`, and both are tested against
+`tests/fixtures/lane-calibration.json`.
+
+### Frames of a simulation
+
+With `simulation: {enabled: true}` each frame is identified by the run id
+and its own timestamp. `GstCapture` reports the buffer's PTS,
+`Pipeline::captureLoop` copies it into the frame and the result, and the
+JSON carries it as an integer of nanoseconds. A frame without a timestamp
+stops the pipeline: a time made up on arrival would be joined to the wrong
+simulator frame. The local `frame_id` is unchanged and still orders results.
+[docs/SIMULATION.md](SIMULATION.md) describes the rest of that loop.
+
 ### Tracking and rules
 
 The main loop keeps one `Tracker` (ByteTrack) and one `Rules` object per
@@ -157,7 +184,8 @@ never stalls a producer.
 | A live source cannot be opened | Retried after 1 s, doubling up to 30 s. The other sources keep running. |
 | A live source stops delivering | After 30 failed reads it is closed, `va_stream_reconnects_total` is incremented, and it is reopened with the same backoff. |
 | A video file ends | Its capture thread exits. When the last source has ended, the workers drain the queue and the result queue is stopped. |
-| The model or backend fails to load | The pipeline does not start and the process exits with an error. There is no fallback to CPU. |
+| The model or backend fails to load | The pipeline does not start and the process exits with an error. There is no fallback to CPU. The same holds for the lane model. |
+| A simulation frame has no timestamp | The pipeline stops and the process exits non-zero. |
 | Inference throws | The pipeline stops and the process exits non-zero, so a supervisor restarts it. |
 | A source is connected but no result arrives for 60 s | The watchdog exits the process (`watchdog_seconds`). |
 | A GStreamer pipeline fails | `GstCapture` reads the error from the pipeline's bus and logs the element and the reason; the source is then retried like any other. |

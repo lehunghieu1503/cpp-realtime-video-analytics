@@ -22,6 +22,9 @@ struct PipelineConfig {
   // false: capture waits for room instead of dropping the oldest frame
   // (benchmark mode — every frame is processed)
   bool dropWhenFull = true;
+  // true: a frame without a source timestamp stops the pipeline (simulation,
+  // where that timestamp identifies the simulator's frame)
+  bool requireSourceTimestamp = false;
   // One capture thread per source; frames carry the index as streamId
   std::vector<CaptureConfig> sources;
   InferenceConfig inferenceConfig;

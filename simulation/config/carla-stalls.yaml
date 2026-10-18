@@ -1,0 +1,70 @@
+# The stalls of the car parks, measured on the paint by
+# simulation/stall-dataset.py map: centre x, y, yaw_deg out of the
+# stall towards its aisle, length_m along that direction, width_m
+# between the centres of its dividers. area is the car park's ground.
+# Truth: for the stall model's training labels and for the evaluation.
+# Nothing in the control path reads this file.
+Town05:
+  ground_z: 0.158
+  area: {x: [-39.4, 20.4], y: [-50.03, -9.23]}
+  stalls:
+    - {x: 9.77, y: -18.76, yaw_deg: 0.0, length_m: 5.13, width_m: 2.72}
+    - {x: 9.77, y: -21.56, yaw_deg: 0.0, length_m: 5.13, width_m: 2.88}
+    - {x: 9.77, y: -24.36, yaw_deg: 0.0, length_m: 5.13, width_m: 2.72}
+    - {x: 9.77, y: -27.16, yaw_deg: 0.0, length_m: 5.13, width_m: 2.88}
+    - {x: 9.77, y: -29.94, yaw_deg: 0.0, length_m: 5.13, width_m: 2.68}
+    - {x: 9.77, y: -32.72, yaw_deg: 0.0, length_m: 5.13, width_m: 2.88}
+    - {x: 9.77, y: -35.52, yaw_deg: 0.0, length_m: 5.13, width_m: 2.72}
+    - {x: 9.77, y: -38.33, yaw_deg: 0.0, length_m: 5.13, width_m: 2.88}
+    - {x: 9.77, y: -41.12, yaw_deg: 0.0, length_m: 5.13, width_m: 2.72}
+    - {x: 9.77, y: -43.92, yaw_deg: 0.0, length_m: 5.13, width_m: 2.88}
+    - {x: -6.88, y: -18.76, yaw_deg: 0.0, length_m: 5.03, width_m: 2.72}
+    - {x: -6.88, y: -21.56, yaw_deg: 0.0, length_m: 5.03, width_m: 2.88}
+    - {x: -6.88, y: -24.36, yaw_deg: 0.0, length_m: 5.03, width_m: 2.72}
+    - {x: -6.88, y: -27.16, yaw_deg: 0.0, length_m: 5.03, width_m: 2.88}
+    - {x: -6.88, y: -29.94, yaw_deg: 0.0, length_m: 5.03, width_m: 2.68}
+    - {x: -6.88, y: -32.72, yaw_deg: 0.0, length_m: 5.03, width_m: 2.88}
+    - {x: -6.88, y: -35.52, yaw_deg: 0.0, length_m: 5.03, width_m: 2.72}
+    - {x: -6.88, y: -38.33, yaw_deg: 0.0, length_m: 5.03, width_m: 2.88}
+    - {x: -6.88, y: -41.12, yaw_deg: 0.0, length_m: 5.03, width_m: 2.72}
+    - {x: -6.88, y: -43.92, yaw_deg: 0.0, length_m: 5.03, width_m: 2.88}
+    - {x: -23.03, y: -18.76, yaw_deg: 0.0, length_m: 5.07, width_m: 2.72}
+    - {x: -23.03, y: -21.56, yaw_deg: 0.0, length_m: 5.07, width_m: 2.88}
+    - {x: -23.03, y: -24.36, yaw_deg: 0.0, length_m: 5.07, width_m: 2.72}
+    - {x: -23.03, y: -27.16, yaw_deg: 0.0, length_m: 5.07, width_m: 2.88}
+    - {x: -23.03, y: -29.94, yaw_deg: 0.0, length_m: 5.07, width_m: 2.68}
+    - {x: -23.03, y: -38.35, yaw_deg: 0.0, length_m: 5.07, width_m: 2.93}
+    - {x: -23.03, y: -41.15, yaw_deg: 0.0, length_m: 5.07, width_m: 2.67}
+    - {x: -23.03, y: -43.92, yaw_deg: 0.0, length_m: 5.07, width_m: 2.88}
+    - {x: -23.04, y: -32.72, yaw_deg: 0.0, length_m: 5.05, width_m: 2.88}
+    - {x: -23.04, y: -35.52, yaw_deg: 0.0, length_m: 5.05, width_m: 2.72}
+    - {x: 3.69, y: -18.76, yaw_deg: 180.0, length_m: 4.98, width_m: 2.72}
+    - {x: 3.69, y: -21.56, yaw_deg: 180.0, length_m: 4.98, width_m: 2.88}
+    - {x: 3.69, y: -24.36, yaw_deg: 180.0, length_m: 4.98, width_m: 2.72}
+    - {x: 3.69, y: -27.16, yaw_deg: 180.0, length_m: 4.98, width_m: 2.88}
+    - {x: 3.69, y: -29.94, yaw_deg: 180.0, length_m: 4.98, width_m: 2.68}
+    - {x: 3.69, y: -32.72, yaw_deg: 180.0, length_m: 4.98, width_m: 2.88}
+    - {x: 3.69, y: -35.53, yaw_deg: 180.0, length_m: 4.98, width_m: 2.72}
+    - {x: 3.69, y: -38.33, yaw_deg: 180.0, length_m: 4.98, width_m: 2.88}
+    - {x: 3.69, y: -41.12, yaw_deg: 180.0, length_m: 4.98, width_m: 2.72}
+    - {x: 3.69, y: -43.92, yaw_deg: 180.0, length_m: 4.98, width_m: 2.88}
+    - {x: -12.97, y: -27.16, yaw_deg: 180.0, length_m: 5.1, width_m: 2.88}
+    - {x: -12.97, y: -29.94, yaw_deg: 180.0, length_m: 5.1, width_m: 2.68}
+    - {x: -12.98, y: -21.56, yaw_deg: 180.0, length_m: 5.13, width_m: 2.88}
+    - {x: -12.98, y: -24.36, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}
+    - {x: -12.98, y: -32.72, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -12.98, y: -35.52, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}
+    - {x: -12.98, y: -38.33, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -12.98, y: -41.12, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}
+    - {x: -12.98, y: -43.92, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -12.99, y: -18.75, yaw_deg: 180.0, length_m: 5.15, width_m: 2.73}
+    - {x: -29.13, y: -43.92, yaw_deg: 180.0, length_m: 5.1, width_m: 2.88}
+    - {x: -29.14, y: -18.76, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}
+    - {x: -29.14, y: -21.56, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -29.14, y: -24.36, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}
+    - {x: -29.14, y: -27.16, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -29.14, y: -29.94, yaw_deg: 180.0, length_m: 5.12, width_m: 2.68}
+    - {x: -29.14, y: -32.72, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -29.14, y: -35.52, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}
+    - {x: -29.14, y: -38.33, yaw_deg: 180.0, length_m: 5.12, width_m: 2.88}
+    - {x: -29.14, y: -41.12, yaw_deg: 180.0, length_m: 5.12, width_m: 2.72}

@@ -86,6 +86,12 @@ build/tests/test_latency_tracker
 build/tests/test_sse_server
 build/tests/test_rules
 build/tests/test_inference
+build/tests/test_capture_timestamps
+build/tests/test_lane
+
+# Python: the simulation's geometry, filter, protocol and evaluation
+python3 -m unittest discover -s simulation/test -p 'test_*.py'
+python3 -m unittest discover -s ros2/video_analytics_bridge/test -p 'test_*.py'
 ```
 
 Test structure:
@@ -95,6 +101,20 @@ Test structure:
 - `test_serializer` — JSON serialization, rounding, class name mapping
 - `test_latency_tracker` — Percentile math, report generation
 - `test_sse_server` — SSE event delivery, worker thread release on disconnect
+- `test_capture_timestamps` — 300 JPEG frames through GDP and `jpegdec`: every timestamp and every frame's pixels come back unchanged
+- `test_lane` — lane decoder, calibration and lane geometry against `tests/fixtures/lane-calibration.json`
+- `simulation/test` — calibration, metric tracker, command lease, controller, evaluation
+
+`tests/fixtures/lane-calibration.json` is written by the Python reference
+(`python3 simulation/test/fixtures.py`); the Python
+tests check the file still matches the reference and `test_lane` checks the
+C++ code against the same file. Change lane geometry on both sides and
+regenerate it.
+
+To build the ROS 2 packages: `colcon build --base-paths ros2 simulation`. If it fails in
+`setuptools` with `canonicalize_version() got an unexpected keyword
+argument`, a newer setuptools in `~/.local` is shadowing the system one:
+run it with `PYTHONNOUSERSITE=1`.
 
 ## Docker
 

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "analytics/event.hpp"
+#include "analytics/lane-result.hpp"
+#include "inference/stall-engine.hpp"
 #include "pipeline/frame-data.hpp"
 
 #include <nlohmann/json.hpp>
@@ -11,9 +13,14 @@
 // Serialize AnalyticsResult to compact JSON for SSE streaming
 // Example output:
 // {"frame_id":42,"detections":[{"class":"person","confidence":0.94,
-//   "bbox":{"x":100,"y":50,"w":200,"h":300}}],"latency_ms":35.2,"fps":21.5}
+//   "bbox":{"x":100,"y":50,"w":200,"h":300}}],"latency_ms":35.2,"fps":21.5,
+//   "image":{"width":1280,"height":720}}
+// With a simulation run id, and only for a frame that has a source
+// timestamp, it also carries the identity of the simulator's frame:
+//   "simulation":{"run_id":"r_20261011_ab12","sim_ns":1533333333}
 inline nlohmann::json serializeResult(const AnalyticsResult& result,
-                                       double currentFps) {
+                                       double currentFps,
+                                       const std::string& runId = "") {
   nlohmann::json detections = nlohmann::json::array();
   for (const auto& det : result.detections) {
     nlohmann::json item = {
@@ -31,12 +38,21 @@ inline nlohmann::json serializeResult(const AnalyticsResult& result,
     detections.push_back(std::move(item));
   }
 
-  return {
+  nlohmann::json json = {
       {"frame_id", result.frameId},
       {"detections", detections},
       {"latency_ms", std::round(result.inferenceLatencyMs * 10) / 10},
       {"fps", std::round(currentFps * 10) / 10}
   };
+  if (result.imageWidth > 0 && result.imageHeight > 0) {
+    json["image"] = {{"width", result.imageWidth},
+                     {"height", result.imageHeight}};
+  }
+  if (!runId.empty() && result.sourcePtsNs) {
+    // An integer: nanoseconds must come back exactly as the source sent them
+    json["simulation"] = {{"run_id", runId}, {"sim_ns", *result.sourcePtsNs}};
+  }
+  return json;
 }
 
 // Serialize an event for MQTT and SSE
@@ -58,4 +74,93 @@ inline nlohmann::json serializeEvent(const Event& event) {
   }
   if (!event.snapshot.empty()) json["snapshot"] = event.snapshot;
   return json;
+}
+
+// The lane of a frame, added to the result as "lane". Lengths are metres in
+// the ego frame of the capture (x forward, y right); a lane that is not
+// valid has null instead of numbers, never a made-up value.
+// Example output:
+// {"valid":true,"confidence":0.91,"reason":"","calibration_id":"rig_5a5f...",
+//   "pixels":[[[589,709],...],...],
+//   "left":{"coefficients":[a,b,c],"x_min_m":10.0,"x_max_m":29.6},
+//   "right":{...},"centerline":{...},"reference_x_m":10.0,
+//   "lateral_error_m":0.4,"heading_rad":0.0,"curvature_inv_m":0.0,
+//   "timing_ms":{"pre":1.2,"infer":6.5,"post":0.3}}
+inline nlohmann::json serializeLane(const LaneResult& lane,
+                                     const std::string& calibrationId) {
+  auto curve = [](const LaneCurve& c) {
+    return nlohmann::json{{"coefficients", {c.a, c.b, c.c}},
+                          {"x_min_m", c.xMin},
+                          {"x_max_m", c.xMax}};
+  };
+  nlohmann::json pixels = nlohmann::json::array();
+  for (const auto& points : lane.pixels) {
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& p : points) list.push_back({p.x, p.y});
+    pixels.push_back(std::move(list));
+  }
+  bool finite = std::isfinite(lane.lateralError) &&
+                std::isfinite(lane.heading) && std::isfinite(lane.curvature);
+  bool valid = lane.valid && finite;
+  nlohmann::json json = {
+      {"valid", valid},
+      {"confidence", valid ? std::round(lane.confidence * 1000) / 1000 : 0.0},
+      {"reason", valid ? "" : (lane.valid ? "not_finite" : lane.reason)},
+      {"calibration_id", calibrationId},
+      {"pixels", std::move(pixels)},
+      {"reference_x_m", lane.referenceX},
+      {"timing_ms",
+       {{"pre", std::round(lane.preMs * 100) / 100},
+        {"infer", std::round(lane.inferMs * 100) / 100},
+        {"post", std::round(lane.postMs * 100) / 100}}}};
+  json["left"] = valid ? curve(lane.left) : nlohmann::json();
+  json["right"] = valid ? curve(lane.right) : nlohmann::json();
+  json["centerline"] = valid ? curve(lane.centerline) : nlohmann::json();
+  json["lateral_error_m"] = valid ? nlohmann::json(lane.lateralError) : nlohmann::json();
+  json["heading_rad"] = valid ? nlohmann::json(lane.heading) : nlohmann::json();
+  json["curvature_inv_m"] = valid ? nlohmann::json(lane.curvature) : nlohmann::json();
+  return json;
+}
+
+// The parking stalls of a frame, added to the result as "stalls", and the
+// ends of the dividers between them, added as "stall_points": pixels of the
+// frame, nothing in metres. corners are [x, y, confidence]: the two of the
+// mouth, then the two of the back, around the stall.
+// Example output:
+// [{"class":"empty","confidence":0.93,"bbox":{"x":150,"y":207,"w":460,"h":103},
+//   "corners":[[150.2,302.1,0.98],[508.4,310.0,0.97],[606.3,207.2,0.91],
+//              [466.0,205.4,0.9]]}]
+// [{"class":"mouth","confidence":0.9,"x":150.2,"y":302.1},
+//  {"class":"back","confidence":0.8,"x":466.0,"y":205.4}]
+inline nlohmann::json serializeStalls(const std::vector<StallDetection>& stalls) {
+  nlohmann::json list = nlohmann::json::array();
+  for (const auto& stall : stalls) {
+    nlohmann::json corners = nlohmann::json::array();
+    for (size_t k = 0; k < stall.corners.size(); k++) {
+      corners.push_back({std::round(stall.corners[k].x * 10) / 10.0,
+                         std::round(stall.corners[k].y * 10) / 10.0,
+                         std::round(stall.cornerConfidence[k] * 100) / 100.0});
+    }
+    list.push_back(
+        {{"class", stall.occupied ? "occupied" : "empty"},
+         {"confidence", std::round(stall.confidence * 100) / 100.0},
+         {"bbox",
+          {{"x", static_cast<int>(stall.bbox.x)},
+           {"y", static_cast<int>(stall.bbox.y)},
+           {"w", static_cast<int>(stall.bbox.width)},
+           {"h", static_cast<int>(stall.bbox.height)}}},
+         {"corners", std::move(corners)}});
+  }
+  return list;
+}
+
+inline nlohmann::json serializeStallPoints(const std::vector<StallPoint>& points) {
+  nlohmann::json list = nlohmann::json::array();
+  for (const auto& point : points) {
+    list.push_back({{"class", point.back ? "back" : "mouth"},
+                    {"confidence", std::round(point.confidence * 100) / 100.0},
+                    {"x", std::round(point.at.x * 10) / 10.0},
+                    {"y", std::round(point.at.y * 10) / 10.0}});
+  }
+  return list;
 }

@@ -1,4 +1,5 @@
 #include "tensorrt-backend.hpp"
+#include "cuda-frame.hpp"
 #include "cuda-preprocess.hpp"
 
 #ifdef WITH_NVMM
@@ -233,10 +234,25 @@ struct TensorRtBackend::Impl {
   float* inputDevice = nullptr;
   float* outputDevice = nullptr;
   float* outputHost = nullptr;  // page-locked, so the copy back is direct
-  unsigned char* frameDevice = nullptr;
-  size_t frameCapacity = 0;
+  std::shared_ptr<CudaFrame> uploaded;  // the frame of the last runFrame()
   size_t inputBytes = 0;
   size_t outputBytes = 0;
+
+  // Resizes, reorders and normalises an image on the GPU into the engine's
+  // input; preprocessMs, when given, receives the time since `start`
+  void preprocess(const GpuImage& image, const std::vector<int64_t>& shape,
+                  std::chrono::steady_clock::time_point start,
+                  double* preprocessMs) {
+    cudaPreprocess(image, inputDevice, static_cast<int>(shape[3]),
+                   static_cast<int>(shape[2]), stream);
+    if (preprocessMs) {
+      // Waits for the kernel only to time it; the cost is a few microseconds
+      check(cudaStreamSynchronize(stream), "pre-process");
+      *preprocessMs = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - start)
+                          .count();
+    }
+  }
 
   ~Impl() {
     // The context and engine go before the buffers they point into
@@ -245,7 +261,6 @@ struct TensorRtBackend::Impl {
     runtime.reset();
     cudaFree(inputDevice);
     cudaFree(outputDevice);
-    cudaFree(frameDevice);
     cudaFreeHost(outputHost);
     if (stream) cudaStreamDestroy(stream);
   }
@@ -261,6 +276,7 @@ struct TensorRtBackend::Impl {
 
     reclaimPageCache();
     std::unique_ptr<IBuilder> builder(createInferBuilder(logger));
+    if (!builder) throw std::runtime_error("TensorRT cannot start");
     std::unique_ptr<INetworkDefinition> network(builder->createNetworkV2(0));
     std::unique_ptr<nvonnxparser::IParser> parser(
         nvonnxparser::createParser(*network, logger));
@@ -348,8 +364,22 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   if (!fs::exists(modelPath)) {
     throw std::runtime_error("model file does not exist");
   }
-  std::string plan = readFile(enginePath);
-  if (plan.empty()) {
+  // CUDA is asked first. When it cannot start (seen after a driver fault
+  // that needs a reboot: error 999), TensorRT 11.4 logs the reason and
+  // returns a runtime that is neither null nor an object, and the first
+  // call on it is a segmentation fault.
+  int devices = 0;
+  check(cudaGetDeviceCount(&devices), "CUDA cannot start");
+  if (devices < 1) throw std::runtime_error("CUDA finds no device");
+  // An engine older than its model file was built from the file that one
+  // replaced (a model trained again under the same name): built again
+  std::error_code stale;
+  bool current = fs::exists(enginePath, stale) &&
+                 fs::last_write_time(enginePath, stale) >=
+                     fs::last_write_time(modelPath, stale);
+  std::string plan = current ? readFile(enginePath) : std::string();
+  const bool built = plan.empty();
+  if (built) {
     plan = impl_->build(config, cacheDir);
     std::error_code ec;
     fs::create_directories(cacheDir, ec);
@@ -357,6 +387,7 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   }
 
   impl_->runtime.reset(nvinfer1::createInferRuntime(impl_->logger));
+  if (!impl_->runtime) throw std::runtime_error("TensorRT cannot start");
   impl_->engine.reset(
       impl_->runtime->deserializeCudaEngine(plan.data(), plan.size()));
   if (!impl_->engine) {
@@ -364,18 +395,32 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
                              "; delete it to rebuild");
   }
   impl_->context.reset(impl_->engine->createExecutionContext());
+  if (!impl_->context) {
+    throw std::runtime_error("TensorRT cannot create an execution context");
+  }
 
-  // One input and one output, as the YOLO detectors export
+  // One float32 input and one float32 output, as the YOLO detectors and the
+  // lane model export. Anything else is refused: picking one tensor of
+  // several would run, and return another tensor's numbers.
   const char* inputName = nullptr;
   const char* outputName = nullptr;
+  int inputs = 0, outputs = 0;
   for (int i = 0; i < impl_->engine->getNbIOTensors(); i++) {
     const char* tensor = impl_->engine->getIOTensorName(i);
     bool isInput = impl_->engine->getTensorIOMode(tensor) ==
                    nvinfer1::TensorIOMode::kINPUT;
     (isInput ? inputName : outputName) = tensor;
+    (isInput ? inputs : outputs)++;
+    if (impl_->engine->getTensorDataType(tensor) !=
+        nvinfer1::DataType::kFLOAT) {
+      throw std::runtime_error(std::string("tensor ") + tensor +
+                               " is not float32");
+    }
   }
-  if (!inputName || !outputName) {
-    throw std::runtime_error("the engine needs one input and one output");
+  if (inputs != 1 || outputs != 1) {
+    throw std::runtime_error("the engine has " + std::to_string(inputs) +
+                             " input(s) and " + std::to_string(outputs) +
+                             " output(s); one of each is supported");
   }
   inputShape_ = toVector(impl_->engine->getTensorShape(inputName));
   outputShape_ = toVector(impl_->engine->getTensorShape(outputName));
@@ -404,7 +449,9 @@ TensorRtBackend::TensorRtBackend(const BackendConfig& config)
   inspector->setExecutionContext(impl_->context.get());
   std::string layers = inspector->getEngineInformation(
       nvinfer1::LayerInformationFormat::kJSON);
-  if (!fs::exists(layersPath)) std::ofstream(layersPath) << layers;
+  // Of an engine just built it is written again: the file there may be of
+  // the engine this one replaced
+  if (built || !fs::exists(layersPath)) std::ofstream(layersPath) << layers;
   description_ = "TensorRT " + std::to_string(NV_TENSORRT_MAJOR) + "." +
                  std::to_string(NV_TENSORRT_MINOR) + " engine, " +
                  summarise(layers) + " (details in " + layersPath.string() +
@@ -429,34 +476,28 @@ const float* TensorRtBackend::runFrame(const cv::Mat& bgr,
                                        std::vector<int64_t>& outputShape,
                                        double* preprocessMs) {
   auto start = std::chrono::steady_clock::now();
+  if (bgr.type() != CV_8UC3) {
+    throw std::runtime_error("runFrame() takes an 8-bit BGR frame");
+  }
   // Rows of a cropped Mat are not adjacent in memory
   cv::Mat frame = bgr.isContinuous() ? bgr : bgr.clone();
-  size_t frameBytes = frame.step * frame.rows;
-  if (frameBytes > impl_->frameCapacity) {
-    cudaFree(impl_->frameDevice);
-    impl_->frameDevice = nullptr;
-    check(cudaMalloc(&impl_->frameDevice, frameBytes), "cudaMalloc");
-    impl_->frameCapacity = frameBytes;
-  }
   // The only copy of the image: 8-bit, as captured. Resize, colour order,
-  // scaling and layout all happen on the GPU, into the engine's input.
-  check(cudaMemcpyAsync(impl_->frameDevice, frame.data, frameBytes,
-                        cudaMemcpyHostToDevice, impl_->stream),
+  // scaling and layout all happen on the GPU, into the engine's input, and
+  // the frame stays there for whoever reads it next (uploadedFrame())
+  impl_->uploaded = CudaFrame::create(frame.cols, frame.rows);
+  check(cudaMemcpyAsync(impl_->uploaded->data(), frame.data,
+                        impl_->uploaded->bytes(), cudaMemcpyHostToDevice,
+                        impl_->stream),
         "upload frame");
-  GpuImage image{impl_->frameDevice, frame.cols, frame.rows,
-                 static_cast<int>(frame.step), frame.channels(),
-                 /*redIndex=*/2};
-  cudaPreprocess(image, impl_->inputDevice, static_cast<int>(inputShape_[3]),
-                 static_cast<int>(inputShape_[2]), impl_->stream);
-  if (preprocessMs) {
-    // Waits for the kernel only to time it; the cost is a few microseconds
-    check(cudaStreamSynchronize(impl_->stream), "pre-process");
-    *preprocessMs = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - start)
-                        .count();
-  }
-
+  impl_->preprocess({impl_->uploaded->data(), frame.cols, frame.rows,
+                     impl_->uploaded->pitch(), /*channels=*/3,
+                     /*redIndex=*/2},
+                    inputShape_, start, preprocessMs);
   return infer(outputShape);
+}
+
+std::shared_ptr<DeviceFrame> TensorRtBackend::uploadedFrame() {
+  return impl_->uploaded;
 }
 
 const float* TensorRtBackend::infer(std::vector<int64_t>& outputShape) {
@@ -475,11 +516,18 @@ const float* TensorRtBackend::infer(std::vector<int64_t>& outputShape) {
 const float* TensorRtBackend::runDeviceFrame(
     DeviceFrame& frame, std::vector<int64_t>& outputShape,
     double* preprocessMs) {
+  auto start = std::chrono::steady_clock::now();
+  // Uploaded by a runFrame() or stitched on the GPU: read where it is
+  if (auto* cuda = dynamic_cast<CudaFrame*>(&frame)) {
+    impl_->preprocess({cuda->data(), cuda->width(), cuda->height(),
+                       cuda->pitch(), /*channels=*/3, /*redIndex=*/2},
+                      inputShape_, start, preprocessMs);
+    return infer(outputShape);
+  }
 #ifdef WITH_NVMM
   auto* nvmm = dynamic_cast<NvmmFrame*>(&frame);
   if (!nvmm) return nullptr;
 
-  auto start = std::chrono::steady_clock::now();
   // The driver API below needs this thread's CUDA context, which the
   // runtime API sets up on its first call from a thread
   check(cudaStreamSynchronize(impl_->stream), "stream");

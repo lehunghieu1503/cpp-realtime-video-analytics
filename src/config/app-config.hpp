@@ -1,5 +1,7 @@
 #pragma once
 
+#include "analytics/bev.hpp"
+#include "analytics/lane-geometry.hpp"
 #include "analytics/rules.hpp"
 #include "capture/video-capture.hpp"
 
@@ -10,6 +12,25 @@ struct SourceConfig {
   CaptureConfig capture;
   std::vector<ZoneConfig> zones;
   std::vector<LineConfig> lines;
+  bool lane = false;  // run the lane model on this source
+  bool stall = false;  // run the parking stall model on this source
+};
+
+// The lane model; used by the sources that set `lane: true`
+struct LaneConfig {
+  std::string model;
+  std::string backend;  // empty: the detector's backend
+  std::string precision = "fp16";
+  LaneGeometryConfig geometry;
+};
+
+// The parking stall model; used by the sources that set `stall: true`, and
+// by the bird's-eye view when there is one
+struct StallConfig {
+  std::string model;
+  std::string backend;  // empty: the detector's backend
+  std::string precision = "fp16";
+  float confidence = 0.5f;
 };
 
 struct MqttConfig {
@@ -22,6 +43,14 @@ struct MqttConfig {
   // CA certificate that signed the broker's certificate; set: connect over
   // TLS and verify the broker
   std::string caFile;
+};
+
+// Frames come from a simulator: each result carries the episode's run id and
+// the frame's own timestamp, which together identify the simulator's frame
+struct SimulationConfig {
+  bool enabled = false;
+  // New for every episode; set here or through VA_RUN_ID
+  std::string runId;
 };
 
 // Everything the application can be told. Loaded from a YAML file, then
@@ -38,6 +67,8 @@ struct AppConfig {
   int port = 9001;
   std::string bind = "127.0.0.1";
   bool headless = false;
+  // false: the dashboard's page and video are not served; results still are
+  bool dashboard = true;
   float confidence = 0.5f;
   // Keep only these COCO classes; empty keeps all of them
   std::vector<int> classes;
@@ -57,7 +88,32 @@ struct AppConfig {
   // PEM certificate and key; both set: the dashboard is served over HTTPS
   std::string tlsCert;
   std::string tlsKey;
+  SimulationConfig simulation;
+  LaneConfig lane;
+  StallConfig stall;
+  // The camera of the sources that run the lane model
+  CameraRig calibration;
+  // The view from above of some of the sources; the stall model runs on it
+  BevConfig bev;
 };
+
+// Empty when no source asks for lanes or when everything they need is
+// there: a model and a usable calibration. The reason otherwise.
+std::string checkLane(const AppConfig& config);
+
+// Empty when no source asks for stalls or the stall model is named; the
+// reason otherwise
+std::string checkStall(const AppConfig& config);
+
+// Empty when there is no bird's-eye view or it can be made: its cameras are
+// sources with a usable calibration, and there is a stall model to run on
+// it. The reason otherwise.
+std::string checkBev(const AppConfig& config);
+
+// Empty when the simulation settings can be used; the reason otherwise.
+// A simulation needs a run id and, for every source, a GStreamer pipeline
+// read by the native capture: nothing else delivers the frame's timestamp.
+std::string checkSimulation(const AppConfig& config);
 
 // Fills `config` from a YAML file; keys that are absent keep their value.
 // Returns false after printing the reason when the file cannot be used.
@@ -67,4 +123,5 @@ bool loadConfig(const std::string& path, AppConfig& config);
 // not be written into the config file:
 //   VA_HTTP_USER, VA_HTTP_PASSWORD, VA_TLS_CERT, VA_TLS_KEY,
 //   VA_MQTT_HOST, VA_MQTT_PORT, VA_MQTT_USER, VA_MQTT_PASSWORD, VA_MQTT_CA
+// and the simulation run id from VA_RUN_ID
 void applyEnvironment(AppConfig& config);

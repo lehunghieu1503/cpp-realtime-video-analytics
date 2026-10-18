@@ -23,6 +23,7 @@ jobs:
             build-essential cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
             libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             wget
 
       - name: Install ONNX Runtime
@@ -47,6 +48,18 @@ jobs:
           build/tests/test_sse_server
           build/tests/test_rules
           build/tests/test_inference
+          build/tests/test_capture_timestamps
+          build/tests/test_lane
+          build/tests/test_stall
+          build/tests/test_bev
+
+      # Geometry, filter and protocol code of the simulation; no simulator,
+      # ROS or device is involved
+      - name: Run the Python tests
+        run: |
+          pip install numpy pyyaml opencv-python-headless
+          python3 -m unittest discover -s simulation/test -p 'test_*.py'
+          python3 -m unittest discover -s ros2/video_analytics_bridge/test -p 'test_*.py'
 
   sanitizers:
     runs-on: ubuntu-22.04
@@ -68,6 +81,7 @@ jobs:
             build-essential g++-12 cmake \
             libopencv-dev libeigen3-dev libmosquitto-dev libssl-dev \
             libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             wget
 
       - name: Install ONNX Runtime

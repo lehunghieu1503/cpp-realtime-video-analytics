@@ -3,7 +3,7 @@
 # NPU, Mosquitto, Prometheus and Grafana.
 #
 # Usage: scripts/run-laptop.sh [up|down|logs]    (default: up)
-# Needs models/yolo11s.onnx (scripts/download-model.sh yolo11s) and test
+# Needs models/yolov8n.onnx (scripts/download-model.sh) and test
 # frames under data/videos/. Edit deploy/config/laptop.yaml to change the
 # sources or the backend.
 set -euo pipefail

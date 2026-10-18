@@ -206,6 +206,47 @@ void testBasicAuth() {
   server.stop();
 }
 
+// Test 7: with the dashboard off the page and the video are gone, the
+// results are not
+void testDashboardOff() {
+  std::cout << "\n=== Test 7: Dashboard Off ===\n";
+
+  SseServerConfig config;
+  config.port = kPort + 6;
+  config.dashboard = false;
+  config.metrics = [] { return std::string("va_test 1\n"); };
+  SseServer server(config);
+  server.start();
+  test::assert_true(server.isRunning(), "the server runs without its dashboard");
+
+  httplib::Client client("127.0.0.1", config.port);
+  client.set_read_timeout(0, 500000);
+  auto page = client.Get("/");
+  test::assert_true(page && page->status == 404, "no page");
+  auto video = client.Get("/video");
+  test::assert_true(video && video->status == 404, "no video");
+  auto script = client.Get("/static/app.js");
+  test::assert_true(script && script->status == 404, "no static files");
+
+  cv::Mat frame(48, 64, CV_8UC3, cv::Scalar(0, 255, 0));
+  server.updateFrame(frame);
+  test::assert_true(!server.hasViewers(), "nobody a frame would be drawn for");
+
+  server.broadcast("{\"n\":7}");
+  std::string body;
+  client.Get("/events", [&](const char* data, size_t len) {
+    body.append(data, len);
+    return true;
+  });
+  test::assert_true(body == "data: {\"n\":7}\n\n", "results are still served");
+  auto health = client.Get("/health");
+  test::assert_true(health && health->status == 200, "/health still answers");
+  auto metrics = client.Get("/metrics");
+  test::assert_true(metrics && metrics->status == 200, "/metrics still answers");
+
+  server.stop();
+}
+
 // Test 6: with a certificate and key the server speaks HTTPS only
 void testTls() {
   std::cout << "\n=== Test 6: TLS ===\n";
@@ -263,6 +304,7 @@ int main() {
   testVideoStreamDeliversFrames();
   testBasicAuth();
   testTls();
+  testDashboardOff();
 
   std::cout << "\n==================================================\n";
   std::cout << "Test Summary\n";

@@ -440,6 +440,31 @@ void testBackendParity() {
     test::assert_true(same,
                       "tensorrt-native with CPU pre-processing matches too");
   }
+
+  // The frame it uploaded stays on the GPU, and reading it there gives the
+  // same detections
+  config.devicePreprocess = true;
+  InferenceEngine gpuPath(config);
+  if (gpuPath.isLoaded()) {
+    std::shared_ptr<DeviceFrame> uploaded;
+    auto first = gpuPath.detect(image, nullptr, nullptr, &uploaded);
+    test::assert_true(uploaded && uploaded->width() == image.cols &&
+                          uploaded->height() == image.rows,
+                      "tensorrt-native keeps the frame it uploaded");
+    if (uploaded) {
+      auto again = gpuPath.detect(cv::Mat(), nullptr, uploaded.get());
+      bool same = again.size() == first.size();
+      for (size_t i = 0; same && i < again.size(); i++) {
+        same = again[i].classId == first[i].classId &&
+               again[i].confidence == first[i].confidence;
+      }
+      test::assert_true(same, "The uploaded frame, read in place, gives the "
+                              "same detections");
+      cv::Mat back = uploaded->toBgr();
+      test::assert_true(cv::norm(back, image, cv::NORM_INF) == 0,
+                        "The uploaded frame is the frame");
+    }
+  }
 }
 
 int main() {

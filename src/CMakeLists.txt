@@ -34,12 +34,16 @@ target_compile_options(bytetrack PRIVATE -w)
 
 # Everything except main(), shared by the application and the tests
 add_library(va_core STATIC
+    analytics/bev.cpp
+    analytics/lane-geometry.cpp
     analytics/rules.cpp
     analytics/tracker.cpp
     capture/opencv-capture.cpp
     config/app-config.cpp
     output/mqtt-publisher.cpp
     inference/inference-engine.cpp
+    inference/lane-engine.cpp
+    inference/stall-engine.cpp
     inference/pre-process.cpp
     inference/post-process.cpp
     inference/backends/backend-factory.cpp
@@ -81,7 +85,9 @@ endif()
 
 if(WITH_TENSORRT)
     target_sources(va_core PRIVATE
+        analytics/bev-remap.cu
         inference/backends/tensorrt-backend.cpp
+        inference/backends/cuda-frame.cpp
         inference/backends/cuda-preprocess.cu)
     target_compile_definitions(va_core PUBLIC WITH_TENSORRT)
     target_include_directories(va_core PRIVATE ${TENSORRT_INCLUDE_DIR})

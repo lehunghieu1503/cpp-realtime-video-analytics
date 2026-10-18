@@ -225,6 +225,30 @@ snapshots:
                          "        points: [[1, 2]]\n";
   test::assert_true(!loadConfig(path, other),
                     "Zone with fewer than 3 points is rejected");
+  test::assert_true(!config.simulation.enabled &&
+                        checkSimulation(config).empty(),
+                    "Simulation is off unless asked for");
+  AppConfig sim;
+  std::ofstream(path) << "simulation:\n  enabled: true\n  run_id: r_1\n"
+                         "sources:\n  - id: front\n    gst: \"x ! appsink\"\n";
+  test::assert_true(loadConfig(path, sim) && sim.simulation.enabled &&
+                        sim.simulation.runId == "r_1",
+                    "Simulation settings are read");
+#ifdef WITH_GSTREAMER
+  test::assert_true(checkSimulation(sim).empty(),
+                    "A simulation with a run id and gst sources is accepted");
+  sim.sources[0].capture.gstPipeline.clear();
+  test::assert_true(!checkSimulation(sim).empty(),
+                    "A simulation source without a gst pipeline is rejected");
+  sim.sources[0].capture.gstPipeline = "x ! appsink";
+#endif
+  sim.simulation.runId = "";
+  test::assert_true(!checkSimulation(sim).empty(),
+                    "A simulation without a run id is rejected");
+  sim.simulation.runId = "bad/id";
+  test::assert_true(!checkSimulation(sim).empty(),
+                    "A run id that cannot be a topic name is rejected");
+
   CaptureConfig file;
   file.videoPath = "video.mp4";
   test::assert_true(!file.isLive(), "A video file is not a live source");

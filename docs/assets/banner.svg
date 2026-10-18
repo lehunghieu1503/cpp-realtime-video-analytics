@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-label="Real-time Video Analytics: C++17 pipeline for YOLOv8 with ONNX Runtime and TensorRT">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-label="Edge Perception Stack: C++17, YOLO11 with TensorRT, lane keeping and bird's-eye-view parking, tested in CARLA with ROS 2">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0b1020"/>
@@ -23,13 +23,13 @@
   <rect width="1280" height="420" rx="18" fill="url(#glow)"/>
 
   <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-    <text x="72" y="92" fill="#76e3a0" font-size="20" font-weight="600" letter-spacing="4">C++17 · YOLOv8 · ONNX RUNTIME · TENSORRT</text>
-    <text x="72" y="170" fill="#ffffff" font-size="64" font-weight="800" letter-spacing="-1">Real-time Video Analytics</text>
-    <text x="72" y="218" fill="#b9c4dc" font-size="24">Camera to browser dashboard, multi-threaded, from x86 CPU to Jetson GPU</text>
+    <text x="72" y="92" fill="#76e3a0" font-size="20" font-weight="600" letter-spacing="4">C++17 · YOLO11 · TENSORRT · ROS 2 · CARLA</text>
+    <text x="72" y="170" fill="#ffffff" font-size="64" font-weight="800" letter-spacing="-1">Edge Perception Stack</text>
+    <text x="72" y="218" fill="#b9c4dc" font-size="24">Object detection, lane keeping and bird's-eye-view parking, x86 to Jetson</text>
     <rect x="72" y="244" width="120" height="5" rx="2.5" fill="url(#accent)"/>
   </g>
 
-  <!-- Pipeline: capture, queue, inference, queue, dashboard -->
+  <!-- Pipeline: cameras, detection, lane and stalls, control -->
   <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" text-anchor="middle">
     <g fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.22" stroke-width="1.5">
       <rect x="72" y="296" width="150" height="64" rx="12"/>
@@ -37,12 +37,15 @@
       <rect x="472" y="296" width="150" height="64" rx="12"/>
       <rect x="672" y="296" width="150" height="64" rx="12"/>
     </g>
-    <rect x="472" y="296" width="150" height="64" rx="12" fill="none" stroke="url(#accent)" stroke-width="2.5"/>
+    <rect x="272" y="296" width="150" height="64" rx="12" fill="none" stroke="url(#accent)" stroke-width="2.5"/>
     <g fill="#ffffff">
-      <text x="147" y="334">capture</text>
-      <text x="347" y="334">frame queue</text>
-      <text x="547" y="334">inference ×N</text>
-      <text x="747" y="334">SSE + MJPEG</text>
+      <text x="147" y="334">cameras ×N</text>
+      <text x="347" y="324">YOLO11</text>
+      <text x="347" y="346" font-size="14" fill="#b9c4dc">+ ByteTrack</text>
+      <text x="547" y="324">lane · BEV</text>
+      <text x="547" y="346" font-size="14" fill="#b9c4dc">stalls</text>
+      <text x="747" y="324">ROS 2</text>
+      <text x="747" y="346" font-size="14" fill="#b9c4dc">control</text>
     </g>
     <g stroke="#76e3a0" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
       <path d="M232 328h30m-9-8 9 8-9 8"/>
@@ -51,10 +54,10 @@
     </g>
   </g>
 
-  <!-- Measured headline number -->
+  <!-- Measured headline number: README, Performance, Jetson table -->
   <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="end">
-    <text x="1208" y="318" fill="url(#accent)" font-size="76" font-weight="800">46 FPS</text>
-    <text x="1208" y="350" fill="#b9c4dc" font-size="19">YOLOv8n · TensorRT FP16</text>
-    <text x="1208" y="376" fill="#7f8aa6" font-size="17">Jetson Orin Nano Super, 25 W</text>
+    <text x="1208" y="318" fill="url(#accent)" font-size="76" font-weight="800">182 FPS</text>
+    <text x="1208" y="350" fill="#b9c4dc" font-size="19">YOLO11s · TensorRT INT8</text>
+    <text x="1208" y="376" fill="#7f8aa6" font-size="17">Jetson Orin Nano Super, 14 W</text>
   </g>
 </svg>

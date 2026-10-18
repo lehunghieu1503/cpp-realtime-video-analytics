@@ -54,6 +54,11 @@ public:
     return nullptr;
   }
 
+  // The frame the last runFrame() put in device memory, kept there for
+  // others to read in place instead of uploading it again; null when the
+  // backend keeps none
+  virtual std::shared_ptr<DeviceFrame> uploadedFrame() { return nullptr; }
+
   // Same, for a frame that is already in device memory. Returns nullptr
   // when the backend cannot read that kind of frame in place; the caller
   // then copies it to the CPU.
