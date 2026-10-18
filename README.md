@@ -52,7 +52,7 @@ Prometheus metrics and a Grafana board.
 
 <img src="docs/assets/lane-keeping-curve.jpg" alt="Lane keeping on a curve in Town04 at 47 km/h: the chase camera, and the front camera with the lane the model found drawn in yellow" width="100%"/>
 
-<sub>`simulation/run.sh --scenario lane_curve_right --arm --gui` on the laptop:
+<sub>`simulation/run.sh --scenario lane_curve_right --arm --gui`:
 the lane model's lane (yellow, front camera) and pure pursuit on its
 centreline. At up to 50 km/h the lane was found in 758 frames of 758, its
 centre 0.009 m RMSE from the map's; the vehicle stayed 0.12 m RMSE (0.19 m at
@@ -64,8 +64,8 @@ most) from the lane centre, no marking crossed.</sub>
 |:---:|:---:|:---:|
 | <img src="docs/assets/park-bev-search.jpg" alt="Driving through the car park while the stall model finds the stalls in the bird's-eye view" width="100%"/> | <img src="docs/assets/park-bev-reverse.jpg" alt="Reversing into the chosen stall, drawn in yellow" width="100%"/> | <img src="docs/assets/park-bev-parked.jpg" alt="Parked, parking brake set" width="100%"/> |
 
-<sub>One `show_park_bev --gui` run on the laptop (RTX 5060, CARLA and the
-device on the same GPU): the chase camera, the four vehicle cameras with the
+<sub>One `show_park_bev --gui` run, CARLA and the device on the same
+GPU: the chase camera, the four vehicle cameras with the
 detector's boxes, the bird's-eye view with the stalls found (the chosen one
 in yellow), and the controller's map of the stalls. It ended 0.17 m along
 and 0.06 m beside the stall's axis, 1.0° off, with no collision.</sub>
@@ -75,7 +75,7 @@ and 0.06 m beside the stall's axis, 1.0° off, with no collision.</sub>
 | Area | Setup | Measured |
 |:-----|:------|:---------|
 | Object detection | YOLO11s, `tensorrt-native` INT8, Jetson Orin Nano Super | 182 FPS, 5.5 ms per frame, 14 W, mAP50-95 0.455 |
-| Object detection | YOLO11s FP32 model, `tensorrt-native`, laptop RTX 5060 | 263 FPS, 3.5 ms per frame |
+| Object detection | YOLO11s FP32 model, `tensorrt-native`, x86 PC with an RTX GPU | 263 FPS, 3.5 ms per frame |
 | Lane keeping | `lane_curve_right`, up to 50 km/h | lane found in 100 % of frames; 0.12 m RMSE from the lane centre |
 | Obstacle braking | 8 scenarios at 50 km/h: cars, a truck, people, a cut-in | stopped 6.4 to 11.5 m short, no collision |
 | Bird's-eye-view parking | `show_park_bev`, dead reckoning, 5 runs | 5 of 5 parked, 0.13 to 0.19 m along and 0.04 to 0.06 m beside the stall's axis |
@@ -199,7 +199,7 @@ docker run --rm --device /dev/video0 -v "$(pwd)/models:/app/models:ro" \
 </details>
 
 <details>
-<summary><b>Whole stack in Docker on an x86 laptop (Intel NPU)</b></summary>
+<summary><b>Whole stack in Docker on an x86 machine with an Intel NPU</b></summary>
 
 <br/>
 
@@ -213,8 +213,8 @@ Runs the analytics on the NPU together with Mosquitto, Prometheus and
 Grafana, all bound to `127.0.0.1` (MQTT on port 1884). Sources and backend
 are set in [deploy/config/laptop.yaml](deploy/config/laptop.yaml); it expects
 test frames under `data/videos/`. With yolov8n the NPU holds 4 cameras at 25
-FPS; YOLO11s (change `model:` there) ran at 49.8 FPS on the NPU. `openvino:GPU` does not work in the image on Core Ultra: the
-Ubuntu 22.04 OpenCL driver does not detect Arc graphics.
+FPS; YOLO11s (change `model:` there) ran at 49.8 FPS on the NPU. `openvino:GPU` does not work in the image: its
+Ubuntu 22.04 OpenCL driver does not detect recent Intel Arc iGPUs.
 
 </details>
 
@@ -353,23 +353,23 @@ Past the limit every camera slows together: 8 cameras at 25 FPS on native
 FP16 with 2 workers each get 19 FPS. The second worker helps because
 post-processing then runs in parallel while the GPU serves both.
 
-### Laptop (Intel Core Ultra 9 275HX, RTX 5060)
+### x86 PC (Intel CPU with NPU and iGPU, NVIDIA RTX GPU)
 
 Same model, video and images, built from source. Power is not reported: RAPL
-is readable only by root on this machine, and the laptop's power mode was not
+is readable only by root on the test machine, and its power mode was not
 controlled.
 
 | Backend | Model | FPS | Latency p50 | mAP50-95 |
 |:--------|:------|----:|------------:|---------:|
-| `tensorrt-native` (RTX 5060, TensorRT 11.4) | FP32 ONNX | **262.8** | **3.5 ms** | 0.469 |
+| `tensorrt-native` (TensorRT 11.4) | FP32 ONNX | **262.8** | **3.5 ms** | 0.469 |
 | same, pre-processing on the CPU | FP32 ONNX | 203.6 | 4.9 ms | 0.470 |
 | `openvino:NPU` | FP32 ONNX | 59.7 | 16.4 ms | 0.469 |
 | `openvino:NPU` | INT8 (NNCF) | 40.7 | 24.1 ms | 0.367 |
 | `openvino:CPU` | INT8 (NNCF) | 34.7 | 27.9 ms | 0.397 |
 | `cpu` (ONNX Runtime, 2 workers) | FP32 ONNX | 18.2 | 108.9 ms | 0.470 |
-| `openvino:GPU` (Arc iGPU) | FP32 ONNX | 14.2 | 70.5 ms | 0.470 |
+| `openvino:GPU` (iGPU) | FP32 ONNX | 14.2 | 70.5 ms | 0.470 |
 | `openvino:CPU` | FP32 ONNX | 14.1 | 69.8 ms | 0.470 |
-| `openvino:GPU` (Arc iGPU) | INT8 (NNCF) | 11.8 | 84.6 ms | 0.400 |
+| `openvino:GPU` (iGPU) | INT8 (NNCF) | 11.8 | 84.6 ms | 0.400 |
 
 TensorRT 11 no longer has precision flags: it builds what the model file
 says, so FP16 there means converting the model first
@@ -390,7 +390,7 @@ NPU is the one to use. Each worker uses 4 threads.
 |:-------|-------:|------:|:------------|
 | Talk to TensorRT directly and pre-process in a CUDA kernel | 68.3 FPS | 135.2 FPS | Jetson, YOLO11s FP16 |
 | Read the decoder's buffer in place instead of copying it out | 209% CPU | 70% CPU | Jetson, 1080p H.264 |
-| Stitch the bird's-eye view on the GPU from the frames the detector uploaded, and run the stall model on it there | 7.8 ms | 3.8 ms | per view (4 cameras 1280x720 to 800x800 + stall model), laptop RTX 5060 beside CARLA |
+| Stitch the bird's-eye view on the GPU from the frames the detector uploaded, and run the stall model on it there | 7.8 ms | 3.8 ms | per view (4 cameras 1280x720 to 800x800 + stall model), x86 PC, GPU shared with CARLA |
 | Serve streams round-robin instead of one shared queue | slowest camera: 0.7 FPS | every camera: 13.5 FPS | Jetson, 6 cameras at 25 FPS, 1 worker |
 | Cap ONNX Runtime threads to the available cores | 22.6 FPS | 30.8 FPS | x86 pinned to 6 cores, 2 workers |
 | Size the live frame queue to the worker count | 343 ms | 147 ms | capture-to-result delay, inference at 20 FPS |
