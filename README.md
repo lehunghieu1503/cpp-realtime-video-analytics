@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="Real-time Video Analytics: a C++17 pipeline for YOLOv8 with ONNX Runtime and TensorRT" width="100%"/>
+<img src="docs/assets/banner.svg" alt="A C++17 edge perception stack: object detection, lane keeping and bird's-eye-view parking with TensorRT, tested in CARLA" width="100%"/>
 
 <br/>
 
@@ -22,11 +22,28 @@
 
 ---
 
-Cameras go in; events come out. The pipeline reads any number of video
-sources, runs **YOLO** on a CPU, GPU or NPU, tracks the objects, and raises
-events when they cross a line or enter, leave or linger in a zone. Events
-are published over **MQTT**; video never leaves the device. A browser
-dashboard, Prometheus metrics and a Grafana board come with it.
+A C++17 perception stack for the edge, from cameras to a car that drives and
+parks itself. The device reads any number of video sources, runs **object
+detection** (YOLO with TensorRT FP16, INT8 or FP8, ONNX Runtime or OpenVINO),
+tracks the objects with ByteTrack, finds the **lane** (UFLD) and, from a
+**bird's-eye view** stitched on the GPU out of three cameras, the **parking
+stalls**. In the [CARLA simulation](#carla-simulation) a ROS 2 controller
+uses only those results, joined with the depth and the vehicle's own pose of
+the same frame, to keep the lane, brake for obstacles, overtake and back into
+a free stall; on a Jetson Orin Nano Super the device runs hardware in the
+loop.
+
+<img src="docs/assets/park-bev-reverse.jpg" alt="Autoparking in CARLA: the chase camera, the four vehicle cameras with detections, the bird's-eye view with the stalls the model found and the chosen one in yellow, and the controller's map of the stalls" width="100%"/>
+
+<sub>`simulation/run.sh --scenario show_park_bev --arm --gui`: the vehicle backs
+into the stall it chose (yellow in the bird's-eye view, top right; blue in
+the controller's map below it). It ended 0.17 m along and 0.06 m beside the
+stall's axis, 1.0° off, with no collision.</sub>
+
+The same pipeline works as a video analytics service: it raises events when
+objects cross a line or enter, leave or linger in a zone, publishes them over
+**MQTT** (video never leaves the device), and comes with a browser
+dashboard, Prometheus metrics and a Grafana board.
 
 ```bash
 build/src/video_analytics --config deploy/config/config.yaml
@@ -112,10 +129,11 @@ A [bridge node](#ros-2) publishes each source's detections as
 `vision_msgs/Detection2DArray` and the events as a topic, so the core stays
 free of ROS.
 
-### Drives a simulated car
-With [CARLA](#carla-simulation) on a PC and inference on the Jetson, a second
-model finds the lane and a ROS 2 controller keeps the car in it and brakes
-for what is in its way, every frame joined by the simulator's own timestamp.
+### Drives and parks a simulated car
+With [CARLA](#carla-simulation) on a PC and inference on the Jetson or the
+same PC, a lane model and a stall model on a bird's-eye view feed a ROS 2
+controller that keeps the lane, brakes, overtakes and backs into a free
+stall, every frame joined by the simulator's own timestamp.
 
 </td>
 </tr>
@@ -780,6 +798,15 @@ puts the three images on the ground as one and runs a stall model trained on
 such views. With it the vehicle ended 0.03 to 0.15 m from the stall's centre in
 8 parks of 8, also when it reckons its own pose (the rear camera alone:
 0.18 to 0.57 m, 2 of 3 inside the 0.40 m gate); see `docs/SIMULATION.md`.
+
+| Searching | Backing in | Parked |
+|:---:|:---:|:---:|
+| <img src="docs/assets/park-bev-search.jpg" alt="Driving through the car park while the stall model finds the stalls in the bird's-eye view" width="100%"/> | <img src="docs/assets/park-bev-reverse.jpg" alt="Reversing into the chosen stall, drawn in yellow" width="100%"/> | <img src="docs/assets/park-bev-parked.jpg" alt="Parked, parking brake set" width="100%"/> |
+
+<sub>One `show_park_bev --gui` run on the laptop (RTX 5060, CARLA and the
+device on the same GPU): the chase camera, the four vehicle cameras with the
+detector's boxes, the bird's-eye view with the stalls found (the chosen one
+in yellow), and the controller's map of the stalls.</sub>
 
 The lane model is trained the same way, on 8000 images of Town04 with the
 lane sides its map gives; the input and output are those of the authors'
