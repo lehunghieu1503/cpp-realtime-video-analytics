@@ -787,6 +787,14 @@ simulation/run.sh --scenario show_drive --arm --gui   # Town04, up to 50 km/h
 simulation/run.sh --scenario show_park --arm --gui    # Town05's car park
 ```
 
+<img src="docs/assets/lane-keeping-curve.jpg" alt="Lane keeping on a curve in Town04 at 47 km/h: the chase camera, and the front camera with the lane the model found drawn in yellow" width="70%"/>
+
+<sub>`simulation/run.sh --scenario lane_curve_right --arm --gui` on the laptop:
+the lane model's lane (yellow, front camera) and pure pursuit on its
+centreline. At up to 50 km/h the lane was found in 758 frames of 758, its
+centre 0.009 m RMSE from the map's; the vehicle stayed 0.12 m RMSE (0.19 m at
+most) from the lane centre, no marking crossed.</sub>
+
 To park, the vehicle has a rear camera and a third model on the device: it
 finds the stalls in that camera's image, as the ends of their dividers and
 as empty or occupied. The scenario says where the vehicle starts, never
